@@ -514,11 +514,17 @@ function writeComment(text) {
 
 function writeStockMeta() {
   var wp = getWorkpiece();
+  var dInner = 0;
+  if (hasParameter("stock-diameter-inner")) {
+    dInner = getParameter("stock-diameter-inner");
+  } else if (hasParameter("job:stockDiameterInner")) {
+    dInner = getParameter("job:stockDiameterInner");
+  }
   var stockMeta = {
     zLower    : Number(spatialFormat.format(wp.lower.z)),
     zUpper    : Number(spatialFormat.format(wp.upper.z)),
     rOuter    : Number(spatialFormat.format(wp.upper.x)),
-    rInner    : hasParameter("job:stockDiameterInner") ? Number(spatialFormat.format(getParameter("job:stockDiameterInner") * 0.5)) : 0,
+    rInner    : Number(spatialFormat.format(dInner * 0.5)),
     partZLower: hasParameter("part-lower-z") ? Number(spatialFormat.format(getParameter("part-lower-z"))) : undefined,
     partZUpper: hasParameter("part-upper-z") ? Number(spatialFormat.format(getParameter("part-upper-z"))) : undefined,
     partROuter: hasParameter("part-upper-x") ? Number(spatialFormat.format(getParameter("part-upper-x"))) : undefined

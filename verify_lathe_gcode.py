@@ -206,18 +206,27 @@ def transform_tool_svg(
 ) -> Polygon:
     """Transform a Fusion tool SVG path into the lathe (Z, R) frame at tip (0, 0)."""
     raw_poly = parse_svg_polygon(svg_path)
+    if raw_poly.is_empty or raw_poly.area < 1e-9:
+        return Polygon()
     theta = math.radians(orient_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     comp_x, comp_y = comp
-    is_boring = "boring" in tool_type.lower()
+    tt_lower = tool_type.lower()
+    is_boring = "boring" in tt_lower or "bore" in tt_lower
+    is_drill = "drill" in tt_lower
     r_sign = -1.0 if post == "REAR" else 1.0
 
     def map_pt(pt: Tuple[float, float]) -> Tuple[float, float]:
         x, y = pt
+        if is_drill and abs(orient_deg) < 1e-4:
+            # Fusion exports axial drill profile with:
+            # y = axial length along +Z (from tip at y=0 to shank at y>0)
+            # x = radial offset symmetric around R=0 (x in [-radius, +radius])
+            return (y - comp_y, x - comp_x)
         if is_boring and abs(orient_deg) < 1e-4:
             # Fusion exports lathe boring bars along -Y for shank length and +X for diameter.
             # In lathe frame, shank extends along +Z (out of bore) and towards -R (towards centerline).
-            return (-y + comp_y, -x - comp_x)
+            return (-y + comp_y, -x + comp_x)
         x_rot = x * cos_t - y * sin_t
         y_rot = x * sin_t + y * cos_t
         return (x_rot - comp_x, r_sign * (y_rot - comp_y))
@@ -280,6 +289,8 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
                 tinfo = (ttype + " " + tool_comments.get(tnum, "") + " " + data.get("name", "")).lower()
                 if "boring" in tinfo or "bore" in tinfo:
                     ttype = "boring"
+                elif "drill" in tinfo:
+                    ttype = "drill"
                 cutter = transform_tool_svg(
                     data["cutterSVG"], data["orientDeg"], comp, data["post"], tool_type=ttype
                 )
@@ -324,6 +335,10 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
             for g_val in g_codes:
                 if g_val in (0, 1, 2, 3):
                     motion = f"G{g_val}"
+                elif g_val in (32, 33, 73, 76, 81, 82, 83, 84, 85, 86, 87, 88, 89):
+                    motion = "G1"  # Canned drilling/boring and threading cycles feed into stock
+                elif g_val == 80:
+                    motion = "G0"  # Canned cycle cancel
                 elif g_val in (98, 99):
                     feed_mode = g_val
                 elif g_val in (96, 97):
@@ -402,6 +417,17 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
 
     if stock_cfg is None:
         raise ValueError("Missing ;META_STOCK comment in CNC file.")
+
+    if stock_cfg.r_inner <= 1e-4 and ops and all("boring" in op.tool_type.lower() or "bore" in op.name.lower() for op in ops):
+        inner_entries = [
+            min(m.start[1], m.end[1])
+            for m in moves
+            if m.start[0] < stock_cfg.z_upper and m.end[0] < stock_cfg.z_upper and min(m.start[1], m.end[1]) > 0.05
+        ]
+        if inner_entries:
+            min_r = min(inner_entries)
+            stock_cfg.r_inner = round(min_r * 8.0) / 8.0
+
     return stock_cfg, ops, moves
 
 
@@ -508,19 +534,25 @@ class LatheSimulator:
             if not chuck_hit.is_empty and chuck_hit.area > 1e-6:
                 self._record_collision(mv, "CHUCK", chuck_hit)
 
-            # 2. Holder vs. IPW check
             core_stock = self.ipw.buffer(-clearance_tol)
-            holder_hit = swept_holder.intersection(core_stock)
-            if not holder_hit.is_empty and holder_hit.area > 1e-6:
-                self._record_collision(mv, "HOLDER_STOCK", holder_hit)
 
-            # 3. Handle G0 rapid
+            # 2. Handle G0 rapid
             if mv.motion == "G0":
                 rapid_hit = swept_cutter.intersection(core_stock)
                 if not rapid_hit.is_empty and rapid_hit.area > 1e-6:
                     self._record_collision(mv, "RAPID_STOCK", rapid_hit)
+                holder_hit = swept_holder.intersection(core_stock)
+                if not holder_hit.is_empty and holder_hit.area > 1e-6:
+                    self._record_collision(mv, "HOLDER_STOCK", holder_hit)
                 self._record_mrr_step(mv, op.tool, mv.start, mv.end, 0.0, 0.0)
                 continue
+
+            # 3. Holder vs. IPW check for G1: filter out trailing wake inside swept_cutter
+            holder_hit = swept_holder.intersection(core_stock)
+            if not holder_hit.is_empty and holder_hit.area > 1e-6:
+                outside_wake = holder_hit.difference(swept_cutter.buffer(0.001))
+                if not outside_wake.is_empty and outside_wake.area > 1e-6:
+                    self._record_collision(mv, "HOLDER_STOCK", outside_wake)
 
             # 4. Check if linear G1 move is collision-free in air (>= promote_margin)
             if not mv.is_arc and dist >= min_promote_len:
