@@ -816,6 +816,7 @@ def PerformPostProcess(docSettings, setups):
         cntFiles = 0
         cntSkipped = 0
         lstSkipped = ""
+        verifyResults.clear()
 
         program = GetNcProgram(cam, docSettings);
         parameters = program.parameters
@@ -961,6 +962,8 @@ def PerformPostProcess(docSettings, setups):
                 constCmdName, 
                 adsk.core.MessageBoxButtonTypes.OKButtonType,
                 adsk.core.MessageBoxIconTypes.WarningIconType)
+
+        ShowVerifyResults(ui)
             
 
     except:
@@ -968,6 +971,37 @@ def PerformPostProcess(docSettings, setups):
             progress.hide()
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+
+# Per-run list of lathe verification summaries, shown in a modal dialog at the end
+verifyResults = []
+
+
+def _RecordVerifyResult(setup, cncPath, reportText, promoted=None, spikes=None, collisions=None, error=None):
+    basePath = os.path.splitext(cncPath)[0]
+    reportPath = basePath + "_report.txt"
+    try:
+        with open(reportPath, "w", encoding="utf8") as f:
+            f.write(reportText)
+    except Exception:
+        reportPath = None
+    kinds = {}
+    for c in (collisions or []):
+        kinds[c.kind] = kinds.get(c.kind, 0) + 1
+    verifyResults.append({
+        "setup": setup.name,
+        "cnc": cncPath,
+        "png": basePath + "_verification.png",
+        "report": reportPath,
+        "promoted": promoted,
+        "spikes": spikes,
+        "kinds": kinds,
+        "error": error,
+    })
+    try:
+        adsk.core.Application.get().log(f"[PostProcessAll] {setup.name}:\n{reportText}")
+    except Exception:
+        pass
+
 
 def RunLatheVerifier(cncPath, setup, docSettings):
     if setup is None or setup.operationType != adsk.cam.OperationTypes.TurningOperation:
@@ -983,27 +1017,23 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             return None
 
         promote = bool(docSettings.get("fastZ", False))
-        import sys, importlib
+        import sys, importlib, contextlib
         if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
             sys.path.insert(0, constPackagesDir)
         if constAddonDir not in sys.path:
             sys.path.insert(0, constAddonDir)
         import verify_lathe_gcode
         importlib.reload(verify_lathe_gcode)
-        basePath = os.path.splitext(cncPath)[0]
-        pngPath = basePath + "_verification.png"
-        csvPath = basePath + "_mrr.csv"
+
         if getattr(verify_lathe_gcode, "_HAS_DEPS", False):
-            collisions, candidates, _ = verify_lathe_gcode.verify_and_promote(cncPath, promote=promote)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                collisions, promoted, spikes = verify_lathe_gcode.verify_and_promote(cncPath, promote=promote)
             stockCols = [c for c in collisions if c.kind in ("RAPID_STOCK", "HOLDER_STOCK")]
-            if stockCols:
-                return f"Lathe verifier detected {len(stockCols)} stock/holder collision(s) in {os.path.basename(cncPath)}!"
-            try:
-                adsk.core.Application.get().log(
-                    f"[PostProcessAll] Verified {cncPath} (promoted {len(candidates) if promote else 0} G0 moves) -> {pngPath}, {csvPath}"
-                )
-            except Exception:
-                pass
+            err = f"{len(stockCols)} stock/holder collision(s)!" if stockCols else None
+            _RecordVerifyResult(setup, cncPath, buf.getvalue(), len(promoted), len(spikes), collisions, err)
+            if err:
+                return f"Lathe verifier detected {err} in {os.path.basename(cncPath)}"
             return None
 
         # Fallback to isolated venv subprocess if in-process binary extensions could not load
@@ -1019,19 +1049,56 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             cmd.append("--no-promote")
         cleanEnv = {
             k: v for k, v in os.environ.items()
-            if not k.startswith("PYTHON") and k not in (" DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
+            if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
         }
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=cleanEnv)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
+        err = None
         if proc.returncode != 0:
-            details = (proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}")
-            return f"Lathe verifier reported an error or collision on {os.path.basename(cncPath)}:\n{details}"
-        try:
-            adsk.core.Application.get().log(f"[PostProcessAll] Verified {cncPath} -> {pngPath}, {csvPath}")
-        except Exception:
-            pass
+            err = (proc.stderr.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+        _RecordVerifyResult(setup, cncPath, proc.stdout + proc.stderr, error=err)
+        if err:
+            return f"Lathe verifier reported an error or collision on {os.path.basename(cncPath)}: {err}"
         return None
     except Exception as exc:
         return f"Lathe verifier failed on {os.path.basename(cncPath)}: {exc}"
+
+
+def ShowVerifyResults(ui):
+    if not verifyResults:
+        return
+    lines = []
+    for r in verifyResults:
+        status = "FAILED: " + r["error"] if r["error"] else "OK"
+        lines.append(f"{r['setup']}: {status}")
+        if r["promoted"] is not None:
+            lines.append(f"    G1 -> G0 promoted: {r['promoted']}")
+        if r["spikes"] is not None:
+            lines.append(f"    MRR spikes flagged: {r['spikes']}")
+        for kind, n in sorted(r["kinds"].items()):
+            lines.append(f"    {kind}: {n}")
+        lines.append(f"    G-code: {r['cnc']}")
+        if os.path.isfile(r["png"]):
+            lines.append(f"    Plot:   {r['png']}")
+        if r["report"]:
+            lines.append(f"    Report: {r['report']}")
+        lines.append("")
+    lines.append("Open the verification plot(s) and report(s) now?")
+    res = ui.messageBox("\n".join(lines),
+                        constCmdName + " - Lathe Verification",
+                        adsk.core.MessageBoxButtonTypes.YesNoButtonType,
+                        adsk.core.MessageBoxIconTypes.InformationIconType)
+    if res == adsk.core.DialogResults.DialogYes:
+        opener = "open" if os.name == "posix" else None
+        for r in verifyResults:
+            for p in (r["png"], r["report"]):
+                if p and os.path.isfile(p):
+                    try:
+                        if opener:
+                            subprocess.Popen([opener, p])
+                        else:
+                            os.startfile(p)
+                    except Exception:
+                        pass
 
 
 def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
