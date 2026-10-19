@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -984,17 +984,26 @@ def RunLatheVerifier(cncPath, setup, docSettings):
 
         promote = bool(docSettings.get("fastZ", False))
         import sys, importlib
-        if os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
+        if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
             sys.path.insert(0, constPackagesDir)
         if constAddonDir not in sys.path:
             sys.path.insert(0, constAddonDir)
         import verify_lathe_gcode
         importlib.reload(verify_lathe_gcode)
+        basePath = os.path.splitext(cncPath)[0]
+        pngPath = basePath + "_verification.png"
+        csvPath = basePath + "_mrr.csv"
         if getattr(verify_lathe_gcode, "_HAS_DEPS", False):
-            collisions, _, _ = verify_lathe_gcode.verify_and_promote(cncPath, promote=promote)
+            collisions, candidates, _ = verify_lathe_gcode.verify_and_promote(cncPath, promote=promote)
             stockCols = [c for c in collisions if c.kind in ("RAPID_STOCK", "HOLDER_STOCK")]
             if stockCols:
                 return f"Lathe verifier detected {len(stockCols)} stock/holder collision(s) in {os.path.basename(cncPath)}!"
+            try:
+                adsk.core.Application.get().log(
+                    f"[PostProcessAll] Verified {cncPath} (promoted {len(candidates) if promote else 0} G0 moves) -> {pngPath}, {csvPath}"
+                )
+            except Exception:
+                pass
             return None
 
         # Fallback to isolated venv subprocess if in-process binary extensions could not load
@@ -1016,6 +1025,10 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         if proc.returncode != 0:
             details = (proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}")
             return f"Lathe verifier reported an error or collision on {os.path.basename(cncPath)}:\n{details}"
+        try:
+            adsk.core.Application.get().log(f"[PostProcessAll] Verified {cncPath} -> {pngPath}, {csvPath}")
+        except Exception:
+            pass
         return None
     except Exception as exc:
         return f"Lathe verifier failed on {os.path.basename(cncPath)}: {exc}"
@@ -1040,7 +1053,10 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         path = setupFolder + "/" + fname + fileExt
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
-            fileHead = open(path, "w")
+            with open(path, "w", encoding="utf8"):
+                pass
+            if docSettings["splitSetup"]:
+                os.remove(path)
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
         
@@ -1050,13 +1066,10 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
             while not genStat.isGenerationCompleted:
                 time.sleep(.1)
 
-        # set up NCProgram parameters
+        # Post directly to setupFolder/fname so Fusion's toast notification links to the real output file
         opName = fname
         opFolder = setupFolder
-        if docSettings["splitSetup"]:
-            opName = constOpTmpFile
-            opFolder = tempfile.gettempdir()    # e.g., C:\Users\Tim\AppData\Local\Temp
-            opFolder = opFolder.replace("\\", "/")
+        tmpFolder = tempfile.gettempdir().replace("\\", "/")
 
         parameters.itemByName("nc_program_openInEditor").value.value = False
         AssignOutputFolder(parameters, opFolder)
@@ -1065,7 +1078,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
 
         # Do it all at once?
         if not docSettings["splitSetup"]:
-            fileHead.close()
             try:
                 program.operations = [setup]
                 if not program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()):
@@ -1077,8 +1089,9 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                 return retVal
 
         # Split setup into individual operations
-        opPath = opFolder + "/" + opName + fileExt
-        fileBody = open(opFolder + "/" + constBodyTmpFile + fileExt, "w")
+        opPath = path
+        fileHead = io.StringIO()
+        fileBody = open(tmpFolder + "/" + constBodyTmpFile + fileExt, "w", encoding="utf8")
         fFirst = True
         fBlankOk = False
         lineNum = 10
@@ -1290,16 +1303,16 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                 else:
                     fileBody.write(code)
 
-        # Copy body to head
+        # Write combined header + body to final output path
         fileBody.close()
-        fileBody = open(fileBody.name)  # open for reading
-        # copy in chunks
-        while True:
-            block = fileBody.read(10240)
-            if len(block) == 0:
-                break
-            fileHead.write(block)
-            block = None    # free memory
+        fileBody = open(fileBody.name, "r", encoding="utf8", errors="replace")
+        with open(path, "w", encoding="utf8") as outFile:
+            outFile.write(fileHead.getvalue())
+            while True:
+                block = fileBody.read(10240)
+                if len(block) == 0:
+                    break
+                outFile.write(block)
         fileBody.close()
         os.remove(fileBody.name)
         fileBody = None
@@ -1312,7 +1325,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         if fileHead:
             try:
                 fileHead.close()
-                os.remove(fileHead.name)
             except:
                 pass
 
