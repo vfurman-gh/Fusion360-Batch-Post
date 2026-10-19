@@ -115,6 +115,14 @@ class CollisionEvent:
     max_depth: float
     location: Tuple[float, float]
     raw_line: str
+    t_sec: float = 0.0          # machining time at the start of the offending move
+
+
+# Plot styles for real collisions: kind -> (color, marker, legend description)
+COLLISION_STYLES: Dict[str, Tuple[str, str, str]] = {
+    "RAPID_STOCK": ("#d50000", "x", "Rapid (G0) insert into stock"),
+    "HOLDER_STOCK": ("#8e24aa", "X", "Toolholder into stock"),
+}
 
 
 @dataclass
@@ -581,6 +589,7 @@ class LatheSimulator:
                 max_depth=max(b[2] - b[0], b[3] - b[1]),
                 location=(c.x, c.y),
                 raw_line=mv.raw_line,
+                t_sec=self.elapsed_sec,
             )
         )
 
@@ -777,9 +786,17 @@ def plot_verification(
         lbl = "MRR Spike Location" if idx == 0 else None
         ax_geo.plot(sp.z, sp.r, "o", color="#e65100", markersize=5.5, markeredgecolor="black", label=lbl)
 
-    stock_cols = [c for c in sim.collisions if c.kind in ("RAPID_STOCK", "HOLDER_STOCK")]
+    stock_cols = [c for c in sim.collisions if c.kind in COLLISION_STYLES]
+    labeled_kinds: Set[str] = set()
     for col in stock_cols:
-        ax_geo.plot(col.location[0], col.location[1], "rx", markersize=10, markeredgewidth=2.5)
+        color, marker, desc = COLLISION_STYLES[col.kind]
+        lbl = None
+        if col.kind not in labeled_kinds:
+            labeled_kinds.add(col.kind)
+            n = sum(1 for c in stock_cols if c.kind == col.kind)
+            lbl = f"COLLISION: {desc} ({n})"
+        ax_geo.plot(col.location[0], col.location[1], marker, color=color,
+                    markersize=10, markeredgewidth=2.5, linestyle="none", label=lbl, zorder=8)
 
     ax_geo.axhline(0, color="black", linestyle="-.", linewidth=0.8, label="Spindle Centerline (X=0)")
     ax_geo.set_xlim(sim.stock_cfg.z_lower - 0.5, sim.stock_cfg.z_upper + 0.6)
@@ -837,12 +854,33 @@ def plot_verification(
             zorder=7,
         )
 
+    # Mark collisions on the timeline: vertical line + marker along the top edge
+    labeled_kinds = set()
+    annotated_lines: List[int] = []
+    for col in sorted(stock_cols, key=lambda c: c.t_sec):
+        color, marker, desc = COLLISION_STYLES[col.kind]
+        lbl = None
+        if col.kind not in labeled_kinds:
+            labeled_kinds.add(col.kind)
+            lbl = f"COLLISION: {desc}"
+        ax_mrr.axvline(col.t_sec, color=color, linestyle="-", linewidth=1.0, alpha=0.6, zorder=6)
+        ax_mrr.plot(col.t_sec, y_max * 0.96, marker, color=color, markersize=9,
+                    markeredgewidth=2.2, linestyle="none", label=lbl, zorder=8)
+        if col.line_no not in annotated_lines and len(annotated_lines) < 12:
+            k = len(annotated_lines)
+            annotated_lines.append(col.line_no)
+            ax_mrr.annotate(f"L{col.line_no}", xy=(col.t_sec, y_max * 0.96), xytext=(6, -12 - 10 * (k % 4)),
+                            textcoords="offset points", fontsize=6.5, color=color, weight="bold", zorder=8)
+
     total_time = max(1.0, sim.elapsed_sec)
     ax_mrr.set_xlim(0, total_time)
     ax_mrr.set_ylim(0, y_max)
     ax_mrr.set_xlabel("Machining Time (seconds)", labelpad=6)
     ax_mrr.set_ylabel("MRR (in³ / min)")
-    ax_mrr.set_title(f"Material Removal Rate (MRR) Time-Series — Flagged Spike Lines: {len(spikes)}", pad=10)
+    ax_mrr.set_title(
+        f"Material Removal Rate (MRR) Time-Series — Flagged Spike Lines: {len(spikes)} | Collisions: {len(stock_cols)}",
+        pad=10,
+    )
     ax_mrr.legend(loc="upper right", fontsize=8, framealpha=0.9)
     ax_mrr.grid(True, linestyle=":", alpha=0.5, zorder=1)
 

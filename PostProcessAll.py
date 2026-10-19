@@ -1088,17 +1088,40 @@ def ShowVerifyResults(ui):
                         adsk.core.MessageBoxButtonTypes.YesNoButtonType,
                         adsk.core.MessageBoxIconTypes.InformationIconType)
     if res == adsk.core.DialogResults.DialogYes:
-        opener = "open" if os.name == "posix" else None
+        failures = []
         for r in verifyResults:
             for p in (r["png"], r["report"]):
-                if p and os.path.isfile(p):
-                    try:
-                        if opener:
-                            subprocess.Popen([opener, p])
-                        else:
-                            os.startfile(p)
-                    except Exception:
-                        pass
+                if not (p and os.path.isfile(p)):
+                    continue
+                err = _OpenFile(p)
+                if err:
+                    failures.append(f"{p}: {err}")
+        if failures:
+            ui.messageBox("Could not open:\n" + "\n".join(failures), constCmdName,
+                          adsk.core.MessageBoxButtonTypes.OKButtonType,
+                          adsk.core.MessageBoxIconTypes.WarningIconType)
+
+
+def _OpenFile(path):
+    """Open a file in the OS viewer. Returns None on success or an error string."""
+    try:
+        if os.name != "posix":
+            os.startfile(path)
+            return None
+        # Strip Fusion's embedded-Python/dyld variables so LaunchServices helpers start cleanly
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "DYLD_"))}
+        attempts = [["open", path]]
+        if path.lower().endswith(".png"):
+            attempts.insert(0, ["open", "-a", "Preview", path])
+        last = ""
+        for cmd in attempts:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+            if proc.returncode == 0:
+                return None
+            last = (proc.stderr or proc.stdout).strip() or f"exit code {proc.returncode}"
+        return last
+    except Exception as exc:
+        return str(exc)
 
 
 def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
