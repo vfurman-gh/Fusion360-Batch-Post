@@ -73,6 +73,7 @@ class OperationMeta:
     comp: Tuple[float, float]
     cutter_poly: Polygon
     holder_poly: Polygon
+    tool_type: str = ""
 
 
 @dataclass
@@ -201,17 +202,22 @@ def _sample_svg_arc(
 
 
 def transform_tool_svg(
-    svg_path: str, orient_deg: float, comp: Tuple[float, float], post: str
+    svg_path: str, orient_deg: float, comp: Tuple[float, float], post: str, tool_type: str = ""
 ) -> Polygon:
     """Transform a Fusion tool SVG path into the lathe (Z, R) frame at tip (0, 0)."""
     raw_poly = parse_svg_polygon(svg_path)
     theta = math.radians(orient_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     comp_x, comp_y = comp
+    is_boring = "boring" in tool_type.lower()
     r_sign = -1.0 if post == "REAR" else 1.0
 
     def map_pt(pt: Tuple[float, float]) -> Tuple[float, float]:
         x, y = pt
+        if is_boring and abs(orient_deg) < 1e-4:
+            # Fusion exports lathe boring bars along -Y for shank length and +X for diameter.
+            # In lathe frame, shank extends along +Z (out of bore) and towards -R (towards centerline).
+            return (-y + comp_y, -x - comp_x)
         x_rot = x * cos_t - y * sin_t
         y_rot = x * sin_t + y * cos_t
         return (x_rot - comp_x, r_sign * (y_rot - comp_y))
@@ -238,12 +244,19 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
     max_rpm = 2000.0
     cur_z, cur_r = 3.0, 2.0
     has_z, has_r = False, False
+    tool_comments: Dict[int, str] = {}
 
     with open(filepath, "r") as f:
         for line_no, raw in enumerate(f, start=1):
             line = raw.strip()
             if not line:
                 continue
+
+            # Parse tool table comments like: ;T0606 NR=0.008 - ZMIN=-3.3984 - BORING TURNING
+            m_tcomm = re.match(r"^;\s*T(\d+)\s+.*-\s*([^;\n]+)$", line, re.IGNORECASE)
+            if m_tcomm:
+                t_num = int(m_tcomm.group(1)) // 100
+                tool_comments[t_num] = m_tcomm.group(2).strip().lower()
 
             if line.startswith(";META_STOCK:"):
                 data = json.loads(line.split(":", 1)[1])
@@ -261,11 +274,17 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
             if line.startswith(";META_OP:"):
                 data = json.loads(line.split(":", 1)[1])
                 comp = (data["comp"][0], data["comp"][1])
+                ttype = data.get("toolType", "")
+                tnum = data.get("tool", 0)
+                # Fallback: if toolType missing from header, infer from tool comments or op name
+                tinfo = (ttype + " " + tool_comments.get(tnum, "") + " " + data.get("name", "")).lower()
+                if "boring" in tinfo or "bore" in tinfo:
+                    ttype = "boring"
                 cutter = transform_tool_svg(
-                    data["cutterSVG"], data["orientDeg"], comp, data["post"]
+                    data["cutterSVG"], data["orientDeg"], comp, data["post"], tool_type=ttype
                 )
                 holder = transform_tool_svg(
-                    data["holderSVG"], data["orientDeg"], comp, data["post"]
+                    data["holderSVG"], data["orientDeg"], comp, data["post"], tool_type=ttype
                 )
                 holder_clean = holder.difference(cutter.buffer(0.0015))
                 op = OperationMeta(
@@ -280,6 +299,7 @@ def parse_cnc_file(filepath: str) -> Tuple[StockConfig, List[OperationMeta], Lis
                     comp=comp,
                     cutter_poly=cutter,
                     holder_poly=holder_clean,
+                    tool_type=ttype,
                 )
                 ops.append(op)
                 current_op_name = op.name
@@ -439,12 +459,17 @@ class LatheSimulator:
         self.stock_cfg = stock_cfg
         self.ops_by_name: Dict[str, OperationMeta] = {op.name: op for op in ops}
 
-        self.initial_stock = Polygon([
-            (stock_cfg.z_lower, -stock_cfg.r_outer),
-            (stock_cfg.z_upper, -stock_cfg.r_outer),
-            (stock_cfg.z_upper, stock_cfg.r_outer),
-            (stock_cfg.z_lower, stock_cfg.r_outer),
-        ])
+        if stock_cfg.r_inner > 1e-4:
+            upper_stock = box(stock_cfg.z_lower, stock_cfg.r_inner, stock_cfg.z_upper, stock_cfg.r_outer)
+            lower_stock = box(stock_cfg.z_lower, -stock_cfg.r_outer, stock_cfg.z_upper, -stock_cfg.r_inner)
+            self.initial_stock = unary_union([upper_stock, lower_stock])
+        else:
+            self.initial_stock = Polygon([
+                (stock_cfg.z_lower, -stock_cfg.r_outer),
+                (stock_cfg.z_upper, -stock_cfg.r_outer),
+                (stock_cfg.z_upper, stock_cfg.r_outer),
+                (stock_cfg.z_lower, stock_cfg.r_outer),
+            ])
         self.ipw = self.initial_stock
         self.upper_half = box(stock_cfg.z_lower - 5.0, 0.0, stock_cfg.z_upper + 5.0, stock_cfg.r_outer + 5.0)
 

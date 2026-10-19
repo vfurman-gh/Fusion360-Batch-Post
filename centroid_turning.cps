@@ -540,6 +540,7 @@ function writeOperationMeta() {
     hand        : tool.hand || "",
     noseR       : Number(spatialFormat.format(tool.noseRadius || 0)),
     comp        : [Number(comp.x.toFixed(6)), Number(comp.y.toFixed(6))],
+    toolType    : (tool.type != undefined) ? getToolTypeName(tool.type) : "",
     cutterSVG   : tool.getCutterProfileAsSVGPath ? tool.getCutterProfileAsSVGPath() : "",
     holderSVG   : tool.getHolderProfileAsSVGPath ? tool.getHolderProfileAsSVGPath() : ""
   };
