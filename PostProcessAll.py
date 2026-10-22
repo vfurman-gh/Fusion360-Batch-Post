@@ -5,7 +5,7 @@ import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, t
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
-version = 12
+version = 13
 
 # Initial default values of settings
 defaultSettings = {
@@ -19,6 +19,7 @@ defaultSettings = {
     "splitSetup" : False,
     "combineTool" : False,
     "fastZ" : True,
+    "fastZHeuristic" : True,
     "verifyGcode" : True,
     "toolChange" : "M9 G30",
     "numericName" : False,
@@ -48,6 +49,14 @@ constSettingsFileExt = ".settings"
 constPostLoopDelay = 0.1
 constBodyTmpFile = "gcodeBody"
 constOpTmpFile = "8910"   # in case name must be numeric
+constRapidZgcode = 'G00 Z{} (Changed from: "{}")\n'
+constRapidXYgcode = 'G00 {} (Changed from: "{}")\n'
+constFeedZgcode = 'G01 Z{} F{} (Changed from: "{}")\n'
+constFeedXYgcode = 'G01 {} F{} (Changed from: "{}")\n'
+constFeedXYZgcode = 'G01 {} Z{} F{} (Changed from: "{}")\n'
+constAddFeedGcode = " F{} (Feed rate added)\n"
+constMotionGcodeSet = {0,1,2,3,33,38,73,76,80,81,82,84,85,86,87,88,89}
+constHomeGcodeSet = {28, 30}
 constLineNumInc = 5
 constNcProgramName = "PostProcessAll NC Program"
 constAddonDir = os.path.dirname(os.path.abspath(__file__))
@@ -176,6 +185,8 @@ class SettingsManager:
             if dst["homeEndsOp"] and not ("endCodes" in dst):
                 dst["endCodes"] = "M5 M9 M30 G28 G30"
             del dst["homeEndsOp"]
+        if "fastZHeuristic" not in dst:
+            dst["fastZHeuristic"] = dst.get("fastZ", True)
         for item in src:
             if not (item in dst):
                 dst[item] = src[item]
@@ -265,6 +276,20 @@ def GetSetups(cam, settings, setups):
     return setups
 
 
+def GetSetupTypes(cam, selectedSetups, onlySelected):
+    """Determine if non-suppressed turning and/or milling setups exist in the target set."""
+    targetSetups = selectedSetups if (onlySelected and len(selectedSetups) != 0) else cam.setups
+    hasTurning = any(
+        not s.isSuppressed and s.operationType == adsk.cam.OperationTypes.TurningOperation
+        for s in targetSetups
+    )
+    hasMilling = any(
+        not s.isSuppressed and s.operationType == adsk.cam.OperationTypes.MillingOperation
+        for s in targetSetups
+    )
+    return hasTurning, hasMilling
+
+
 def GetNcProgram(cam, settings):
     for program in cam.ncPrograms:
         if program.name == settings["ncProgram"]:
@@ -315,14 +340,14 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType(constCAMProductId))
             docSettings  = settingsMgr.GetSettings(app.activeDocument.attributes)
 
-            # See if we're doing only selected setups and whether any turning setups exist
+            # See if we're doing only selected setups and whether any turning or milling setups exist
             selectedSetups = []
-            hasTurningSetup = False
             for setup in cam.setups:
                 if setup.isSelected:
                     selectedSetups.append(setup)
-                if not setup.isSuppressed and setup.operationType == adsk.cam.OperationTypes.TurningOperation:
-                    hasTurningSetup = True
+            hasTurningSetup, hasMillingSetup = GetSetupTypes(
+                cam, selectedSetups, docSettings.get("onlySelected", False)
+            )
 
             # Get the NCProgram
             programs = cam.ncPrograms
@@ -545,17 +570,31 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
            
             # check box to enable restoring rapid moves via 2D IPW verifier (Turning setups only)
             input = inputGroup.children.addBoolValueInput("fastZ",
-                                                          "Restore rapid moves (Lathe 2D IPW)",
+                                                          "Restore rapid moves (stock simulation)",
                                                           True,
                                                           "",
                                                           docSettings["fastZ"])
             input.isEnabled = hasTurningSetup
-            input.tooltip = "Restore Rapid Moves via Lathe 2D IPW Verifier (Turning Only)"
+            input.tooltip = "Restore Rapid Moves via 2D IPW Stock Simulation (Turning Only)"
             input.tooltipDescription = (
                 "For Turning setups, analyze the generated lathe G-code with 2D "
                 "In-Process Workpiece (IPW) simulation, promote collision-free G1 "
                 "air moves (with safety clearance margin) to G0 rapids, and re-verify "
                 "the modified G-code in Pass 2. Ignored for Milling setups.")
+
+            # check box to enable restoring rapid moves via fast_z heuristics (Milling setups only)
+            input = inputGroup.children.addBoolValueInput("fastZHeuristic",
+                                                          "Restore rapid moves (fast_z heuristics)",
+                                                          True,
+                                                          "",
+                                                          docSettings.get("fastZHeuristic", docSettings.get("fastZ", True)))
+            input.isEnabled = hasMillingSetup and docSettings["splitSetup"]
+            input.tooltip = "Restore Rapid Moves via Fast-Z Heuristics (Milling Only)"
+            input.tooltipDescription = (
+                "For Milling setups using individual operations, analyze G-code to find moves "
+                "at or above the feed height and replace them with rapid (G0) moves.<br>"
+                "Requires 'Use individual operations' to be checked."
+                "<p><b>WARNING!</b> Review G-code to verify accuracy. Comments indicate the changes.</p>")
 
             # check box to run 2D collision verification & MRR analysis (Turning setups only)
             input = inputGroup.children.addBoolValueInput("verifyGcode",
@@ -743,6 +782,20 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                 item.value = input.value and item.value
                 item.isEnabled = input.value
 
+            # Update setup-dependent options when onlySelected changes
+            if input.id == "onlySelected":
+                hasTurning, hasMilling = GetSetupTypes(cam, self.selectedSetups, input.value)
+                fastZItem = inputs.itemById("fastZ")
+                if fastZItem:
+                    fastZItem.isEnabled = hasTurning
+                fastZHeuristicItem = inputs.itemById("fastZHeuristic")
+                if fastZHeuristicItem:
+                    splitVal = inputs.itemById("splitSetup").value if inputs.itemById("splitSetup") else False
+                    fastZHeuristicItem.isEnabled = hasMilling and splitVal
+                verifyItem = inputs.itemById("verifyGcode")
+                if verifyItem:
+                    verifyItem.isEnabled = hasTurning
+
             # Options for splitSetup
             if input.id == "splitSetup":
                 inputs.itemById("combineTool").isEnabled = input.value
@@ -750,6 +803,11 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                 inputs.itemById("toolLabel").isEnabled = input.value
                 inputs.itemById("endCodes").isEnabled = input.value
                 inputs.itemById("endLabel").isEnabled = input.value
+                onlySelVal = inputs.itemById("onlySelected").value if inputs.itemById("onlySelected") else False
+                _, hasMilling = GetSetupTypes(cam, self.selectedSetups, onlySelVal)
+                fastZHeuristicItem = inputs.itemById("fastZHeuristic")
+                if fastZHeuristicItem:
+                    fastZHeuristicItem.isEnabled = hasMilling and input.value
 
             if input.id == "fastZ" and input.value:
                 verifyItem = inputs.itemById("verifyGcode")
@@ -1216,6 +1274,17 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         for code in endMcodes:
             endMcodeSet.add(int(code))
 
+        fFastZenabled = bool(docSettings.get("fastZHeuristic", docSettings.get("fastZ", False)))
+        if fFastZenabled:
+            regParseLine = re.compile(r""
+                r"(G(?P<G>[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
+                r"(?P<XY>((X-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
+                r"((Y-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?)"
+                r"(Z(?P<Z>-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
+                r"(F(?P<F>-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?",
+                re.IGNORECASE)
+            regGcodes = re.compile(r"G([0-9]+(?:\.[0-9]*)?)")
+
         i = 0
         ops = setup.allOperations
         while i < ops.count:
@@ -1348,6 +1417,16 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     fBlankOk = True
 
             # Note that match, line, and fNum are already set
+            # Initialize rapid move optimizations for milling operations
+            fFastZ = fFastZenabled and (setup.operationType != adsk.cam.OperationTypes.TurningOperation)
+            Gcode = None
+            Zcur = None
+            Zlast = None
+            Zfeed = None
+            feedCur = 0
+            fNeedFeed = False
+            fLockSpeed = False
+
             while True:
                 # End of program marker?
                 endMark = match["M"]
@@ -1355,11 +1434,112 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     endMark = int(endMark)
                     if endMark in endMcodeSet:
                         break
+                    # When M49/M48 is used to turn off speed changes, disable fast moves as well
+                    if endMark == 49:
+                        fLockSpeed = True
+                    elif endMark == 48:
+                        fLockSpeed = False
                 endMark = match["G"]
                 if endMark != None:
                     endMark = int(endMark)
                     if endMark in endGcodeSet:
                         break
+
+                if fFastZ:
+                    # Analyze code for chances to make rapid moves
+                    matchParsed = regParseLine.match(line)
+                    if matchParsed is not None and matchParsed.end() != 0:
+                        try:
+                            matchDict = matchParsed.groupdict()
+                            Gcodes = regGcodes.findall(line)
+                            fNoMotionGcode = True
+                            fHomeGcode = False
+                            for GcodeTmp in Gcodes:
+                                GcodeTmp = int(float(GcodeTmp))
+                                if GcodeTmp in constHomeGcodeSet:
+                                    fHomeGcode = True
+                                    break
+
+                                if GcodeTmp in constMotionGcodeSet:
+                                    fNoMotionGcode = False
+                                    Gcode = GcodeTmp
+                                    if Gcode == 0:
+                                        fNeedFeed = False
+                                    break
+
+                            if not fHomeGcode:
+                                Ztmp = matchDict["Z"]
+                                if Ztmp is not None:
+                                    Zlast = Zcur
+                                    Zcur = float(Ztmp)
+
+                                feedTmp = matchDict["F"]
+                                prevFeed = feedCur
+                                if feedTmp is not None:
+                                    feedCur = float(feedTmp)
+
+                                XYcur = matchDict["XY"].rstrip("\n ")
+
+                                # 1. Learn Zfeed on the first pure-Z move (G0 clearance or initial feed-height move)
+                                if Zfeed is None and (Gcode == 0 or Gcode == 1) and Ztmp is not None and len(XYcur) == 0:
+                                    Zfeed = Zcur
+                                    if Gcode != 0:
+                                        # Replace line with rapid move
+                                        line = constRapidZgcode.format(Zcur, line[:-1])
+                                        fNeedFeed = True
+                                        Gcode = 0
+
+                                # 2. Candidate rapid moves at or above feed height
+                                if Gcode == 1 and not fLockSpeed:
+                                    if Ztmp is not None:
+                                        is_at_feed = (Zfeed is not None and Zcur >= Zfeed)
+                                        is_upward_safe = (Zlast is not None and Zcur >= Zlast and Zfeed is not None and Zcur >= Zfeed)
+                                        is_zero_feed = (feedCur == 0)
+                                        if len(XYcur) == 0 and (is_at_feed or is_upward_safe or is_zero_feed):
+                                            # Move at or above feed height, or anomalous feed rate -> promote to rapid
+                                            line = constRapidZgcode.format(Zcur, line[:-1])
+                                            fNeedFeed = True
+                                            Gcode = 0
+
+                                    elif Zcur is not None and Zfeed is not None and Zcur >= Zfeed:
+                                        # No Z move, at/above feed height -> promote XY traverse to rapid
+                                        line = constRapidXYgcode.format(XYcur, line[:-1])
+                                        fNeedFeed = True
+                                        Gcode = 0
+
+                                # 3. Restoring G01 and modal feedrate when descending below feed height
+                                elif fNeedFeed and fNoMotionGcode:
+                                    # No explicit G-code present on line, changing back to G1
+                                    if Ztmp is not None:
+                                        if len(XYcur) != 0:
+                                            # Combined XYZ cutting move -> restore G1 with feedrate
+                                            line = constFeedXYZgcode.format(XYcur, Zcur, feedCur, line[:-1])
+                                            fNeedFeed = False
+                                            Gcode = 1
+                                        elif Zfeed is not None and Zcur < Zfeed:
+                                            # Pure Z move below feed height -> restore G1 with feedrate
+                                            line = constFeedZgcode.format(Zcur, feedCur, line[:-1])
+                                            fNeedFeed = False
+                                            Gcode = 1
+
+                                    elif len(XYcur) != 0 and Zcur is not None and Zfeed is not None and Zcur < Zfeed:
+                                        # No Z move, below feed height -> restore G1 with feedrate
+                                        line = constFeedXYgcode.format(XYcur, feedCur, line[:-1])
+                                        fNeedFeed = False
+                                        Gcode = 1
+
+                                # 4. Re-add feedrate if motion was restored to cutting G1 without an explicit F word
+                                if Gcode != 0 and fNeedFeed:
+                                    if feedTmp is None:
+                                        line = line[:-1] + constAddFeedGcode.format(feedCur)
+                                    fNeedFeed = False
+
+                                # 5. Adapt Zfeed upwards if a cutting move occurs at or above current Zfeed
+                                if Zcur is not None and Zfeed is not None and Zcur >= Zfeed and Gcode is not None and \
+                                    Gcode != 0 and len(XYcur) != 0 and (Ztmp is not None or Gcode != 1):
+                                    Zfeed = Zcur + 0.001
+                        except Exception:
+                            fFastZ = False # Safely skip changes on parse error
 
                 # copy line to output
                 if (fNum):
