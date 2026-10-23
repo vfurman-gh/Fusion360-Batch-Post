@@ -44,7 +44,7 @@ class TestWorkpieceAndToolExtraction(unittest.TestCase):
         if not cls.post_bin or not os.path.isfile(cls.post_bin):
             raise unittest.SkipTest("Autodesk 'post' executable not found on this system.")
 
-        cls.base_cps = os.path.join(cls.repo_root, "centroid_turning.cps")
+        cls.base_cps = os.path.join(cls.repo_root, "capture_stock_tools.cps")
         cls.fixture_cnc = os.path.join(cls.repo_root, "tests", "fixtures", "roughing_test.cnc")
         if not os.path.isfile(cls.fixture_cnc):
             raise unittest.SkipTest(f"Test fixture not found: {cls.fixture_cnc}")

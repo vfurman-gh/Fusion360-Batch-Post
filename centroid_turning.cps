@@ -512,47 +512,6 @@ function writeComment(text) {
   writeln(formatComment(text));
 }
 
-function writeStockMeta() {
-  var wp = getWorkpiece();
-  var dInner = 0;
-  if (hasParameter("stock-diameter-inner")) {
-    dInner = getParameter("stock-diameter-inner");
-  } else if (hasParameter("job:stockDiameterInner")) {
-    dInner = getParameter("job:stockDiameterInner");
-  }
-  var stockMeta = {
-    zLower    : Number(spatialFormat.format(wp.lower.z)),
-    zUpper    : Number(spatialFormat.format(wp.upper.z)),
-    rOuter    : Number(spatialFormat.format(wp.upper.x)),
-    rInner    : Number(spatialFormat.format(dInner * 0.5)),
-    partZLower: hasParameter("part-lower-z") ? Number(spatialFormat.format(getParameter("part-lower-z"))) : undefined,
-    partZUpper: hasParameter("part-upper-z") ? Number(spatialFormat.format(getParameter("part-upper-z"))) : undefined,
-    partROuter: hasParameter("part-upper-x") ? Number(spatialFormat.format(getParameter("part-upper-x"))) : undefined
-  };
-  writeln(";META_STOCK: " + JSON.stringify(stockMeta));
-}
-
-function writeOperationMeta() {
-  var comp = tool.getCompensationDisplacement ? tool.getCompensationDisplacement() : {x:0, y:0};
-  var orientDeg = hasParameter("operation:toolOrientation") ?
-    getParameter("operation:toolOrientation") : (currentSection.toolOrientation * 180 / Math.PI);
-  var opMeta = {
-    id          : currentSection.getId(),
-    name        : hasParameter("operation-comment") ? getParameter("operation-comment") : "",
-    tool        : tool.number,
-    post        : (toolingData.toolPost == REAR) ? "REAR" : "FRONT",
-    orientDeg   : Number(orientDeg.toFixed(4)),
-    insertOrient: hasParameter("operation:toolInsertOrientation") ? getParameter("operation:toolInsertOrientation") : "",
-    hand        : tool.hand || "",
-    noseR       : Number(spatialFormat.format(tool.noseRadius || 0)),
-    comp        : [Number(comp.x.toFixed(6)), Number(comp.y.toFixed(6))],
-    toolType    : (tool.type != undefined) ? getToolTypeName(tool.type) : "",
-    cutterSVG   : tool.getCutterProfileAsSVGPath ? tool.getCutterProfileAsSVGPath() : "",
-    holderSVG   : tool.getHolderProfileAsSVGPath ? tool.getHolderProfileAsSVGPath() : ""
-  };
-  writeln(";META_OP: " + JSON.stringify(opMeta));
-}
-
 function onOpen() {
   if (getProperty("useRadius")) {
     maximumCircularSweep = toRad(90); // avoid potential center calculation errors for CNC
@@ -1035,21 +994,18 @@ function onSection() {
       warning(localize("Tool number exceeds maximum value."));
     }
 
-    writeToolBlock(toolOutput.format(tool.number * 100));
     if ((toolingData.tooling == QCTP) || tool.getManualToolChange()) {
       var comment = formatComment(localize("CHANGE TO T") + tool.number + " " + localize("ON") + " " +
         localize((toolingData.toolPost == REAR) ? "REAR TOOL POST" : "FRONT TOOL POST"));
       writeBlock(mFormat.format(0), comment);
     }
+
+    writeToolBlock(toolOutput.format(tool.number * 100));
     if (tool.comment) {
       writeComment(tool.comment);
     }
 
   }
-  if (isFirstSection()) {
-    writeStockMeta();
-  }
-  writeOperationMeta();
 
   // wcs
   if (insertToolCall) { // force work offset when changing tool
@@ -1173,9 +1129,16 @@ function onRapid(_x, _y, _z) {
   if (x || y || z) {
     if (pendingRadiusCompensation >= 0) {
       pendingRadiusCompensation = -1;
-      var gComp = (radiusCompensation == RADIUS_COMPENSATION_LEFT) ? 41 :
-                  (radiusCompensation == RADIUS_COMPENSATION_RIGHT) ? 42 : 40;
-      writeBlock(gMotionModal.format(0), gFormat.format(gComp), x, y, z);
+      switch (radiusCompensation) {
+      case RADIUS_COMPENSATION_LEFT:
+        writeBlock(gMotionModal.format(0), gFormat.format(41), x, y, z);
+        break;
+      case RADIUS_COMPENSATION_RIGHT:
+        writeBlock(gMotionModal.format(0), gFormat.format(42), x, y, z);
+        break;
+      default:
+        writeBlock(gMotionModal.format(0), gFormat.format(40), x, y, z);
+      }
     } else {
       writeBlock(gMotionModal.format(0), x, y, z);
     }
@@ -1197,7 +1160,6 @@ function onLinear(_x, _y, _z, feed) {
     resetFeed = false;
     forceFeed();
   }
-
   var x = xOutput.format(_x);
   var y = yOutput.format(_y);
   var z = zOutput.format(_z);
@@ -2003,29 +1965,6 @@ function onClose() {
 
   onImpliedCommand(COMMAND_END);
   onImpliedCommand(COMMAND_STOP_SPINDLE);
-
-  try {
-    var intermediateSrc = getIntermediatePath();
-    var outFolder = "/Users/vadimf/Documents/NCs/intermediates";
-    if (intermediateSrc && (String(intermediateSrc).indexOf(outFolder) < 0) && FileSystem.isFile(intermediateSrc)) {
-      if (!FileSystem.isFolder(outFolder)) {
-        FileSystem.makeFolder(outFolder);
-      }
-      var opName = (getNumberOfSections() > 0 && getSection(0).hasParameter("operation-comment")) ?
-        String(getSection(0).getParameter("operation-comment")).replace(/[^a-zA-Z0-9_-]/g, "_") : "op";
-      var tNum = (getNumberOfSections() > 0) ? getSection(0).getTool().number : 0;
-      var ts = new Date().getTime();
-      var destPath = FileSystem.getCombinedPath(outFolder, ts + "_T" + tNum + "_" + opName + ".cnc");
-      FileSystem.copyFile(intermediateSrc, destPath);
-
-      var outPath = getOutputPath();
-      if (outPath) {
-        FileSystem.copyFile(intermediateSrc, outPath + ".intermediate.cnc");
-      }
-    }
-  } catch (e) {
-    writeComment("INTERMEDIATE SAVE ERROR: " + e.toString());
-  }
 }
 
 function setProperty(property, value) {

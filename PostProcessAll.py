@@ -1065,6 +1065,40 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, promoted=No
         pass
 
 
+def _ExtractWorkpieceFromSetup(setup):
+    """Extract axisymmetric stock geometry directly from native Fusion 360 Setup."""
+    try:
+        if not hasattr(setup, "parameters"):
+            return None
+        params = setup.parameters
+        p_dia = params.itemByName("job_stockDiameter")
+        p_len = params.itemByName("job_stockLength")
+        if not p_dia or not p_len:
+            return None
+        # Fusion API parameters for lengths are in internal units (centimeters)
+        d_outer_mm = float(p_dia.value.value) * 10.0
+        length_mm = float(p_len.value.value) * 10.0
+
+        p_inner = params.itemByName("job_stockDiameterInner")
+        d_inner_mm = float(p_inner.value.value) * 10.0 if p_inner else 0.0
+
+        p_front = params.itemByName("job_stockOffsetFront")
+        z_max_mm = float(p_front.value.value) * 10.0 if p_front else 0.0
+        z_min_mm = z_max_mm - length_mm
+
+        from geometry import AxisymmetricStock2D, WorkpieceDefinition
+        return WorkpieceDefinition(
+            stock=AxisymmetricStock2D(
+                z_min=z_min_mm,
+                z_max=z_max_mm,
+                outer_radius=d_outer_mm * 0.5,
+                inner_radius=d_inner_mm * 0.5,
+            )
+        )
+    except Exception:
+        return None
+
+
 def RunLatheVerifier(cncPath, setup, docSettings):
     """
     Execute 6-stage toolpath verification and rapid-promotion pipeline:
@@ -1084,8 +1118,6 @@ def RunLatheVerifier(cncPath, setup, docSettings):
     try:
         with open(cncPath, "r", encoding="utf8", errors="replace") as f:
             gcode_content = f.read()
-        if ";META_STOCK:" not in gcode_content:
-            return None
 
         promote = bool(docSettings.get("fastZ", False))
         basePath = os.path.splitext(cncPath)[0]
@@ -1112,11 +1144,11 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
         tool_scale = 25.4 if is_inch else 1.0
 
-        # Ingest workpiece and tools
-        workpiece = None
+        # Ingest workpiece: native Fusion Setup API first, legacy comment fallback second
+        workpiece = _ExtractWorkpieceFromSetup(setup)
         tools_by_op = {}
         for line in gcode_content.splitlines():
-            if line.startswith(";META_STOCK:"):
+            if not workpiece and line.startswith(";META_STOCK:"):
                 workpiece = parse_legacy_stock(line)
                 if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
                     workpiece = WorkpieceDefinition(
