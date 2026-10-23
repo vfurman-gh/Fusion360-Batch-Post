@@ -93,6 +93,14 @@ class PipelineOrchestrator:
         if not os.path.isfile(base_post_path):
             raise FileNotFoundError(f"Base machine post not found: {base_post_path}")
 
+        final_dir = os.path.dirname(os.path.abspath(final_cnc_path))
+        if final_dir:
+            os.makedirs(final_dir, exist_ok=True)
+        if report_output_path:
+            report_dir = os.path.dirname(os.path.abspath(report_output_path))
+            if report_dir:
+                os.makedirs(report_dir, exist_ok=True)
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             # -----------------------------------------------------------------
             # Step 1: Intermediate APT Extraction
@@ -101,7 +109,8 @@ class PipelineOrchestrator:
             cmd_apt = [self.post_bin, "--quiet", self.apt_cps, intermediate_cnc_path, apt_output_path]
             res_apt = subprocess.run(cmd_apt, capture_output=True, text=True)
             if res_apt.returncode != 0:
-                raise RuntimeError(f"Intermediate APT generation failed: {res_apt.stderr}")
+                err_detail = f"exit code {res_apt.returncode}\nSTDOUT:\n{res_apt.stdout}\nSTDERR:\n{res_apt.stderr}"
+                raise RuntimeError(f"Intermediate APT generation failed: {err_detail}")
 
             # -----------------------------------------------------------------
             # Step 2: Parse APT into Metric MotionSegments
@@ -136,7 +145,8 @@ class PipelineOrchestrator:
             cmd_wrap = [self.post_bin, "--quiet", self.wrapper_cps, intermediate_cnc_path, final_cnc_path]
             res_wrap = subprocess.run(cmd_wrap, env=env, capture_output=True, text=True)
             if res_wrap.returncode != 0:
-                raise RuntimeError(f"Universal post wrapper execution failed: {res_wrap.stderr}")
+                err_detail = f"exit code {res_wrap.returncode}\nSTDOUT:\n{res_wrap.stdout}\nSTDERR:\n{res_wrap.stderr}"
+                raise RuntimeError(f"Universal post wrapper execution failed: {err_detail}")
 
             with open(final_cnc_path, "r", encoding="utf-8", errors="replace") as f:
                 final_gcode = f.read()

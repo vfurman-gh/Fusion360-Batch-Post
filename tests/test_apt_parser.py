@@ -169,6 +169,34 @@ class TestAPTParser(unittest.TestCase):
         rule = report.promoted_vectors["0:133870,0,2540->59690,0,2540"]
         self.assertEqual(rule.min_occur, 1)
 
+    def test_05_feed_per_revolution_parsing(self):
+        """Verify MMPR and IPR feeds are correctly converted to MMPM using spindle RPM."""
+        parser = APTParser()
+        apt_lines = [
+            "UNITS/MM",
+            "SPINDL/2000., RPM, CLW",
+            "FEDRAT/0.15, MMPR",
+            "GOTO/0., 0., 0.",
+            "GOTO/0., 0., 10.",
+            "FEDRAT/0.004, IPR",
+            "GOTO/0., 0., 20.",
+        ]
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".apt", delete=False) as f:
+            f.write("\n".join(apt_lines))
+            tmp_path = f.name
+
+        try:
+            segments = parser.parse_file(tmp_path)
+            self.assertEqual(len(segments), 2)
+            # 0.15 mm/rev * 2000 rpm = 300 mm/min
+            self.assertAlmostEqual(segments[0].feedrate_mmpm, 300.0, places=2)
+            # 0.004 in/rev * 25.4 * 2000 rpm = 203.2 mm/min
+            self.assertAlmostEqual(segments[1].feedrate_mmpm, 203.2, places=2)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 if __name__ == "__main__":
     unittest.main()

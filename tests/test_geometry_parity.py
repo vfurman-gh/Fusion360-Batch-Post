@@ -168,6 +168,42 @@ class TestGeometryParity(unittest.TestCase):
         iou = intersection / union
         self.assertGreater(iou, 0.998, f"Tool 6 IoU too low: {iou}")
 
+    def test_convex_hull_sweep_equivalence(self):
+        """Verify convex-hull sweeping matches quad union sweeping with IoU > 0.999."""
+        from geometry.lathe_engine import sweep_linear_polygon
+        insert = generate_rhombic_insert(edge_length=10.0, nose_radius=0.8, lead_angle_deg=5.0)
+        p1 = (5.0, 10.0)
+        p2 = (25.0, 15.0)
+
+        poly_convex = sweep_linear_polygon(insert, p1, p2, is_convex=True)
+        poly_quads = sweep_linear_polygon(insert, p1, p2, is_convex=False)
+
+        self.assertTrue(poly_convex.is_valid)
+        self.assertTrue(poly_quads.is_valid)
+
+        iou = poly_convex.intersection(poly_quads).area / poly_convex.union(poly_quads).area
+        self.assertGreater(iou, 0.999, f"Convex sweep mismatch: IoU={iou}")
+
+    def test_circular_arc_sweep_curvature(self):
+        """Verify sweep_arc_polygon accurately captures arc envelope bulge beyond chord."""
+        from geometry.lathe_engine import sweep_arc_polygon, sweep_linear_polygon
+        from shapely.geometry import Point
+        unit_box = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        # 90 degree arc from (0, 10) to (10, 0) centered at (0, 0), CW
+        arc_swept = sweep_arc_polygon(unit_box, p1=(0, 10), p2=(10, 0), center=(0, 0), is_cw=True, is_convex=True)
+        chord_swept = sweep_linear_polygon(unit_box, p1=(0, 10), p2=(10, 0), is_convex=True)
+
+        self.assertTrue(arc_swept.is_valid)
+        self.assertTrue(chord_swept.is_valid)
+
+        # The circular arc bulges out to radius ~10.6 at 45 deg, where the chord does not reach
+        self.assertTrue(arc_swept.contains(Point(7.5, 7.5)))
+        self.assertFalse(chord_swept.contains(Point(7.5, 7.5)))
+
+        # Symmetric difference proves they are distinct geometric trajectories
+        diff_area = arc_swept.symmetric_difference(chord_swept).area
+        self.assertGreater(diff_area, 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

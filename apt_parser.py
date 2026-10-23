@@ -121,7 +121,25 @@ class APTParser:
                 try:
                     val = float(tokens[0])
                     unit_token = tokens[1].upper() if len(tokens) > 1 else "MMPM"
-                    current_feedrate_mmpm = val if "MM" in unit_token else (val * 25.4)
+                    if "IPR" in unit_token:
+                        feed_val_mm = val * 25.4
+                        is_per_rev = True
+                    elif "MMPR" in unit_token:
+                        feed_val_mm = val
+                        is_per_rev = True
+                    elif "IPM" in unit_token:
+                        feed_val_mm = val * 25.4
+                        is_per_rev = False
+                    else:
+                        feed_val_mm = val if "MM" in unit_token else (val * 25.4)
+                        is_per_rev = False
+
+                    if is_per_rev:
+                        effective_rpm = current_spindle_rpm if current_spindle_rpm > 0 else 1000.0
+                        current_feedrate_mmpm = feed_val_mm * effective_rpm
+                    else:
+                        current_feedrate_mmpm = feed_val_mm
+
                     is_rapid = False
                 except (ValueError, IndexError):
                     pass
@@ -182,7 +200,7 @@ class APTParser:
                         # Determine clockwise vs counter-clockwise from normal
                         # In ZX plane (turning), normal along -Y is CW, +Y is CCW
                         motion = MotionKind.ARC_CW if pending_arc["normal"].y < 0 else MotionKind.ARC_CCW
-                        arc_len = pending_arc["radius"] * math.radians(pending_arc["sweep_deg"])
+                        arc_len = pending_arc["radius"] * math.radians(abs(pending_arc["sweep_deg"]))
                         dist = max(dist, arc_len)
                     else:
                         is_arc = False

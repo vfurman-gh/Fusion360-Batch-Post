@@ -93,7 +93,7 @@ class TestFullPipelineRealEngine(unittest.TestCase):
             with open(out_report, "r") as f:
                 report_text = f.read()
 
-            self.assertIn("7826.10 mm³", report_text)
+            self.assertIn("7819.26 mm³", report_text)
             self.assertIn("**G0 Moves Restored in G-code**: 10", report_text)
             self.assertIn("Zero collisions detected", report_text)
 

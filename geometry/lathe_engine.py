@@ -1,9 +1,12 @@
 """
 Real 2D Lathe In-Process Workpiece (IPW) & Collision Verification Engine.
 
-Implements IVerificationEngine using Shapely 2D polygon clipping:
-- 2D (Z, Radius) Axisymmetric stock representation with tube/bore support.
-- Swept-polygon kinematics for cutters and toolholders.
+Implements IVerificationEngine using optimized Shapely 2D polygon clipping:
+- Single-quadrant (Z, Radius >= 0) Axisymmetric stock representation with tube/bore support.
+- Convex-hull optimized swept kinematics for standard turning inserts and toolholders.
+- Discretized circular arc sweeping (MOVARC, G2/G3) for exact contour envelope fidelity.
+- Reflected radial envelope checking for internal boring bars and holders crossing the spindle centerline.
+- Fast AABB (Axis-Aligned Bounding Box) spatial pre-filtering and inverted buffer checking.
 - Pappus's centroid theorem for 3D volumetric material removal (mm³).
 - Collision detection for chuck fixtures, rapid moves into stock, and holder rubbing.
 - Monotonic occurrence-gated rapid move authorization for universal_wrapper.cps.
@@ -12,7 +15,7 @@ Implements IVerificationEngine using Shapely 2D polygon clipping:
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 from shapely.affinity import translate, scale as shapely_scale
-from shapely.geometry import Polygon, box
+from shapely.geometry import Polygon, MultiPolygon, box
 from shapely.ops import unary_union
 
 from .models import (
@@ -34,7 +37,25 @@ from .models import (
 from .engine_interface import IVerificationEngine
 
 
-def sweep_polygon(poly: Polygon, p1: Tuple[float, float], p2: Tuple[float, float]) -> Polygon:
+# Domain Constants
+ESTIMATED_PENETRATION_DEPTH_MM = 10.0
+HOLDER_CUTTER_TRANSITION_TOL_MM = 0.05
+
+
+def aabb_overlap(
+    b1: Tuple[float, float, float, float],
+    b2: Tuple[float, float, float, float],
+) -> bool:
+    """Fast O(1) Axis-Aligned Bounding Box (AABB) overlap check (minx, miny, maxx, maxy)."""
+    return not (b1[2] < b2[0] or b1[0] > b2[2] or b1[3] < b2[1] or b1[1] > b2[3])
+
+
+def sweep_linear_polygon(
+    poly: Polygon,
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    is_convex: bool = False,
+) -> Polygon:
     """Compute the 2D area swept by translating poly linearly from p1 to p2 in (Z, R)."""
     if poly.is_empty:
         return Polygon()
@@ -44,6 +65,12 @@ def sweep_polygon(poly: Polygon, p1: Tuple[float, float], p2: Tuple[float, float
     if math.hypot(dx, dy) < 1e-6:
         return poly1
 
+    # Fast path for convex cutters (rhombic, triangular, round inserts):
+    # Minkowski sum of convex poly and linear translation segment equals convex hull.
+    if is_convex:
+        return MultiPolygon([poly1, poly2]).convex_hull
+
+    # General path for non-convex toolholders
     coords = list(poly1.exterior.coords)
     quads = [
         Polygon([
@@ -57,10 +84,54 @@ def sweep_polygon(poly: Polygon, p1: Tuple[float, float], p2: Tuple[float, float
     return unary_union([poly1, poly2] + quads).buffer(0)
 
 
+def sweep_arc_polygon(
+    poly: Polygon,
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    center: Tuple[float, float],
+    is_cw: bool,
+    is_convex: bool = False,
+    max_step_deg: float = 10.0,
+) -> Polygon:
+    """Sweep a polygon along a circular arc in the (Z, R) plane by chordal discretization."""
+    if poly.is_empty:
+        return Polygon()
+    c_z, c_r = center
+    r = math.hypot(p1[0] - c_z, p1[1] - c_r)
+    theta1 = math.atan2(p1[1] - c_r, p1[0] - c_z)
+    theta2 = math.atan2(p2[1] - c_r, p2[0] - c_z)
+
+    if is_cw:
+        if theta2 >= theta1:
+            theta2 -= 2.0 * math.pi
+    else:
+        if theta2 <= theta1:
+            theta2 += 2.0 * math.pi
+
+    delta = theta2 - theta1
+    steps = max(3, int(math.ceil(abs(math.degrees(delta)) / max_step_deg)))
+
+    pts = [
+        (c_z + r * math.cos(theta1 + (delta * i) / steps), c_r + r * math.sin(theta1 + (delta * i) / steps))
+        for i in range(steps + 1)
+    ]
+    swept_pieces = [
+        sweep_linear_polygon(poly, pts[i], pts[i + 1], is_convex=is_convex)
+        for i in range(steps)
+    ]
+    return unary_union(swept_pieces)
+
+
+def sweep_polygon(poly: Polygon, p1: Tuple[float, float], p2: Tuple[float, float]) -> Polygon:
+    """Backward compatibility wrapper for linear polygon sweep."""
+    return sweep_linear_polygon(poly, p1, p2, is_convex=False)
+
+
 class Lathe2DIPWVerifier(IVerificationEngine):
     """
     High-fidelity 2D Lathe IPW Verifier.
     All internal calculations use standardized metric units (mm, mm/min, mm³, sec).
+    Stock is modeled strictly in the radial half-plane (R >= 0) for optimal GEOS performance.
     """
 
     def __init__(
@@ -68,7 +139,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         clearance_tol_mm: float = 0.05,     # Tolerance before flagging stock collision (mm)
         promote_margin_mm: float = 0.15,    # Clearance required from stock to authorize G0 (mm)
         min_promote_len_mm: float = 0.35,   # Minimum travel distance to justify G0 promotion (mm)
-        tool_scale_to_mm: float = 1.0,      # Set to 25.4 if tool polygons are supplied in inches
+        tool_scale_to_mm: float = 1.0,      # Legacy tool polygon scale factor to mm
     ):
         self.clearance_tol_mm = clearance_tol_mm
         self.promote_margin_mm = promote_margin_mm
@@ -76,11 +147,14 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         self.tool_scale_to_mm = tool_scale_to_mm
 
         self.ipw: Polygon = Polygon()
-        self.upper_half: Polygon = Polygon()
         self.chuck_obstacle: Polygon = Polygon()
         self.active_cutter: Polygon = Polygon()
         self.active_holder: Polygon = Polygon()
         self.active_tool: Optional[ToolAssembly] = None
+
+        self.cutter_is_convex: bool = False
+        self.holder_is_convex: bool = False
+        self.holder_has_neg_y: bool = False
 
         self.collisions: List[CollisionRecord] = []
         self.promoted_vectors: Dict[str, PromotedVectorRule] = {}
@@ -91,33 +165,24 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         self.current_time_sec: float = 0.0
 
     def reset(self, workpiece: WorkpieceDefinition) -> None:
-        """Initialize IPW stock model and fixtures in metric coordinates."""
+        """Initialize single-quadrant (R >= 0) IPW stock model and fixtures in metric coordinates."""
         stock = workpiece.stock
         if not isinstance(stock, AxisymmetricStock2D):
             raise TypeError(f"Lathe2DIPWVerifier requires AxisymmetricStock2D, got {type(stock)}")
 
-        # Build axisymmetric 2D stock mirrored across R=0
+        # Build axisymmetric 2D stock in half-plane R >= 0
         z_min, z_max = stock.z_min, stock.z_max
         r_out = stock.outer_radius
-        r_in = stock.inner_radius
+        r_in = max(0.0, stock.inner_radius)
 
-        if r_in > 1e-4:
-            upper = box(z_min, r_in, z_max, r_out)
-            lower = box(z_min, -r_out, z_max, -r_in)
-            self.ipw = unary_union([upper, lower])
-        else:
-            self.ipw = box(z_min, -r_out, z_max, r_out)
+        self.ipw = box(z_min, r_in, z_max, r_out)
 
-        # Reference clipping plane for upper half (R >= 0)
-        self.upper_half = box(z_min - 100.0, 0.0, z_max + 100.0, r_out + 100.0)
-
-        # Chuck keep-out geometry
+        # Chuck keep-out geometry in R >= 0
         chuck_polys = []
         for fixture in workpiece.fixtures:
             if isinstance(fixture, AxisymmetricChuckObstacle):
                 c_upper = box(fixture.z_min, fixture.clamping_radius, fixture.z_max, fixture.outer_radius)
-                c_lower = box(fixture.z_min, -fixture.outer_radius, fixture.z_max, -fixture.clamping_radius)
-                chuck_polys.extend([c_upper, c_lower])
+                chuck_polys.append(c_upper)
 
         self.chuck_obstacle = unary_union(chuck_polys) if chuck_polys else Polygon()
 
@@ -131,7 +196,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         self.current_time_sec = 0.0
 
     def load_tool(self, tool: ToolAssembly) -> None:
-        """Mount the active tool and scale polygons to metric if needed."""
+        """Mount the active tool, precompute convexity and radial extension properties."""
         self.active_tool = tool
         if isinstance(tool.geometry, LatheToolGeometry):
             cutter = tool.geometry.cutter_polygon
@@ -139,18 +204,26 @@ class Lathe2DIPWVerifier(IVerificationEngine):
             if abs(self.tool_scale_to_mm - 1.0) > 1e-4:
                 cutter = shapely_scale(cutter, xfact=self.tool_scale_to_mm, yfact=self.tool_scale_to_mm, origin=(0, 0))
                 holder = shapely_scale(holder, xfact=self.tool_scale_to_mm, yfact=self.tool_scale_to_mm, origin=(0, 0))
+
             self.active_cutter = cutter
             self.active_holder = holder
+            self.cutter_is_convex = not cutter.is_empty and (abs(cutter.area - cutter.convex_hull.area) < 1e-4)
+            self.holder_is_convex = not holder.is_empty and (abs(holder.area - holder.convex_hull.area) < 1e-4)
+            self.holder_has_neg_y = (holder.bounds[1] < -1e-4) if not holder.is_empty else False
         else:
             self.active_cutter = Polygon()
             self.active_holder = Polygon()
+            self.cutter_is_convex = False
+            self.holder_is_convex = False
+            self.holder_has_neg_y = False
 
     def step(self, move: MotionSegment) -> MoveEvaluation:
         """
-        Atomically evaluate a single move in the (Z, R) plane:
-        - Checks fixtures and collision hazards.
+        Atomically evaluate a single move in the (Z, R >= 0) plane:
+        - Sweeps cutter and holder along linear or circular arc trajectories.
+        - Checks fixtures and collision hazards using fast AABB pruning and inverted buffering.
         - Evaluates air move promotion safety.
-        - Updates IPW stock (carves swept material).
+        - Updates IPW stock (carves swept material in R >= 0).
         - Computes exact 3D MRR via Pappus's theorem.
         """
         self.current_time_sec += move.duration_sec
@@ -172,62 +245,91 @@ class Lathe2DIPWVerifier(IVerificationEngine):
                 instantaneous_mrr=0.0,
             )
 
-        swept_cutter = sweep_polygon(self.active_cutter, p1, p2)
-        swept_holder = sweep_polygon(self.active_holder, p1, p2)
+        # ---------------------------------------------------------------------
+        # Kinematic Sweeping (Linear or Circular Arc)
+        # ---------------------------------------------------------------------
+        if move.is_arc and move.arc_center is not None:
+            c = (move.arc_center.z, move.arc_center.x)
+            is_cw = (move.motion == MotionKind.ARC_CW)
+            swept_cutter = sweep_arc_polygon(
+                self.active_cutter, p1, p2, c, is_cw, is_convex=self.cutter_is_convex
+            )
+            swept_holder = sweep_arc_polygon(
+                self.active_holder, p1, p2, c, is_cw, is_convex=self.holder_is_convex
+            )
+        else:
+            swept_cutter = sweep_linear_polygon(
+                self.active_cutter, p1, p2, is_convex=self.cutter_is_convex
+            )
+            swept_holder = sweep_linear_polygon(
+                self.active_holder, p1, p2, is_convex=self.holder_is_convex
+            )
+
+        # For internal boring bars crossing the center axis (Y < 0),
+        # reflect negative Y coordinates into R >= 0 to check the opposite bore wall
+        if self.holder_has_neg_y and not swept_holder.is_empty and swept_holder.bounds[1] < -1e-4:
+            sh_refl = Polygon([(z, -y) for z, y in swept_holder.exterior.coords])
+            swept_holder_radial = unary_union([swept_holder, sh_refl]).intersection(box(-1e6, 0.0, 1e6, 1e6))
+        else:
+            swept_holder_radial = swept_holder
 
         move_collisions: List[CollisionRecord] = []
+        stock_bounds = self.ipw.bounds if not self.ipw.is_empty else (0.0, 0.0, 0.0, 0.0)
 
         # ---------------------------------------------------------------------
         # 1. Fixture (Chuck) Collision Check
         # ---------------------------------------------------------------------
         if not self.chuck_obstacle.is_empty:
-            chuck_hit = unary_union([swept_cutter, swept_holder]).intersection(self.chuck_obstacle)
-            if not chuck_hit.is_empty and chuck_hit.area > 1e-4:
-                col = CollisionRecord(
-                    segment_id=move.segment_id,
-                    vector_key=v_key_str,
-                    kind=CollisionKind.FIXTURE_COLLISION,
-                    timestamp_sec=self.current_time_sec,
-                    contact_point=Vector3D(p2[1], 0.0, p2[0]),
-                    penetration_volume_mm3=chuck_hit.area * 10.0,
-                    description=f"Tool collided with chuck fixture (overlap area: {chuck_hit.area:.3f} mm²)",
-                )
-                self.collisions.append(col)
-                move_collisions.append(col)
-
-        core_stock = self.ipw.buffer(-self.clearance_tol_mm)
+            tool_union = unary_union([swept_cutter, swept_holder_radial])
+            if aabb_overlap(tool_union.bounds, self.chuck_obstacle.bounds):
+                chuck_hit = tool_union.intersection(self.chuck_obstacle)
+                if not chuck_hit.is_empty and chuck_hit.area > 1e-4:
+                    col = CollisionRecord(
+                        segment_id=move.segment_id,
+                        vector_key=v_key_str,
+                        kind=CollisionKind.FIXTURE_COLLISION,
+                        timestamp_sec=self.current_time_sec,
+                        contact_point=Vector3D(p2[1], 0.0, p2[0]),
+                        penetration_volume_mm3=chuck_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
+                        description=f"Tool collided with chuck fixture (overlap area: {chuck_hit.area:.3f} mm²)",
+                    )
+                    self.collisions.append(col)
+                    move_collisions.append(col)
 
         # ---------------------------------------------------------------------
         # 2. Rapid Move Verification (G0)
         # ---------------------------------------------------------------------
         if move.motion == MotionKind.RAPID:
-            rapid_hit = swept_cutter.intersection(core_stock)
-            if not rapid_hit.is_empty and rapid_hit.area > 1e-4:
-                col = CollisionRecord(
-                    segment_id=move.segment_id,
-                    vector_key=v_key_str,
-                    kind=CollisionKind.RAPID_INTO_STOCK,
-                    timestamp_sec=self.current_time_sec,
-                    contact_point=Vector3D(p2[1], 0.0, p2[0]),
-                    penetration_volume_mm3=rapid_hit.area * 10.0,
-                    description=f"Rapid move crashed into uncut stock (overlap area: {rapid_hit.area:.3f} mm²)",
-                )
-                self.collisions.append(col)
-                move_collisions.append(col)
+            if not self.ipw.is_empty:
+                if aabb_overlap(swept_cutter.bounds, stock_bounds):
+                    rapid_hit = swept_cutter.intersection(self.ipw)
+                    if not rapid_hit.is_empty and rapid_hit.area > 1e-4:
+                        col = CollisionRecord(
+                            segment_id=move.segment_id,
+                            vector_key=v_key_str,
+                            kind=CollisionKind.RAPID_INTO_STOCK,
+                            timestamp_sec=self.current_time_sec,
+                            contact_point=Vector3D(p2[1], 0.0, p2[0]),
+                            penetration_volume_mm3=rapid_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
+                            description=f"Rapid move crashed into uncut stock (overlap area: {rapid_hit.area:.3f} mm²)",
+                        )
+                        self.collisions.append(col)
+                        move_collisions.append(col)
 
-            holder_hit = swept_holder.intersection(core_stock)
-            if not holder_hit.is_empty and holder_hit.area > 1e-4:
-                col = CollisionRecord(
-                    segment_id=move.segment_id,
-                    vector_key=v_key_str,
-                    kind=CollisionKind.HOLDER_STRIKE,
-                    timestamp_sec=self.current_time_sec,
-                    contact_point=Vector3D(p2[1], 0.0, p2[0]),
-                    penetration_volume_mm3=holder_hit.area * 10.0,
-                    description=f"Toolholder rapid strike into stock (overlap area: {holder_hit.area:.3f} mm²)",
-                )
-                self.collisions.append(col)
-                move_collisions.append(col)
+                if aabb_overlap(swept_holder_radial.bounds, stock_bounds):
+                    holder_hit = swept_holder_radial.intersection(self.ipw)
+                    if not holder_hit.is_empty and holder_hit.area > 1e-4:
+                        col = CollisionRecord(
+                            segment_id=move.segment_id,
+                            vector_key=v_key_str,
+                            kind=CollisionKind.HOLDER_STRIKE,
+                            timestamp_sec=self.current_time_sec,
+                            contact_point=Vector3D(p2[1], 0.0, p2[0]),
+                            penetration_volume_mm3=holder_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
+                            description=f"Toolholder rapid strike into stock (overlap area: {holder_hit.area:.3f} mm²)",
+                        )
+                        self.collisions.append(col)
+                        move_collisions.append(col)
 
             return MoveEvaluation(
                 segment_id=move.segment_id,
@@ -241,36 +343,38 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         # ---------------------------------------------------------------------
         # 3. Holder Strike on Cutting Moves (G1/G2/G3)
         # ---------------------------------------------------------------------
-        holder_hit = swept_holder.intersection(core_stock)
-        if not holder_hit.is_empty and holder_hit.area > 1e-4:
-            # Filter out trailing wake inside swept cutter area
-            outside_wake = holder_hit.difference(swept_cutter.buffer(0.05))
-            if not outside_wake.is_empty and outside_wake.area > 1e-4:
-                col = CollisionRecord(
-                    segment_id=move.segment_id,
-                    vector_key=v_key_str,
-                    kind=CollisionKind.HOLDER_STRIKE,
-                    timestamp_sec=self.current_time_sec,
-                    contact_point=Vector3D(p2[1], 0.0, p2[0]),
-                    penetration_volume_mm3=outside_wake.area * 10.0,
-                    description=f"Toolholder shank gouged raw stock (overlap area: {outside_wake.area:.3f} mm²)",
-                )
-                self.collisions.append(col)
-                move_collisions.append(col)
+        if not self.ipw.is_empty and aabb_overlap(swept_holder_radial.bounds, stock_bounds):
+            holder_hit = swept_holder_radial.intersection(self.ipw)
+            if not holder_hit.is_empty and holder_hit.area > 1e-4:
+                outside_wake = holder_hit.difference(swept_cutter.buffer(HOLDER_CUTTER_TRANSITION_TOL_MM))
+                if not outside_wake.is_empty and outside_wake.area > 1e-4:
+                    col = CollisionRecord(
+                        segment_id=move.segment_id,
+                        vector_key=v_key_str,
+                        kind=CollisionKind.HOLDER_STRIKE,
+                        timestamp_sec=self.current_time_sec,
+                        contact_point=Vector3D(p2[1], 0.0, p2[0]),
+                        penetration_volume_mm3=outside_wake.area * ESTIMATED_PENETRATION_DEPTH_MM,
+                        description=f"Toolholder shank gouged raw stock (overlap area: {outside_wake.area:.3f} mm²)",
+                    )
+                    self.collisions.append(col)
+                    move_collisions.append(col)
 
         # ---------------------------------------------------------------------
-        # 4. Air Move & Rapid Promotion Check
+        # 4. Air Move & Rapid Promotion Check (Inverted Buffering)
         # ---------------------------------------------------------------------
         seen = self.vector_occurrences.get(v_key_str, 0) + 1
         self.vector_occurrences[v_key_str] = seen
 
         if not move.is_arc and dist >= self.min_promote_len_mm:
-            padded_ipw = self.ipw.buffer(self.promote_margin_mm)
-            if (
-                swept_cutter.intersection(padded_ipw).is_empty
-                and swept_holder.intersection(padded_ipw).is_empty
-            ):
-                # Verified air move!
+            # Inverted buffering: buffer the simple tool instead of buffering the complex IPW
+            sc_pad = swept_cutter.buffer(self.promote_margin_mm)
+            sh_pad = swept_holder_radial.buffer(self.promote_margin_mm)
+
+            cutter_air = (not aabb_overlap(sc_pad.bounds, stock_bounds)) or sc_pad.intersection(self.ipw).is_empty
+            holder_air = (not aabb_overlap(sh_pad.bounds, stock_bounds)) or sh_pad.intersection(self.ipw).is_empty
+
+            if cutter_air and holder_air:
                 if v_key_str not in self.promoted_vectors:
                     self.promoted_vectors[v_key_str] = PromotedVectorRule(min_occur=seen)
 
@@ -286,26 +390,20 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         # ---------------------------------------------------------------------
         # 5. Cutting Move: Material Removal & Volumetric MRR
         # ---------------------------------------------------------------------
-        # If this vector was previously thought to be air, pushing min_occur to next pass
         if v_key_str in self.promoted_vectors:
             self.promoted_vectors[v_key_str] = PromotedVectorRule(min_occur=seen + 1)
 
-        mirrored = Polygon([(z, -r) for z, r in swept_cutter.exterior.coords])
-        combined_cut = unary_union([swept_cutter, mirrored])
+        vol_3d_mm3 = 0.0
+        area_2d = 0.0
 
-        removed = self.ipw.intersection(combined_cut)
-        removed_upper = removed.intersection(self.upper_half)
-        area_2d = removed_upper.area
-
-        if area_2d > 1e-6:
-            r_cent = max(abs(removed_upper.centroid.y), 0.01)
-            vol_3d_mm3 = 2.0 * math.pi * r_cent * area_2d
-        else:
-            vol_3d_mm3 = 0.0
-
-        # Carve IPW
-        self.ipw = self.ipw.difference(combined_cut)
-        self.total_volume_removed_mm3 += vol_3d_mm3
+        if not self.ipw.is_empty and aabb_overlap(swept_cutter.bounds, stock_bounds):
+            removed = self.ipw.intersection(swept_cutter)
+            area_2d = removed.area
+            if area_2d > 1e-6:
+                r_cent = abs(removed.centroid.y)
+                vol_3d_mm3 = 2.0 * math.pi * r_cent * area_2d
+                self.ipw = self.ipw.difference(swept_cutter)
+                self.total_volume_removed_mm3 += vol_3d_mm3
 
         mrr_rate = (vol_3d_mm3 / max(1e-4, move.duration_sec)) * 60.0
 
@@ -331,7 +429,6 @@ class Lathe2DIPWVerifier(IVerificationEngine):
 
     def generate_report(self) -> VerificationReport:
         """Compile final report with collision records, promoted vectors, and MRR timeline."""
-        # Find statistical MRR spikes (> 2.5x mean non-zero MRR)
         non_zero_mrrs = [s.mrr_rate_mm3_per_min for s in self.mrr_timeline if s.mrr_rate_mm3_per_min > 1.0]
         spikes = []
         if non_zero_mrrs:
