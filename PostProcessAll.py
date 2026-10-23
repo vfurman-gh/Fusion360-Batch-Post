@@ -1130,16 +1130,22 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
             sys.path.insert(0, constPackagesDir)
 
-        from geometry import (
-            parse_legacy_stock,
-            parse_legacy_tool_op,
-            Lathe2DIPWVerifier,
-            ToolAssembly,
-            CollisionKind,
-            AxisymmetricStock2D,
-            WorkpieceDefinition,
-        )
-        from pipeline import PipelineOrchestrator
+        can_import_in_process = False
+        try:
+            import shapely
+            from geometry import (
+                parse_legacy_stock,
+                parse_legacy_tool_op,
+                Lathe2DIPWVerifier,
+                ToolAssembly,
+                CollisionKind,
+                AxisymmetricStock2D,
+                WorkpieceDefinition,
+            )
+            from pipeline import PipelineOrchestrator
+            can_import_in_process = True
+        except (ImportError, OSError):
+            can_import_in_process = False
 
         is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
         tool_scale = 25.4 if is_inch else 1.0
@@ -1161,15 +1167,17 @@ def RunLatheVerifier(cncPath, setup, docSettings):
                         fixtures=workpiece.fixtures,
                     )
             elif line.startswith(";META_OP:"):
-                geom = parse_legacy_tool_op(line)
                 try:
                     payload = json.loads(line.split(":", 1)[1])
+                    geom = None
+                    if can_import_in_process:
+                        geom = parse_legacy_tool_op(line)
                     tool_asm = ToolAssembly(
                         tool_id=payload.get("tool", 0),
                         name=payload.get("name", ""),
                         geometry=geom,
-                    )
-                    if tool_asm.name:
+                    ) if can_import_in_process else None
+                    if tool_asm and tool_asm.name:
                         tools_by_op[tool_asm.name] = tool_asm
                 except Exception:
                     pass
@@ -1204,21 +1212,85 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         if not os.path.isfile(base_post):
             return f"Base machine post processor not found: {base_post}"
 
-        verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
-        orchestrator = PipelineOrchestrator(
-            wrapper_cps=os.path.join(constAddonDir, "universal_wrapper.cps")
-        )
+        if can_import_in_process:
+            verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
+            orchestrator = PipelineOrchestrator(
+                wrapper_cps=os.path.join(constAddonDir, "universal_wrapper.cps")
+            )
 
-        # Run 6-stage end-to-end pipeline
-        report, final_gcode = orchestrator.run(
-            intermediate_cnc_path=intermediate_path,
-            base_post_path=base_post,
-            workpiece=workpiece,
-            tools_by_op=tools_by_op,
-            verifier=verifier,
-            final_cnc_path=cncPath,
-            report_output_path=reportPath,
-        )
+            # Run 6-stage end-to-end pipeline in-process
+            report, final_gcode = orchestrator.run(
+                intermediate_cnc_path=intermediate_path,
+                base_post_path=base_post,
+                workpiece=workpiece,
+                tools_by_op=tools_by_op,
+                verifier=verifier,
+                final_cnc_path=cncPath,
+                report_output_path=reportPath,
+            )
+
+            fatal_cols = [
+                c for c in report.collisions
+                if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
+            ]
+            err = f"{len(fatal_cols)} fatal collision(s) detected!" if fatal_cols else None
+            promoted_cnt = len(report.promoted_vectors) if promote else 0
+            spikes_cnt = len(report.mrr_spikes)
+            vol_mm3 = report.total_volume_removed_mm3
+            cols_list = report.collisions
+        else:
+            # Subprocess execution via isolated venv Python (bypasses macOS hardened runtime Team ID restriction)
+            venvCandidates = [
+                os.path.join(constAddonDir, ".venv", "bin", "python"),
+                os.path.join(constAddonDir, ".venv", "bin", "python3"),
+                os.path.expanduser("~/Documents/.lathe_venv/bin/python"),
+            ]
+            venvPy = next((p for p in venvCandidates if os.path.isfile(p)), None)
+            if not venvPy:
+                return "Lathe verifier dependencies (shapely) could not be loaded in Fusion process or isolated venv."
+
+            runner = os.path.join(constAddonDir, "run_pipeline.py")
+            cmd = [
+                venvPy, runner,
+                "--intermediate", intermediate_path,
+                "--base-post", base_post,
+                "--final-cnc", cncPath,
+                "--report", reportPath,
+            ]
+            if not promote:
+                cmd.append("--no-promote")
+            if workpiece and isinstance(workpiece.stock, AxisymmetricStock2D):
+                stock_json = json.dumps({
+                    "z_min": workpiece.stock.z_min,
+                    "z_max": workpiece.stock.z_max,
+                    "outer_radius": workpiece.stock.outer_radius,
+                    "inner_radius": workpiece.stock.inner_radius,
+                })
+                cmd.extend(["--stock-json", stock_json])
+
+            cleanEnv = {
+                k: v for k, v in os.environ.items()
+                if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
+            }
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
+            if proc.returncode != 0:
+                err_line = (proc.stderr.strip().splitlines() or proc.stdout.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+                return f"Verification pipeline failed: {err_line}"
+
+            vol_mm3 = 0.0
+            promoted_cnt = 0
+            spikes_cnt = 0
+            collision_cnt = 0
+            for line in proc.stdout.splitlines():
+                if line.startswith("VERIFY_RESULT:"):
+                    res_data = json.loads(line.split(":", 1)[1])
+                    vol_mm3 = res_data.get("volume_mm3", 0.0)
+                    promoted_cnt = res_data.get("promoted", 0)
+                    spikes_cnt = res_data.get("spikes", 0)
+                    collision_cnt = res_data.get("collisions", 0)
+
+            cols_list = []
+            err = f"{collision_cnt} fatal collision(s) detected!" if collision_cnt > 0 else None
 
         # Cleanup sidecar intermediate file
         sidecar = cncPath + ".intermediate.cnc"
@@ -1227,12 +1299,6 @@ def RunLatheVerifier(cncPath, setup, docSettings):
                 os.remove(sidecar)
             except Exception:
                 pass
-
-        fatal_cols = [
-            c for c in report.collisions
-            if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
-        ]
-        err = f"{len(fatal_cols)} fatal collision(s) detected!" if fatal_cols else None
 
         report_md = ""
         if os.path.isfile(reportPath):
@@ -1244,10 +1310,10 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             cncPath=cncPath,
             reportText=report_md,
             reportPath=reportPath,
-            promoted=len(report.promoted_vectors) if promote else 0,
-            spikes=len(report.mrr_spikes),
-            volume_mm3=report.total_volume_removed_mm3,
-            collisions=report.collisions,
+            promoted=promoted_cnt,
+            spikes=spikes_cnt,
+            volume_mm3=vol_mm3,
+            collisions=cols_list,
             error=err,
         )
 
