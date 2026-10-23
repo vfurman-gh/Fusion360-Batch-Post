@@ -20,7 +20,14 @@ from .models import (
     LatheToolGeometry,
     MillToolGeometry,
     ToolAssembly,
+    MotionSegment,
+    CollisionRecord,
+    MoveEvaluation,
+    MRRSample,
+    PromotedVectorRule,
+    VerificationReport,
 )
+from .engine_interface import IVerificationEngine
 from .tool_generator import (
     generate_rhombic_insert,
     generate_grooving_insert,
@@ -51,6 +58,13 @@ __all__ = [
     "LatheToolGeometry",
     "MillToolGeometry",
     "ToolAssembly",
+    "MotionSegment",
+    "CollisionRecord",
+    "MoveEvaluation",
+    "MRRSample",
+    "PromotedVectorRule",
+    "VerificationReport",
+    "IVerificationEngine",
     "generate_rhombic_insert",
     "generate_grooving_insert",
     "generate_drill_cutter",

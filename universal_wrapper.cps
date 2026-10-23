@@ -40,9 +40,10 @@ if (authJsonPath && FileSystem.isFile(authJsonPath)) {
   }
 }
 
-// 3. Coordinate Key Generator (0.001 mm / 0.0001" resolution)
+// 3. Coordinate Key Generator (Normalized to 0.0001 mm resolution)
 function formatCoord(val) {
-  return Math.round(val * 10000);
+  var mmVal = (typeof unit !== "undefined" && unit == IN) ? (val * 25.4) : val;
+  return Math.round(mmVal * 10000);
 }
 
 function makeVectorKey(secId, x1, y1, z1, x2, y2, z2) {

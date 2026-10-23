@@ -147,3 +147,71 @@ class ToolAssembly:
     tool_id: int
     name: str
     geometry: ToolGeometry
+
+
+@dataclass
+class MotionSegment:
+    """A continuous kinematic move in workpiece coordinates."""
+    segment_id: int               # Monotonic sequential identifier within operation
+    op_id: str                    # Owning CAM operation identifier
+    sec_id: int                   # Section index in post processor
+    motion: MotionKind
+    start: Vector3D
+    end: Vector3D
+    feedrate_mmpm: float          # Standardized metric feedrate (mm/min)
+    spindle_rpm: float
+    duration_sec: float           # Explicit duration (handles G4 dwells where distance = 0)
+    vector_key: VectorKey         # Deterministic spatial key for universal_wrapper
+    is_arc: bool = False
+    arc_center: Optional[Vector3D] = None
+    arc_plane: str = "XY"         # 'XY' (G17), 'ZX' (G18), 'YZ' (G19)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CollisionRecord:
+    segment_id: int
+    vector_key: str
+    kind: CollisionKind
+    timestamp_sec: float
+    contact_point: Vector3D
+    penetration_volume_mm3: float
+    description: str
+
+
+@dataclass
+class MoveEvaluation:
+    """Evaluation output for an atomic step."""
+    segment_id: int
+    vector_key: str
+    is_air_move: bool             # True if move removed 0 stock and cleared obstacles by >= margin
+    material_removed_mm3: float   # Volume removed during this move
+    instantaneous_mrr: float      # mm^3/min
+    collisions: List[CollisionRecord] = field(default_factory=list)
+
+
+@dataclass
+class MRRSample:
+    timestamp_sec: float
+    duration_sec: float
+    segment_id: int
+    tool_id: int
+    volume_removed_mm3: float
+    mrr_rate_mm3_per_min: float
+    depth_of_cut_mm: float
+
+
+@dataclass
+class PromotedVectorRule:
+    """Occurrence-gated promotion rule ingested by universal_wrapper.cps."""
+    min_occur: int = 1            # Threshold occurrence index (>= min_occur is authorized air)
+
+
+@dataclass
+class VerificationReport:
+    total_machining_time_sec: float
+    total_volume_removed_mm3: float
+    collisions: List[CollisionRecord]
+    promoted_vectors: Dict[str, PromotedVectorRule] # Map of vector keys to occurrence rules
+    mrr_timeline: List[MRRSample]
+    mrr_spikes: List[MRRSample]

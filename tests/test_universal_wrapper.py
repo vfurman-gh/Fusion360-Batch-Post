@@ -88,7 +88,7 @@ class TestUniversalCPSWrapper(unittest.TestCase):
 
     def test_02_single_rapid_promotion_and_feed_restoration(self):
         """Promoting Move 11 should emit G0 X0.47 and re-arm G1 Z-0.06 F0.002 on the next block."""
-        key_move_11 = "0:5270,0,100->2350,0,100"
+        key_move_11 = "0:133870,0,2540->59690,0,2540"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_json:
             json.dump({key_move_11: {"minOccur": 1}}, tmp_json)
             json_path = tmp_json.name
@@ -125,7 +125,7 @@ class TestUniversalCPSWrapper(unittest.TestCase):
 
     def test_03_occurrence_gating(self):
         """Vector with minOccur: 2 should NOT promote on its first occurrence."""
-        key_move_11 = "0:5270,0,100->2350,0,100"
+        key_move_11 = "0:133870,0,2540->59690,0,2540"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_json:
             json.dump({key_move_11: {"minOccur": 2}}, tmp_json)
             json_path = tmp_json.name
@@ -149,12 +149,12 @@ class TestUniversalCPSWrapper(unittest.TestCase):
     def test_04_multi_vector_promotion(self):
         """Multiple retract moves across multiple roughing passes are all promoted."""
         promoted = {
-            "0:5270,0,100->2350,0,100": {},
-            "0:2350,0,100->2350,0,-600": {},
-            "0:5259,0,-200->2350,0,-200": {},
-            "0:2350,0,-200->2350,0,-900": {},
-            "0:5263,0,-500->2350,0,-500": {},
-            "0:2350,0,-500->2350,0,-1158": {},
+            "0:133870,0,2540->59690,0,2540": {},
+            "0:59690,0,2540->59690,0,-15240": {},
+            "0:133571,0,-5080->59690,0,-5080": {},
+            "0:59690,0,-5080->59690,0,-22860": {},
+            "0:133684,0,-12700->59690,0,-12700": {},
+            "0:59690,0,-12700->59690,0,-29412": {},
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_json:
             json.dump(promoted, tmp_json)
