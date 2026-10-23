@@ -28,6 +28,7 @@ from .models import (
     VerificationReport,
 )
 from .engine_interface import IVerificationEngine
+from .lathe_engine import Lathe2DIPWVerifier
 from .tool_generator import (
     generate_rhombic_insert,
     generate_grooving_insert,
@@ -65,6 +66,7 @@ __all__ = [
     "PromotedVectorRule",
     "VerificationReport",
     "IVerificationEngine",
+    "Lathe2DIPWVerifier",
     "generate_rhombic_insert",
     "generate_grooving_insert",
     "generate_drill_cutter",
