@@ -2017,6 +2017,11 @@ function onClose() {
       var ts = new Date().getTime();
       var destPath = FileSystem.getCombinedPath(outFolder, ts + "_T" + tNum + "_" + opName + ".cnc");
       FileSystem.copyFile(intermediateSrc, destPath);
+
+      var outPath = getOutputPath();
+      if (outPath) {
+        FileSystem.copyFile(intermediateSrc, outPath + ".intermediate.cnc");
+      }
     }
   } catch (e) {
     writeComment("INTERMEDIATE SAVE ERROR: " + e.toString());

@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -60,7 +60,8 @@ constHomeGcodeSet = {28, 30}
 constLineNumInc = 5
 constNcProgramName = "PostProcessAll NC Program"
 constAddonDir = os.path.dirname(os.path.abspath(__file__))
-constVerifierScript = os.path.join(constAddonDir, "verify_lathe_gcode.py")
+constWrapperScript = os.path.join(constAddonDir, "universal_wrapper.cps")
+constAptExtractorScript = os.path.join(constAddonDir, "apt_extractor_wrapper.cps")
 constPackagesDir = os.path.join(constAddonDir, "packages")
 
 # Tool tip text
@@ -1034,17 +1035,19 @@ def PerformPostProcess(docSettings, setups):
 verifyResults = []
 
 
-def _RecordVerifyResult(setup, cncPath, reportText, promoted=None, spikes=None, collisions=None, error=None):
+def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, promoted=None, spikes=None, volume_mm3=None, collisions=None, error=None):
     basePath = os.path.splitext(cncPath)[0]
-    reportPath = basePath + "_report.txt"
+    if not reportPath:
+        reportPath = basePath + "_report.md"
     try:
         with open(reportPath, "w", encoding="utf8") as f:
             f.write(reportText)
     except Exception:
-        reportPath = None
+        pass
     kinds = {}
     for c in (collisions or []):
-        kinds[c.kind] = kinds.get(c.kind, 0) + 1
+        kind_str = c.kind.name if hasattr(c.kind, "name") else str(c.kind)
+        kinds[kind_str] = kinds.get(kind_str, 0) + 1
     verifyResults.append({
         "setup": setup.name,
         "cnc": cncPath,
@@ -1052,6 +1055,7 @@ def _RecordVerifyResult(setup, cncPath, reportText, promoted=None, spikes=None, 
         "report": reportPath,
         "promoted": promoted,
         "spikes": spikes,
+        "volume_mm3": volume_mm3,
         "kinds": kinds,
         "error": error,
     })
@@ -1062,63 +1066,165 @@ def _RecordVerifyResult(setup, cncPath, reportText, promoted=None, spikes=None, 
 
 
 def RunLatheVerifier(cncPath, setup, docSettings):
+    """
+    Execute 6-stage toolpath verification and rapid-promotion pipeline:
+    1. Ingest WorkpieceDefinition and ToolAssembly models.
+    2. Extract ISO 4343 APT toolpath and Compact-NCI (.cnc).
+    3. Simulate 2D IPW stock removal and verify collisions via Lathe2DIPWVerifier.
+    4. If fastZ is enabled, restore native G0 rapid moves via universal_wrapper.cps.
+    5. Compile markdown verification report.
+    """
     if setup is None or setup.operationType != adsk.cam.OperationTypes.TurningOperation:
         return None
     if not (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False)):
         return None
-    if not os.path.isfile(cncPath) or not os.path.isfile(constVerifierScript):
+    if not os.path.isfile(cncPath):
         return None
+
     try:
         with open(cncPath, "r", encoding="utf8", errors="replace") as f:
-            hasMeta = any(line.startswith(";META_STOCK:") for line in f)
-        if not hasMeta:
+            gcode_content = f.read()
+        if ";META_STOCK:" not in gcode_content:
             return None
 
         promote = bool(docSettings.get("fastZ", False))
-        import sys, importlib, contextlib
-        if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
-            sys.path.insert(0, constPackagesDir)
+        basePath = os.path.splitext(cncPath)[0]
+        reportPath = basePath + "_report.md"
+
+        # Ensure add-on root and packages are in sys.path
+        import sys
         if constAddonDir not in sys.path:
             sys.path.insert(0, constAddonDir)
-        import verify_lathe_gcode
-        importlib.reload(verify_lathe_gcode)
+        if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
+            sys.path.insert(0, constPackagesDir)
 
-        if getattr(verify_lathe_gcode, "_HAS_DEPS", False):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                collisions, promoted, spikes = verify_lathe_gcode.verify_and_promote(cncPath, promote=promote)
-            stockCols = [c for c in collisions if c.kind in ("RAPID_STOCK", "HOLDER_STOCK")]
-            err = f"{len(stockCols)} stock/holder collision(s)!" if stockCols else None
-            _RecordVerifyResult(setup, cncPath, buf.getvalue(), len(promoted), len(spikes), collisions, err)
-            if err:
-                return f"Lathe verifier detected {err} in {os.path.basename(cncPath)}"
+        from geometry import (
+            parse_legacy_stock,
+            parse_legacy_tool_op,
+            Lathe2DIPWVerifier,
+            ToolAssembly,
+            CollisionKind,
+            AxisymmetricStock2D,
+            WorkpieceDefinition,
+        )
+        from pipeline import PipelineOrchestrator
+
+        is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
+        tool_scale = 25.4 if is_inch else 1.0
+
+        # Ingest workpiece and tools
+        workpiece = None
+        tools_by_op = {}
+        for line in gcode_content.splitlines():
+            if line.startswith(";META_STOCK:"):
+                workpiece = parse_legacy_stock(line)
+                if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
+                    workpiece = WorkpieceDefinition(
+                        stock=AxisymmetricStock2D(
+                            z_min=workpiece.stock.z_min * 25.4,
+                            z_max=workpiece.stock.z_max * 25.4,
+                            outer_radius=workpiece.stock.outer_radius * 25.4,
+                            inner_radius=workpiece.stock.inner_radius * 25.4,
+                        ),
+                        fixtures=workpiece.fixtures,
+                    )
+            elif line.startswith(";META_OP:"):
+                geom = parse_legacy_tool_op(line)
+                try:
+                    payload = json.loads(line.split(":", 1)[1])
+                    tool_asm = ToolAssembly(
+                        tool_id=payload.get("tool", 0),
+                        name=payload.get("name", ""),
+                        geometry=geom,
+                    )
+                    if tool_asm.name:
+                        tools_by_op[tool_asm.name] = tool_asm
+                except Exception:
+                    pass
+
+        if not workpiece:
             return None
 
-        # Fallback to isolated venv subprocess if in-process binary extensions could not load
-        venvCandidates = [
-            os.path.join(constAddonDir, ".venv", "bin", "python"),
-            os.path.expanduser("~/Documents/.lathe_venv/bin/python"),
+        # Locate intermediate Compact-NCI (.cnc)
+        intermediate_path = cncPath + ".intermediate.cnc"
+        if not os.path.isfile(intermediate_path):
+            inter_dir = "/Users/vadimf/Documents/NCs/intermediates"
+            if os.path.isdir(inter_dir):
+                candidates = sorted(
+                    glob.glob(os.path.join(inter_dir, "*.cnc")),
+                    key=os.path.getmtime,
+                    reverse=True,
+                )
+                if candidates:
+                    intermediate_path = candidates[0]
+
+        if not os.path.isfile(intermediate_path):
+            try:
+                adsk.core.Application.get().log(
+                    f"[PostProcessAll] Intermediate toolpath not found for {cncPath}; skipping pipeline verification."
+                )
+            except Exception:
+                pass
+            return None
+
+        # Base post processor configuration
+        base_post = os.path.join(constAddonDir, "centroid_turning.cps")
+        if not os.path.isfile(base_post):
+            return f"Base machine post processor not found: {base_post}"
+
+        verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
+        orchestrator = PipelineOrchestrator(
+            wrapper_cps=os.path.join(constAddonDir, "universal_wrapper.cps")
+        )
+
+        # Run 6-stage end-to-end pipeline
+        report, final_gcode = orchestrator.run(
+            intermediate_cnc_path=intermediate_path,
+            base_post_path=base_post,
+            workpiece=workpiece,
+            tools_by_op=tools_by_op,
+            verifier=verifier,
+            final_cnc_path=cncPath,
+            report_output_path=reportPath,
+        )
+
+        # Cleanup sidecar intermediate file
+        sidecar = cncPath + ".intermediate.cnc"
+        if os.path.isfile(sidecar):
+            try:
+                os.remove(sidecar)
+            except Exception:
+                pass
+
+        fatal_cols = [
+            c for c in report.collisions
+            if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
         ]
-        venvPy = next((p for p in venvCandidates if os.path.isfile(p)), None)
-        if not venvPy:
-            return "Lathe verifier dependencies (shapely, matplotlib) could not be loaded."
-        cmd = [venvPy, "-E", constVerifierScript, cncPath]
-        if not promote:
-            cmd.append("--no-promote")
-        cleanEnv = {
-            k: v for k, v in os.environ.items()
-            if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
-        }
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
-        err = None
-        if proc.returncode != 0:
-            err = (proc.stderr.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
-        _RecordVerifyResult(setup, cncPath, proc.stdout + proc.stderr, error=err)
+        err = f"{len(fatal_cols)} fatal collision(s) detected!" if fatal_cols else None
+
+        report_md = ""
+        if os.path.isfile(reportPath):
+            with open(reportPath, "r", encoding="utf8", errors="replace") as rf:
+                report_md = rf.read()
+
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath=cncPath,
+            reportText=report_md,
+            reportPath=reportPath,
+            promoted=len(report.promoted_vectors) if promote else 0,
+            spikes=len(report.mrr_spikes),
+            volume_mm3=report.total_volume_removed_mm3,
+            collisions=report.collisions,
+            error=err,
+        )
+
         if err:
-            return f"Lathe verifier reported an error or collision on {os.path.basename(cncPath)}: {err}"
+            return f"Lathe verification detected {err} in {os.path.basename(cncPath)}"
         return None
+
     except Exception as exc:
-        return f"Lathe verifier failed on {os.path.basename(cncPath)}: {exc}"
+        return f"Lathe pipeline verifier failed on {os.path.basename(cncPath)}: {exc}"
 
 
 def ShowVerifyResults(ui):
@@ -1129,18 +1235,20 @@ def ShowVerifyResults(ui):
         status = "FAILED: " + r["error"] if r["error"] else "OK"
         lines.append(f"{r['setup']}: {status}")
         if r["promoted"] is not None:
-            lines.append(f"    G1 -> G0 promoted: {r['promoted']}")
+            lines.append(f"    G0 Rapids Restored: {r['promoted']}")
+        if r.get("volume_mm3") is not None:
+            vol = r["volume_mm3"]
+            vol_in3 = vol / (25.4 ** 3)
+            lines.append(f"    Total Material Removed: {vol:.2f} mm³ ({vol_in3:.3f} in³)")
         if r["spikes"] is not None:
             lines.append(f"    MRR spikes flagged: {r['spikes']}")
         for kind, n in sorted(r["kinds"].items()):
             lines.append(f"    {kind}: {n}")
         lines.append(f"    G-code: {r['cnc']}")
-        if os.path.isfile(r["png"]):
-            lines.append(f"    Plot:   {r['png']}")
-        if r["report"]:
+        if r.get("report") and os.path.isfile(r["report"]):
             lines.append(f"    Report: {r['report']}")
         lines.append("")
-    lines.append("Open the verification plot(s) and report(s) now?")
+    lines.append("Open the verification report(s) now?")
     res = ui.messageBox("\n".join(lines),
                         constCmdName + " - Lathe Verification",
                         adsk.core.MessageBoxButtonTypes.YesNoButtonType,
@@ -1148,9 +1256,8 @@ def ShowVerifyResults(ui):
     if res == adsk.core.DialogResults.DialogYes:
         failures = []
         for r in verifyResults:
-            for p in (r["png"], r["report"]):
-                if not (p and os.path.isfile(p)):
-                    continue
+            p = r.get("report")
+            if p and os.path.isfile(p):
                 err = _OpenFile(p)
                 if err:
                     failures.append(f"{p}: {err}")
