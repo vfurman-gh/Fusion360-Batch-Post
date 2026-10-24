@@ -141,14 +141,26 @@ def generate_turning_holder(
     shank_length: float,
     clearance_x: float = 0.008,
     clearance_z: float = 0.008,
+    is_boring: bool = False,
 ) -> Polygon:
     """
-    Generate standard rectangular OD turning toolholder keep-out polygon.
+    Generate standard rectangular OD turning or ID boring toolholder keep-out polygon.
+    For OD turning, the shank extends radially in R <= 0.
+    For boring bars, the shank extends axially along Z >= clearance_z.
     """
-    pts = [
-        (clearance_z, -clearance_x),
-        (clearance_z + shank_width, -clearance_x),
-        (clearance_z + shank_width, -shank_length),
-        (clearance_z, -shank_length),
-    ]
+    if is_boring:
+        pts = [
+            (clearance_z, -clearance_x),
+            (clearance_z + shank_length, -clearance_x),
+            (clearance_z + shank_length, -clearance_x - shank_width),
+            (clearance_z, -clearance_x - shank_width),
+        ]
+    else:
+        pts = [
+            (clearance_z, -clearance_x),
+            (clearance_z + shank_width, -clearance_x),
+            (clearance_z + shank_width, -shank_length),
+            (clearance_z, -shank_length),
+        ]
     return Polygon(pts).buffer(0)
+

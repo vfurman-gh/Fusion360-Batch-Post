@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -1068,7 +1068,7 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=Non
 
 
 def _ExtractWorkpieceFromSetup(setup):
-    """Extract axisymmetric stock geometry directly from native Fusion 360 Setup."""
+    """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
     try:
         if not hasattr(setup, "parameters"):
             return None
@@ -1088,6 +1088,21 @@ def _ExtractWorkpieceFromSetup(setup):
         z_max_mm = float(p_front.value.value) * 10.0 if p_front else 0.0
         z_min_mm = z_max_mm - length_mm
 
+        fixtures = []
+        p_clamp = params.itemByName("job_stockClampingLength")
+        if p_clamp:
+            clamp_len_mm = float(p_clamp.value.value) * 10.0
+            if clamp_len_mm > 0.1:
+                from geometry import AxisymmetricChuckObstacle
+                fixtures.append(
+                    AxisymmetricChuckObstacle(
+                        z_min=z_min_mm - 50.0,
+                        z_max=z_min_mm + clamp_len_mm,
+                        outer_radius=(d_outer_mm * 0.5) + 30.0,
+                        clamping_radius=d_outer_mm * 0.5,
+                    )
+                )
+
         from geometry import AxisymmetricStock2D, WorkpieceDefinition
         return WorkpieceDefinition(
             stock=AxisymmetricStock2D(
@@ -1095,20 +1110,194 @@ def _ExtractWorkpieceFromSetup(setup):
                 z_max=z_max_mm,
                 outer_radius=d_outer_mm * 0.5,
                 inner_radius=d_inner_mm * 0.5,
-            )
+            ),
+            fixtures=fixtures,
         )
     except Exception:
         return None
 
 
-def RunLatheVerifier(cncPath, setup, docSettings):
+def _ExtractToolsFromSetup(setup):
+    """
+    Analytically extract lathe tool parameters from native Fusion 360 Setup operations.
+    Returns Dict[str, dict] with normalized metric dimensions for every operation.
+    """
+    tools_data = {}
+    try:
+        ops = []
+        if hasattr(setup, "allOperations"):
+            ops = list(setup.allOperations)
+        elif hasattr(setup, "operations"):
+            ops = list(setup.operations)
+        elif isinstance(setup, (list, tuple)):
+            ops = list(setup)
+
+        for op in ops:
+            op_name = getattr(op, "name", "")
+            if not op_name:
+                continue
+
+            tool = getattr(op, "tool", None)
+            tool_params = getattr(tool, "parameters", None) if tool else None
+            op_params = getattr(op, "parameters", None)
+
+            def _get_num(names, default, scale=10.0):
+                for p_col in (tool_params, op_params):
+                    if not p_col:
+                        continue
+                    for n in names:
+                        try:
+                            p = p_col.itemByName(n)
+                            if p is not None:
+                                val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
+                                if isinstance(val, (int, float)):
+                                    return float(val) * scale
+                                elif isinstance(val, str):
+                                    s = val.strip().lower()
+                                    if s.endswith("in"):
+                                        return float(s[:-2].strip()) * 25.4
+                                    elif s.endswith("mm"):
+                                        return float(s[:-2].strip())
+                                    return float(s) * scale
+                        except Exception:
+                            pass
+                return default
+
+            def _get_str(names, default=""):
+                for p_col in (tool_params, op_params):
+                    if not p_col:
+                        continue
+                    for n in names:
+                        try:
+                            p = p_col.itemByName(n)
+                            if p is not None:
+                                val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
+                                return str(val)
+                        except Exception:
+                            pass
+                return default
+
+            tool_id = int(_get_num(["tool_number", "number"], default=0, scale=1.0))
+            ttype = _get_str(["tool_type", "type"], default="turning general").lower()
+            is_boring = "bore" in ttype or "boring" in ttype or "internal" in op_name.lower() or "bore" in op_name.lower()
+            is_drill = "drill" in ttype
+            is_groove = "groov" in ttype or "part" in ttype
+
+            hand = _get_str(["tool_hand", "hand"], default="R").upper()
+            hand_code = "L" if ("LEFT" in hand or hand.startswith("L")) else "R"
+
+            # Dimensions: Fusion internal unit cm -> mm (* 10.0)
+            edge_l = _get_num(["tool_edgeLength", "edgeLength", "tool_insertEdgeLength"], default=9.525, scale=10.0)
+            nose_r = _get_num(["tool_cornerRadius", "tool_noseRadius", "cornerRadius"], default=0.4, scale=10.0)
+            lead_a = _get_num(["tool_leadAngle", "tool_leadingAngle", "leadAngle"], default=5.0, scale=180.0 / math.pi)
+            shank_w = _get_num(["tool_shankWidth", "shankWidth"], default=16.0, scale=10.0)
+            shank_l = _get_num(["tool_overallLength", "overallLength"], default=100.0, scale=10.0)
+            dia = _get_num(["tool_diameter", "diameter"], default=6.35, scale=10.0)
+            flute_l = _get_num(["tool_fluteLength", "fluteLength"], default=dia * 4.0, scale=10.0)
+            blade_w = _get_num(["tool_width", "blade_width", "tool_diameter"], default=3.0, scale=10.0)
+            blade_d = _get_num(["tool_bodyLength", "blade_depth", "tool_grooveDepth"], default=12.0, scale=10.0)
+
+            shape = "drill" if is_drill else ("groove" if is_groove else "rhombic")
+
+            tools_data[op_name] = {
+                "tool_id": tool_id,
+                "name": op_name,
+                "insert_shape": shape,
+                "is_boring": is_boring,
+                "hand": hand_code,
+                "edge_length": edge_l,
+                "nose_radius": nose_r,
+                "lead_angle": lead_a,
+                "shank_width": shank_w,
+                "shank_length": shank_l,
+                "diameter": dia,
+                "flute_length": flute_l,
+                "overall_length": shank_l,
+                "blade_width": blade_w,
+                "blade_depth": blade_d,
+            }
+    except Exception:
+        pass
+    return tools_data
+
+
+def _BuildToolAssembly(t_info):
+    """Reconstruct pure-Python ToolAssembly with exact 2D Shapely geometry."""
+    from shapely.geometry import Polygon
+    from geometry.tool_generator import (
+        generate_rhombic_insert,
+        generate_grooving_insert,
+        generate_drill_cutter,
+        generate_turning_holder,
+    )
+    from geometry import LatheToolGeometry, ToolCompensationQuadrant, ToolAssembly
+
+    shape = t_info.get("insert_shape", "rhombic")
+    tool_id = t_info.get("tool_id", 0)
+    op_name = t_info.get("name", "")
+    is_boring = t_info.get("is_boring", False)
+    shank_w = t_info.get("shank_width", 16.0)
+    shank_l = t_info.get("shank_length", 100.0)
+    nose_r = t_info.get("nose_radius", 0.4)
+
+    if shape == "drill":
+        cutter = generate_drill_cutter(
+            diameter=t_info.get("diameter", 6.35),
+            point_angle_deg=118.0,
+            flute_length=t_info.get("flute_length", 30.0),
+            overall_length=t_info.get("overall_length", 60.0),
+        )
+        holder = Polygon()
+    elif shape == "groove":
+        cutter = generate_grooving_insert(
+            blade_width=t_info.get("blade_width", 3.0),
+            blade_depth=t_info.get("blade_depth", 12.0),
+            corner_radius=nose_r,
+        )
+        holder = generate_turning_holder(
+            shank_width=shank_w,
+            shank_length=shank_l,
+            clearance_x=nose_r,
+            clearance_z=nose_r,
+            is_boring=is_boring,
+        )
+    else:
+        cutter = generate_rhombic_insert(
+            edge_length=t_info.get("edge_length", 9.525),
+            nose_radius=nose_r,
+            lead_angle_deg=t_info.get("lead_angle", 5.0),
+        )
+        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
+        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
+        holder = generate_turning_holder(
+            shank_width=shank_w,
+            shank_length=shank_l,
+            clearance_x=clr_x,
+            clearance_z=clr_z,
+            is_boring=is_boring,
+        )
+
+
+    clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
+    geom = LatheToolGeometry(
+        insert_shape=shape,
+        nose_radius=nose_r,
+        hand=t_info.get("hand", "R"),
+        quadrant=ToolCompensationQuadrant.P3,
+        cutter_polygon=cutter,
+        holder_polygon=clean_holder,
+    )
+    return ToolAssembly(tool_id=tool_id, name=op_name, geometry=geom)
+
+
+def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     """
     Execute 6-stage toolpath verification and rapid-promotion pipeline:
-    1. Ingest WorkpieceDefinition and ToolAssembly models.
-    2. Extract ISO 4343 APT toolpath and Compact-NCI (.cnc).
+    1. Ingest WorkpieceDefinition and ToolAssembly models analytically from Setup.
+    2. Extract ISO 4343 APT toolpath and Compact-NCI (.cnc) via apt_extractor_wrapper.cps.
     3. Simulate 2D IPW stock removal and verify collisions via Lathe2DIPWVerifier.
     4. If fastZ is enabled, restore native G0 rapid moves via universal_wrapper.cps.
-    5. Compile markdown verification report.
+    5. Compile markdown verification report and generate high-res verification plot (.png).
     """
     if setup is None or setup.operationType != adsk.cam.OperationTypes.TurningOperation:
         return None
@@ -1137,8 +1326,6 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         try:
             import shapely
             from geometry import (
-                parse_legacy_stock,
-                parse_legacy_tool_op,
                 Lathe2DIPWVerifier,
                 ToolAssembly,
                 CollisionKind,
@@ -1150,40 +1337,44 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         except (ImportError, OSError):
             can_import_in_process = False
 
-        is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
-        tool_scale = 25.4 if is_inch else 1.0
-
-        # Ingest workpiece: native Fusion Setup API first, legacy comment fallback second
+        # Ingest workpiece and tools directly from native Fusion Setup API
         workpiece = _ExtractWorkpieceFromSetup(setup)
+        tools_data = _ExtractToolsFromSetup(setup)
         tools_by_op = {}
-        for line in gcode_content.splitlines():
-            if not workpiece and line.startswith(";META_STOCK:"):
-                workpiece = parse_legacy_stock(line)
-                if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
-                    workpiece = WorkpieceDefinition(
-                        stock=AxisymmetricStock2D(
-                            z_min=workpiece.stock.z_min * 25.4,
-                            z_max=workpiece.stock.z_max * 25.4,
-                            outer_radius=workpiece.stock.outer_radius * 25.4,
-                            inner_radius=workpiece.stock.inner_radius * 25.4,
-                        ),
-                        fixtures=workpiece.fixtures,
-                    )
-            elif line.startswith(";META_OP:"):
-                try:
-                    payload = json.loads(line.split(":", 1)[1])
-                    geom = None
-                    if can_import_in_process:
-                        geom = parse_legacy_tool_op(line)
-                    tool_asm = ToolAssembly(
-                        tool_id=payload.get("tool", 0),
-                        name=payload.get("name", ""),
-                        geometry=geom,
-                    ) if can_import_in_process else None
-                    if tool_asm and tool_asm.name:
-                        tools_by_op[tool_asm.name] = tool_asm
-                except Exception:
-                    pass
+
+        is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
+        tool_scale = 1.0
+
+        if not workpiece or not tools_data:
+            from geometry import parse_legacy_stock, parse_legacy_tool_op
+            for line in gcode_content.splitlines():
+                if not workpiece and line.startswith(";META_STOCK:"):
+                    workpiece = parse_legacy_stock(line)
+                    if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
+                        workpiece = WorkpieceDefinition(
+                            stock=AxisymmetricStock2D(
+                                z_min=workpiece.stock.z_min * 25.4,
+                                z_max=workpiece.stock.z_max * 25.4,
+                                outer_radius=workpiece.stock.outer_radius * 25.4,
+                                inner_radius=workpiece.stock.inner_radius * 25.4,
+                            ),
+                            fixtures=workpiece.fixtures,
+                        )
+                elif not tools_data and line.startswith(";META_OP:"):
+                    try:
+                        payload = json.loads(line.split(":", 1)[1])
+                        geom = parse_legacy_tool_op(line) if can_import_in_process else None
+                        tool_asm = ToolAssembly(
+                            tool_id=payload.get("tool", 0),
+                            name=payload.get("name", ""),
+                            geometry=geom,
+                        ) if can_import_in_process else None
+                        if tool_asm and tool_asm.name:
+                            tools_by_op[tool_asm.name] = tool_asm
+                    except Exception:
+                        pass
+            if not tools_data and is_inch:
+                tool_scale = 25.4
 
         if not workpiece:
             return None
@@ -1195,6 +1386,7 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             if os.path.isdir(inter_dir):
                 candidates = sorted(
                     glob.glob(os.path.join(inter_dir, "*.cnc")),
+
                     key=os.path.getmtime,
                     reverse=True,
                 )
@@ -1211,11 +1403,14 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             return None
 
         # Base post processor configuration
-        base_post = os.path.join(constAddonDir, "centroid_turning.cps")
+        if not base_post or not os.path.isfile(base_post):
+            base_post = os.path.join(constAddonDir, "centroid_turning.cps")
         if not os.path.isfile(base_post):
             return f"Base machine post processor not found: {base_post}"
 
         if can_import_in_process:
+            if tools_data:
+                tools_by_op = {name: _BuildToolAssembly(t_info) for name, t_info in tools_data.items()}
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
             orchestrator = PipelineOrchestrator(
                 wrapper_cps=os.path.join(constAddonDir, "universal_wrapper.cps")
@@ -1247,55 +1442,82 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             venvCandidates = [
                 os.path.join(constAddonDir, ".venv", "bin", "python"),
                 os.path.join(constAddonDir, ".venv", "bin", "python3"),
+                os.path.expanduser("~/.gemini/antigravity-cli/brain/a05954bb-1c8d-4776-80f8-88db191a980c/scratch/venv/bin/python"),
                 os.path.expanduser("~/Documents/.lathe_venv/bin/python"),
             ]
             venvPy = next((p for p in venvCandidates if os.path.isfile(p)), None)
             if not venvPy:
                 return "Lathe verifier dependencies (shapely) could not be loaded in Fusion process or isolated venv."
 
-            runner = os.path.join(constAddonDir, "run_pipeline.py")
-            cmd = [
-                venvPy, runner,
-                "--intermediate", intermediate_path,
-                "--base-post", base_post,
-                "--final-cnc", cncPath,
-                "--report", reportPath,
-                "--plot", plotPath,
-            ]
-            if not promote:
-                cmd.append("--no-promote")
-            if workpiece and isinstance(workpiece.stock, AxisymmetricStock2D):
-                stock_json = json.dumps({
-                    "z_min": workpiece.stock.z_min,
-                    "z_max": workpiece.stock.z_max,
-                    "outer_radius": workpiece.stock.outer_radius,
-                    "inner_radius": workpiece.stock.inner_radius,
-                })
-                cmd.extend(["--stock-json", stock_json])
+            tools_tmp_path = None
+            try:
+                cmd = [
+                    venvPy, runner,
+                    "--intermediate", intermediate_path,
+                    "--base-post", base_post,
+                    "--final-cnc", cncPath,
+                    "--report", reportPath,
+                    "--plot", plotPath,
+                ]
+                if tools_data:
+                    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w", encoding="utf8") as tf:
+                        json.dump(tools_data, tf)
+                        tools_tmp_path = tf.name
+                    cmd.extend(["--tools-file", tools_tmp_path])
+                else:
+                    cmd.extend(["--meta-gcode", cncPath])
 
-            cleanEnv = {
-                k: v for k, v in os.environ.items()
-                if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
-            }
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
-            if proc.returncode != 0:
-                err_line = (proc.stderr.strip().splitlines() or proc.stdout.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
-                return f"Verification pipeline failed: {err_line}"
+                if not promote:
+                    cmd.append("--no-promote")
+                if workpiece and hasattr(workpiece, "stock") and workpiece.stock:
+                    stock_json = json.dumps({
+                        "z_min": workpiece.stock.z_min,
+                        "z_max": workpiece.stock.z_max,
+                        "outer_radius": workpiece.stock.outer_radius,
+                        "inner_radius": workpiece.stock.inner_radius,
+                    })
+                    cmd.extend(["--stock-json", stock_json])
+                if workpiece and hasattr(workpiece, "fixtures") and workpiece.fixtures:
+                    fixtures_json = json.dumps([
+                        {
+                            "z_min": f.z_min,
+                            "z_max": f.z_max,
+                            "outer_radius": f.outer_radius,
+                            "clamping_radius": f.clamping_radius,
+                        }
+                        for f in workpiece.fixtures
+                    ])
+                    cmd.extend(["--fixtures-json", fixtures_json])
 
-            vol_mm3 = 0.0
-            promoted_cnt = 0
-            spikes_cnt = 0
-            collision_cnt = 0
-            for line in proc.stdout.splitlines():
-                if line.startswith("VERIFY_RESULT:"):
-                    res_data = json.loads(line.split(":", 1)[1])
-                    vol_mm3 = res_data.get("volume_mm3", 0.0)
-                    promoted_cnt = res_data.get("promoted", 0)
-                    spikes_cnt = res_data.get("spikes", 0)
-                    collision_cnt = res_data.get("collisions", 0)
+                cleanEnv = {
+                    k: v for k, v in os.environ.items()
+                    if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
+                }
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
+                if proc.returncode != 0:
+                    err_line = (proc.stderr.strip().splitlines() or proc.stdout.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+                    return f"Verification pipeline failed: {err_line}"
 
-            cols_list = []
-            err = f"{collision_cnt} fatal collision(s) detected!" if collision_cnt > 0 else None
+                vol_mm3 = 0.0
+                promoted_cnt = 0
+                spikes_cnt = 0
+                collision_cnt = 0
+                for line in proc.stdout.splitlines():
+                    if line.startswith("VERIFY_RESULT:"):
+                        res_data = json.loads(line.split(":", 1)[1])
+                        vol_mm3 = res_data.get("volume_mm3", 0.0)
+                        promoted_cnt = res_data.get("promoted", 0)
+                        spikes_cnt = res_data.get("spikes", 0)
+                        collision_cnt = res_data.get("collisions", 0)
+
+                cols_list = []
+                err = f"{collision_cnt} fatal collision(s) detected!" if collision_cnt > 0 else None
+            finally:
+                if tools_tmp_path and os.path.isfile(tools_tmp_path):
+                    try:
+                        os.remove(tools_tmp_path)
+                    except Exception:
+                        pass
 
         # Cleanup sidecar intermediate file
         sidecar = cncPath + ".intermediate.cnc"
@@ -1444,15 +1666,15 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         # Do it all at once? (Always handle turning setups through unified verification pipeline)
         if do_lathe_pipeline or not docSettings["splitSetup"]:
             orig_post = None
-            capture_post = os.path.join(constAddonDir, "capture_stock_tools.cps")
             try:
                 program.operations = [setup]
-                if do_lathe_pipeline and os.path.isfile(capture_post):
+                if do_lathe_pipeline and os.path.isfile(constAptExtractorScript):
                     try:
                         orig_post = program.postConfiguration
-                        os.environ["BASE_CPS"] = orig_post
-                        os.environ["TARGET_INTERMEDIATE_CNC"] = path + ".intermediate.cnc"
-                        program.postConfiguration = capture_post
+                        intermediate_cnc = path + ".intermediate.cnc"
+                        os.environ["SYSTEM_APT_CPS"] = "apt.cps"
+                        os.environ["TARGET_INTERMEDIATE_CNC"] = intermediate_cnc
+                        program.postConfiguration = constAptExtractorScript
                     except Exception:
                         orig_post = None
 
@@ -1460,7 +1682,7 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     return "Fusion reported an error."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
-                    return RunLatheVerifier(path, setup, docSettings)
+                    return RunLatheVerifier(path, setup, docSettings, base_post=orig_post)
                 return None
             except Exception as exc:
                 retVal += ": " + str(exc)
@@ -1471,6 +1693,7 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                         program.postConfiguration = orig_post
                     except Exception:
                         pass
+
 
         # Split setup into individual operations
         opPath = path

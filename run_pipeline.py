@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--wrapper", default=os.path.join(_SCRIPT_DIR, "universal_wrapper.cps"), help="Path to universal_wrapper.cps")
     parser.add_argument("--meta-gcode", help="Path to G-code file containing metadata comments")
     parser.add_argument("--stock-json", help="JSON string for WorkpieceDefinition")
+    parser.add_argument("--fixtures-json", help="JSON string for fixtures / chuck obstacles")
+    parser.add_argument("--tools-file", help="Path to JSON file containing analytical tool definitions")
     parser.add_argument("--no-promote", action="store_true", help="Disable G0 rapid promotion")
 
     args = parser.parse_args()
@@ -45,16 +47,106 @@ def main():
     if args.stock_json:
         try:
             data = json.loads(args.stock_json)
-            workpiece = WorkpieceDefinition(
-                stock=AxisymmetricStock2D(
-                    z_min=float(data["z_min"]),
-                    z_max=float(data["z_max"]),
-                    outer_radius=float(data["outer_radius"]),
-                    inner_radius=float(data.get("inner_radius", 0.0)),
-                )
+            stock = AxisymmetricStock2D(
+                z_min=float(data["z_min"]),
+                z_max=float(data["z_max"]),
+                outer_radius=float(data["outer_radius"]),
+                inner_radius=float(data.get("inner_radius", 0.0)),
             )
+            fixtures = []
+            if args.fixtures_json:
+                from geometry import AxisymmetricChuckObstacle
+                f_data = json.loads(args.fixtures_json)
+                for f_item in f_data:
+                    fixtures.append(
+                        AxisymmetricChuckObstacle(
+                            z_min=float(f_item["z_min"]),
+                            z_max=float(f_item["z_max"]),
+                            outer_radius=float(f_item["outer_radius"]),
+                            clamping_radius=float(f_item["clamping_radius"]),
+                        )
+                    )
+            workpiece = WorkpieceDefinition(stock=stock, fixtures=fixtures)
         except Exception as e:
             print(f"WARNING: Failed to parse stock JSON: {e}", file=sys.stderr)
+
+    analytical_tools_loaded = False
+    if args.tools_file and os.path.isfile(args.tools_file):
+        try:
+            with open(args.tools_file, "r", encoding="utf8") as tf:
+                tools_data = json.load(tf)
+            from shapely.geometry import Polygon
+            from geometry.tool_generator import (
+                generate_rhombic_insert,
+                generate_grooving_insert,
+                generate_drill_cutter,
+                generate_turning_holder,
+            )
+            from geometry import LatheToolGeometry, ToolCompensationQuadrant
+
+            for op_name, t_info in tools_data.items():
+                shape = t_info.get("insert_shape", "rhombic")
+                tool_id = t_info.get("tool_id", 0)
+                is_boring = t_info.get("is_boring", False)
+                shank_w = t_info.get("shank_width", 16.0)
+                shank_l = t_info.get("shank_length", 100.0)
+                nose_r = t_info.get("nose_radius", 0.4)
+
+                if shape == "drill":
+                    cutter = generate_drill_cutter(
+                        diameter=t_info.get("diameter", 6.35),
+                        point_angle_deg=t_info.get("point_angle", 118.0),
+                        flute_length=t_info.get("flute_length", 30.0),
+                        overall_length=t_info.get("overall_length", 60.0),
+                    )
+                    holder = Polygon()
+                elif shape == "groove":
+                    cutter = generate_grooving_insert(
+                        blade_width=t_info.get("blade_width", 3.0),
+                        blade_depth=t_info.get("blade_depth", 12.0),
+                        corner_radius=nose_r,
+                    )
+                    holder = generate_turning_holder(
+                        shank_width=shank_w,
+                        shank_length=shank_l,
+                        clearance_x=nose_r,
+                        clearance_z=nose_r,
+                        is_boring=is_boring,
+                    )
+                else:  # rhombic / general turning
+                    cutter = generate_rhombic_insert(
+                        edge_length=t_info.get("edge_length", 9.525),
+                        nose_radius=nose_r,
+                        lead_angle_deg=t_info.get("lead_angle", 5.0),
+                    )
+                    clr_x = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
+                    clr_z = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
+                    holder = generate_turning_holder(
+                        shank_width=shank_w,
+                        shank_length=shank_l,
+                        clearance_x=clr_x,
+                        clearance_z=clr_z,
+                        is_boring=is_boring,
+                    )
+
+
+                clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
+                geom = LatheToolGeometry(
+                    insert_shape=shape,
+                    nose_radius=nose_r,
+                    hand=t_info.get("hand", "R"),
+                    quadrant=ToolCompensationQuadrant.P3,
+                    cutter_polygon=cutter,
+                    holder_polygon=clean_holder,
+                )
+                tools_by_op[op_name] = ToolAssembly(
+                    tool_id=tool_id,
+                    name=op_name,
+                    geometry=geom,
+                )
+            analytical_tools_loaded = bool(tools_by_op)
+        except Exception as e:
+            print(f"WARNING: Failed to parse tools file {args.tools_file}: {e}", file=sys.stderr)
 
     gcode_content = ""
     candidate_files = [args.meta_gcode, args.final_cnc]
@@ -66,7 +158,7 @@ def main():
                 break
 
     is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
-    tool_scale = 25.4 if is_inch else 1.0
+    tool_scale = 1.0 if analytical_tools_loaded else (25.4 if is_inch else 1.0)
 
     for line in gcode_content.splitlines():
         if not workpiece and line.startswith(";META_STOCK:"):
@@ -81,7 +173,7 @@ def main():
                     ),
                     fixtures=workpiece.fixtures,
                 )
-        elif line.startswith(";META_OP:"):
+        elif not analytical_tools_loaded and line.startswith(";META_OP:"):
             geom = parse_legacy_tool_op(line)
             try:
                 payload = json.loads(line.split(":", 1)[1])
@@ -98,6 +190,7 @@ def main():
     if not workpiece:
         print("ERROR: Workpiece stock definition could not be determined", file=sys.stderr)
         sys.exit(1)
+
 
     verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
     orchestrator = PipelineOrchestrator(wrapper_cps=args.wrapper)
