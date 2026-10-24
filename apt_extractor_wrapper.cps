@@ -15,7 +15,33 @@ minimumRevision = 45000;
 capabilities = CAPABILITY_TURNING | CAPABILITY_MILLING;
 extension = "apt";
 
-var systemAptPath = getEnvironmentVariable("SYSTEM_APT_CPS");
+var systemAptPath = "";
+try {
+  systemAptPath = getEnvironmentVariable("SYSTEM_APT_CPS");
+} catch (e) {}
+
+if (!systemAptPath || !FileSystem.isFile(systemAptPath)) {
+  var candidates = [
+    "/Users/vadimf/Documents/Fusion360-Batch-Post-master/apt.cps",
+    "/Users/vadimf/Library/Application Support/Autodesk/Fusion 360 CAM/Posts/apt.cps",
+    "/Users/vadimf/Library/Application Support/Autodesk/webdeploy/production/c139e2731e42a0340acc3d34de2cbdb01237a27c/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps"
+  ];
+  try {
+    var cfgFolder = FileSystem.getFolderPath(getConfigurationPath());
+    if (cfgFolder) {
+      candidates.unshift(FileSystem.getCombinedPath(cfgFolder, "apt.cps"));
+    }
+  } catch (e) {}
+
+  for (var i = 0; i < candidates.length; ++i) {
+    var c = candidates[i];
+    if (c && FileSystem.isFile(c) && (c.indexOf("/") === 0 || c.indexOf(":") === 1)) {
+      systemAptPath = c;
+      break;
+    }
+  }
+}
+
 if (!systemAptPath) {
   systemAptPath = "apt.cps";
 }

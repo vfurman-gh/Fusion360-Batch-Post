@@ -1732,15 +1732,16 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     except Exception:
                         orig_post_config = None
 
-                    # Ensure apt_extractor_wrapper.cps is available in Fusion's local Posts library folder
+                    # Ensure apt_extractor_wrapper.cps and apt.cps are available in Fusion's local Posts library folder
                     local_posts_dir = os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts")
                     if os.path.isdir(local_posts_dir):
-                        dest_wrapper = os.path.join(local_posts_dir, "apt_extractor_wrapper.cps")
-                        if not os.path.exists(dest_wrapper):
-                            try:
-                                shutil.copyfile(constAptExtractorScript, dest_wrapper)
-                            except Exception:
-                                pass
+                        for f_name, src_p in [("apt_extractor_wrapper.cps", constAptExtractorScript), ("apt.cps", os.path.join(constAddonDir, "apt.cps"))]:
+                            dest = os.path.join(local_posts_dir, f_name)
+                            if not os.path.exists(dest) and os.path.isfile(src_p):
+                                try:
+                                    shutil.copyfile(src_p, dest)
+                                except Exception:
+                                    pass
 
                     # Query LocalLibraryLocation for on-disk PostConfiguration object
                     apt_post_obj = None
