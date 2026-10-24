@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -63,6 +63,15 @@ constAddonDir = os.path.dirname(os.path.abspath(__file__))
 constWrapperScript = os.path.join(constAddonDir, "universal_wrapper.cps")
 constAptExtractorScript = os.path.join(constAddonDir, "apt_extractor_wrapper.cps")
 constPackagesDir = os.path.join(constAddonDir, "packages")
+
+def _dbg_global(msg):
+    try:
+        t = time.strftime('%H:%M:%S')
+        with open("/tmp/postprocess_debug.log", "a", encoding="utf8") as f:
+            f.write(f"[{t}] {msg}\n")
+            f.flush()
+    except Exception:
+        pass
 
 # Tool tip text
 toolTip = (
@@ -876,6 +885,7 @@ def PerformPostProcess(docSettings, setups):
         cntSkipped = 0
         lstSkipped = ""
         verifyResults.clear()
+        _dbg_global(f"PerformPostProcess entered: incoming setups count={len(setups) if setups else 0}")
 
         program = GetNcProgram(cam, docSettings);
         parameters = program.parameters
@@ -1709,13 +1719,7 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         parameters.itemByName("nc_program_filename").value.value = opName
         parameters.itemByName("nc_program_name").value.value = fname
 
-        def _dbg(msg):
-            try:
-                with open("/tmp/postprocess_debug.log", "a", encoding="utf8") as f:
-                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
-            except Exception:
-                pass
-
+        _dbg = _dbg_global
         _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, splitSetup={docSettings.get('splitSetup')}")
 
         # Check if lathe verification pipeline should handle this setup
