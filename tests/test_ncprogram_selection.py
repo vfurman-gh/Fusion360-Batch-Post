@@ -9,8 +9,7 @@ Validates:
 4. NCProgram with mixed setups and individual operations correctly filters each setup.
 5. NCProgram with folder CAM objects includes only the operations from that folder.
 6. Empty NCProgram falls back safely to all setups in cam.setups.
-7. onlySelected browser filter properly restricts NCProgram setups.
-8. Suppressed operations and operations without toolpaths are excluded.
+7. Suppressed operations and operations without toolpaths are excluded.
 """
 
 import sys
@@ -143,7 +142,7 @@ class TestNCProgramSelection(unittest.TestCase):
         self.setup3 = MockSetup("Setup3", [self.op3_1])
 
         self.cam = MockCAM([self.setup1, self.setup2, self.setup3])
-        self.settings = {"onlySelected": False}
+        self.settings = {}
 
     def test_ncprogram_with_full_setups(self):
         """Selecting full setups in NCProgram returns those setups with all their active operations."""
@@ -230,20 +229,6 @@ class TestNCProgramSelection(unittest.TestCase):
         self.assertEqual(len(op_map[self.setup2]), 2)
         self.assertEqual(len(op_map[self.setup3]), 1)
 
-    def test_only_selected_filters_ncprogram_setups(self):
-        """When onlySelected is enabled, browser selection further filters NCProgram setups."""
-        prog = MockNCProgram("ProgAll", operations=[self.setup1, self.setup2])
-        # User selected Setup 1 in browser
-        settings = {"onlySelected": True}
-        browser_setups = [self.setup1]
-
-        target_setups, op_map = GetNcProgramSetupsAndOperations(
-            self.cam, settings, setups=browser_setups, program=prog
-        )
-
-        self.assertEqual(len(target_setups), 1)
-        self.assertEqual(target_setups[0].name, "Setup1")
-        self.assertNotIn(self.setup2, target_setups)
 
     def test_suppressed_and_no_toolpath_filtered_out(self):
         """Suppressed operations and operations with hasToolpath=False are excluded."""

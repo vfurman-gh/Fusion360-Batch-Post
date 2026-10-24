@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
-version = 15
+version = 16
 
 # Initial default values of settings
 defaultSettings = {
@@ -18,13 +18,9 @@ defaultSettings = {
     "combineTool" : True,
     "restore_rapid" : True,
     "verifyGcode" : True,
-    "numericName" : False,
-    "onlySelected" : False,
     # Groups are expanded or not
     "groupPersonal" : True,
-    "groupPost" : False,
     "groupAdvanced" : False,
-    "groupRename" : False,
     # Retry policy
     "initialDelay" : 0.2,
     "postRetries" : 3
@@ -174,7 +170,10 @@ class SettingsManager:
     def UpdateSettings(self, src, dst):
         if "restore_rapid" not in dst:
             dst["restore_rapid"] = dst.get("fastZ", dst.get("fastZHeuristic", True))
-        for k in ("splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp"):
+        for k in (
+            "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
+            "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName"
+        ):
             dst.pop(k, None)
         for item in src:
             if not (item in dst):
@@ -456,14 +455,7 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
                 if not any(s == ws or getattr(s, "name", None) == getattr(ws, "name", None) for ws in whole_setups):
                     whole_setups.append(s)
 
-    # Filter by browser selection if onlySelected is enabled
-    if settings and settings.get("onlySelected") and setups and len(setups) > 0:
-        target_setups = [
-            s for s in nc_prog_setups
-            if any(s == b_s or getattr(s, "name", None) == getattr(b_s, "name", None) for b_s in setups)
-        ]
-    else:
-        target_setups = list(nc_prog_setups)
+    target_setups = list(nc_prog_setups)
 
     setup_operations_map = SetupOperationsMap()
     for s in target_setups:
@@ -503,20 +495,6 @@ def GetSetups(cam, settings, setups=None, program=None):
     return target_setups
 
 
-def GetSetupTypes(cam, selectedSetups, onlySelected):
-    """Determine if non-suppressed turning and/or milling setups exist in the target set."""
-    targetSetups = selectedSetups if (onlySelected and len(selectedSetups) != 0) else cam.setups
-    hasTurning = any(
-        not s.isSuppressed and s.operationType == adsk.cam.OperationTypes.TurningOperation
-        for s in targetSetups
-    )
-    hasMilling = any(
-        not s.isSuppressed and s.operationType == adsk.cam.OperationTypes.MillingOperation
-        for s in targetSetups
-    )
-    return hasTurning, hasMilling
-
-
 def GetNcProgram(cam, settings):
     if not cam or not hasattr(cam, "ncPrograms"):
         return None
@@ -530,34 +508,6 @@ def GetNcProgram(cam, settings):
     if target is None and cam.ncPrograms.count > 0:
         target = cam.ncPrograms.item(0)
     return target
-
-
-def RenameSetups(settings, setups, find, replace, isRegex):
-    try:
-        app = adsk.core.Application.get()
-        ui  = app.userInterface
-        doc = app.activeDocument
-        cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
-        setups = GetSetups(cam, settings, setups)
-        
-        for setup in setups:
-            if isRegex:
-                newName = re.sub(find, replace, setup.name)
-            else:
-                if find == "":
-                    # special case, prepend
-                    newName = replace + setup.name
-                else:
-                    newName = setup.name.replace(find, replace)
-
-            if setup.name != newName:
-                setup.name = newName
-
-        # Save settings in document attributes
-        settingsMgr.SaveSettings(doc.attributes, settings)
-
-    except:
-        pass
 
 
 # Event handler for the commandCreated event.
@@ -574,15 +524,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             app = adsk.core.Application.get()
             cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType(constCAMProductId))
             docSettings  = settingsMgr.GetSettings(app.activeDocument.attributes)
-
-            # See if we're doing only selected setups and whether any turning or milling setups exist
-            selectedSetups = []
-            for setup in cam.setups:
-                if setup.isSelected:
-                    selectedSetups.append(setup)
-            hasTurningSetup, hasMillingSetup = GetSetupTypes(
-                cam, selectedSetups, docSettings.get("onlySelected", False)
-            )
 
             # Get the NCProgram
             programs = cam.ncPrograms
@@ -608,7 +549,7 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             docSettings["ncProgram"] = program.name
 
             # Connect to the execute event.
-            onExecute = CommandExecuteHandler(docSettings, selectedSetups)
+            onExecute = CommandExecuteHandler(docSettings)
             cmd.execute.add(onExecute)
             handlers.append(onExecute)
 
@@ -636,20 +577,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             )
             label.tooltip = input.tooltip
             label.tooltipDescription = input.tooltipDescription
-
-            # check box to use only selected setups
-            input = inputs.addBoolValueInput("onlySelected", 
-                                             "Only selected setups", 
-                                             True, 
-                                             "", 
-                                             docSettings["onlySelected"])
-            input.tooltip = "Only Process Selected Setups"
-            input.tooltipDescription = (
-                "Only setups selected in the browser will be processed. Note "
-                "that a selected setup will be highlighted, not simply activated. "
-                "Selecting individual operations within a setup has no effect."
-            )
-            input.isEnabled = len(selectedSetups) != 0
 
             # check box to delete existing files
             input = inputs.addBoolValueInput("delFiles", 
@@ -725,74 +652,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
            
             inputGroup.isExpanded = docSettings["groupPersonal"]
 
-            # Rename
-            inputGroup = inputs.addGroupCommandInput("groupRename", "Rename Setups")
-
-            # check box to use regular expressions
-            input = inputGroup.children.addBoolValueInput("regex",
-                                                          "Use Python regular expressions",
-                                                          True,
-                                                          "",
-                                                          False)
-            input.tooltip = "Search With Regular Expressions"
-            input.tooltipDescription = (
-                "Treat the search string as a Python regular expression (regex). "
-                "This is extremely flexible but also very technical. Refer to "
-                "Python documentation for details."
-                "<p>One example is to put $ in the search box. This special "
-                "symbol searches for the end of the setup name. Then the replacement "
-                "string will be appended to the existing name."
-            )
-
-            # text box as a label for search field
-            input = inputGroup.children.addTextBoxCommandInput("searchLabel", 
-                                                               "", 
-                                                               "Search for this string:",
-                                                               1,
-                                                               True)
-            input.isFullWidth = True
-            label = input
-
-            # Find
-            input = inputGroup.children.addStringValueInput("findString", "")
-            input.isFullWidth = True
-            input.tooltip = "String to find in setup name"
-            input.tooltipDescription = (
-                "Replace all occurences of this string with the replacement string. "
-                "If this is left blank, the replacement string will be prepended to "
-                "each setup name."
-            )
-            label.tooltip = input.tooltip
-            label.tooltipDescription = input.tooltipDescription
-
-            # text box as a label for replace field
-            input = inputGroup.children.addTextBoxCommandInput("replaceLabel", 
-                                                               "", 
-                                                               "Replace with this string:",
-                                                               1,
-                                                               True)
-            input.isFullWidth = True
-            label = input
-
-            # Replace
-            input = inputGroup.children.addStringValueInput("replaceString", "")
-            input.isFullWidth = True
-            input.tooltip = "String to use as replacement"
-            input.tooltipDescription = (
-                "Replace all occurences of the Find string with this string."
-            )
-            label.tooltip = input.tooltip
-            label.tooltipDescription = input.tooltipDescription
-
-            # button to execute search & replace
-            input = inputGroup.children.addBoolValueInput("replace", "Search and replace", False)
-            input.resourceFolder = "resources/Rename"
-            input.tooltip = "Execute search and replace"
-            input.tooltipDescription = (
-                "Search for all strings matching the Find box and replace them "
-                "with the string in the Replace box.")
-            inputGroup.isExpanded = docSettings["groupRename"]
-
             # Advanced -- retry settings
             inputGroup = inputs.addGroupCommandInput("groupAdvanced", "Advanced")
             # Time delay
@@ -808,21 +667,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             input.tooltipDescription = (
                 "Retries if post processing failed. Time delay is doubled each retry.")
             inputGroup.isExpanded = docSettings["groupAdvanced"]
-            
-            # post processor
-            inputGroup = inputs.addGroupCommandInput("groupPost", "Post Processor")
-            inputGroup.isExpanded = docSettings["groupPost"]
-
-            # Numeric name required?
-            input = inputGroup.children.addBoolValueInput("numericName",
-                                                          "Name must be numeric",
-                                                          True,
-                                                          "",
-                                                          docSettings["numericName"])
-            input.tooltip = "Output File Name Must Be Numeric"
-            input.tooltipDescription = (
-                "The name of the setup will not be used in the file name, "
-                "only sequence numbers.")
 
             # button to save default settings
             input = inputs.addBoolValueInput("save", "Save as default", False)
@@ -837,7 +681,7 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             input.isVisible = False
 
             # Connect to the inputChanged event.
-            onInputChanged = CommandInputChangedHandler(docSettings, selectedSetups)
+            onInputChanged = CommandInputChangedHandler(docSettings)
             cmd.inputChanged.add(onInputChanged)
             handlers.append(onInputChanged)
 
@@ -851,9 +695,8 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
 
 # Event handler for the inputChanged event.
 class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
-    def __init__(self, docSettings, selectedSetups):
+    def __init__(self, docSettings):
         self.docSettings = docSettings
-        self.selectedSetups = selectedSetups
         super().__init__()
 
     def notify(self, args):
@@ -871,10 +714,6 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
             input = eventArgs.input
             if input.id == "save":
                 settingsMgr.SaveDefault(self.docSettings)
-
-            elif input.id == "replace":
-                cmd.doExecute(False)    # do it in execute handler for Undo
-                return
 
             elif input.id in self.docSettings:
                 if input.objectType == adsk.core.GroupCommandInput.classType():
@@ -916,9 +755,8 @@ class CommandValidateInputsHandler(adsk.core.ValidateInputsEventHandler):
 
 # Event handler for the execute event.
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
-    def __init__(self, docSettings, selectedSetups):
+    def __init__(self, docSettings):
         self.docSettings = docSettings
-        self.selectedSetups = selectedSetups
         super().__init__()
 
     def notify(self, args):
@@ -927,31 +765,22 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
         inputs = cmd.commandInputs
 
         # Code to react to the event.
-        button = inputs.itemById("replace")
-        if button.value:
-            RenameSetups(self.docSettings, 
-                        self.selectedSetups, 
-                        inputs.itemById("findString").value, 
-                        inputs.itemById("replaceString").value,
-                        inputs.itemById("regex").value)
-            button.value = False
-        else:
-            for key in list(self.docSettings.keys()):
-                inp = inputs.itemById(key)
-                if inp:
-                    if inp.objectType == adsk.core.GroupCommandInput.classType():
-                        self.docSettings[key] = inp.isExpanded
-                    elif inp.objectType == adsk.core.DropDownCommandInput.classType():
-                        if inp.selectedItem:
-                            self.docSettings[key] = inp.selectedItem.name
-                    elif hasattr(inp, "value"):
-                        self.docSettings[key] = inp.value
-            _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, verifyGcode={self.docSettings.get('verifyGcode')}, restore_rapid={self.docSettings.get('restore_rapid')}")
-            PerformPostProcess(self.docSettings, self.selectedSetups)
+        for key in list(self.docSettings.keys()):
+            inp = inputs.itemById(key)
+            if inp:
+                if inp.objectType == adsk.core.GroupCommandInput.classType():
+                    self.docSettings[key] = inp.isExpanded
+                elif inp.objectType == adsk.core.DropDownCommandInput.classType():
+                    if inp.selectedItem:
+                        self.docSettings[key] = inp.selectedItem.name
+                elif hasattr(inp, "value"):
+                    self.docSettings[key] = inp.value
+        _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, verifyGcode={self.docSettings.get('verifyGcode')}, restore_rapid={self.docSettings.get('restore_rapid')}")
+        PerformPostProcess(self.docSettings)
 
 
 
-def PerformPostProcess(docSettings, setups):
+def PerformPostProcess(docSettings, setups=None):
     ui = None
     progress = None
     try:
@@ -1029,7 +858,7 @@ def PerformPostProcess(docSettings, setups):
             progress.progressValue = 0
 
             cntSetups = 0
-            seqDict = dict()
+            cleaned_folders = set()
 
             # Snapshot original NCProgram parameters so the user's NCProgram is never left mutated
             orig_prog_params = {}
@@ -1058,15 +887,10 @@ def PerformPostProcess(docSettings, setups):
                     while i < cnt:
                         setupFolder += "/" + nameList[i].strip()
                         i += 1
-                
-                    # keep a separate sequence number for each folder
-                    if setupFolder in seqDict:
-                        seqDict[setupFolder] += 1
-                    else:
-                        # first file for this folder
-                        seqDict[setupFolder] = 1
 
-                        if (docSettings["delFiles"]):
+                    if setupFolder not in cleaned_folders:
+                        cleaned_folders.add(setupFolder)
+                        if docSettings.get("delFiles"):
                             # delete all the files in the folder
                             try:
                                 for entry in os.scandir(setupFolder):
@@ -1079,9 +903,6 @@ def PerformPostProcess(docSettings, setups):
                                 pass #ignore errors
 
                     fname = nameList[i].strip()
-                    if docSettings.get("numericName"):
-                        seq = seqDict[setupFolder]
-                        fname = str(seq)
 
                     # post the file with only the operations selected in the NCProgram
                     status = PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=target_ops)
