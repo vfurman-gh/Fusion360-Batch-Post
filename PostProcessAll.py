@@ -337,13 +337,56 @@ def _resolve_setup_for_object(obj, cam=None):
     return None
 
 
+class SetupOperationsMap(dict):
+    """Dictionary mapping Setup to operations list, safe for unhashable adsk.cam.Setup objects."""
+    def __setitem__(self, key, value):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        super().__setitem__(k, value)
+
+    def __getitem__(self, key):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().__getitem__(k)
+
+    def get(self, key, default=None):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().get(k, default)
+
+    def __contains__(self, key):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().__contains__(k)
+
+
+class SetupListDefaultDict(collections.defaultdict):
+    """defaultdict(list) keyed by Setup or setup name, safe for unhashable adsk.cam.Setup objects."""
+    def __init__(self):
+        super().__init__(list)
+
+    def __setitem__(self, key, value):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        super().__setitem__(k, value)
+
+    def __getitem__(self, key):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().__getitem__(k)
+
+    def get(self, key, default=None):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().get(k, default)
+
+    def __contains__(self, key):
+        k = getattr(key, "name", key) if not isinstance(key, str) else key
+        return super().__contains__(k)
+
+
 def _lookup_setup_ops(setup, setup_operations_map):
     """Retrieve operations list for setup from setup_operations_map regardless of wrapper identity."""
-    if setup in setup_operations_map:
-        return setup_operations_map[setup]
-    for s, ops in setup_operations_map.items():
-        if s == setup or (getattr(s, "name", None) is not None and getattr(s, "name", None) == getattr(setup, "name", None)):
-            return ops
+    if setup is None or setup_operations_map is None:
+        return None
+    name = getattr(setup, "name", None)
+    if name is not None and name in setup_operations_map:
+        return setup_operations_map[name]
+    if hasattr(setup_operations_map, "get"):
+        return setup_operations_map.get(setup, None)
     return None
 
 
@@ -352,13 +395,13 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
     Look in the selected NCProgram's setup and operations and derive the setups and operations to process.
     Returns:
         target_setups: list of adsk.cam.Setup objects
-        setup_operations_map: dict mapping Setup -> list[Operation]
+        setup_operations_map: SetupOperationsMap mapping Setup -> list[Operation]
     """
     if program is None and cam is not None and hasattr(cam, "ncPrograms"):
         program = GetNcProgram(cam, settings)
 
     whole_setups = []
-    selected_ops_by_setup = collections.defaultdict(list)
+    selected_ops_by_setup = SetupListDefaultDict()
     nc_prog_setups = []
 
     def add_setup_ref(s):
@@ -422,7 +465,7 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
     else:
         target_setups = list(nc_prog_setups)
 
-    setup_operations_map = {}
+    setup_operations_map = SetupOperationsMap()
     for s in target_setups:
         all_s_ops = getattr(s, "allOperations", [])
         all_s_ops_list = _extract_cam_collection(all_s_ops)
@@ -437,10 +480,7 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
                 if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)
             ]
         else:
-            chosen_ops = []
-            for mapped_s, ops in selected_ops_by_setup.items():
-                if mapped_s == s or getattr(mapped_s, "name", None) == getattr(s, "name", None):
-                    chosen_ops.extend(ops)
+            chosen_ops = selected_ops_by_setup.get(s, [])
 
             valid_ops = []
             for op in all_s_ops_list:

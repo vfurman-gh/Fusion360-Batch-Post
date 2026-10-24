@@ -77,6 +77,8 @@ class MockFolder:
 
 
 class MockSetup:
+    __hash__ = None  # Emulate unhashable adsk.cam.Setup from Fusion C++ binding!
+
     def __init__(self, name, operations=None, is_turning=False, is_suppressed=False):
         self.name = name
         self.isSuppressed = is_suppressed
@@ -319,6 +321,29 @@ class TestNCProgramSelection(unittest.TestCase):
         self.assertEqual(batches[0][1], [self.op1_2])  # op1_1 was excluded!
         self.assertEqual(batches[1][0], 2)
         self.assertEqual(batches[1][1], [self.op1_3])
+
+    def test_unhashable_setup_as_dict_key(self):
+        """Verify that SetupOperationsMap and SetupListDefaultDict never raise TypeError with unhashable Setup."""
+        from PostProcessAll import SetupOperationsMap, SetupListDefaultDict, _lookup_setup_ops
+
+        # Verify MockSetup is indeed unhashable
+        with self.assertRaises(TypeError):
+            hash(self.setup1)
+
+        op_map = SetupOperationsMap()
+        # Direct key assignment using unhashable setup object MUST NOT throw TypeError
+        op_map[self.setup1] = [self.op1_1]
+        self.assertIn(self.setup1, op_map)
+        self.assertIn("Setup1", op_map)
+        self.assertEqual(op_map[self.setup1], [self.op1_1])
+        self.assertEqual(op_map["Setup1"], [self.op1_1])
+        self.assertEqual(op_map.get(self.setup1), [self.op1_1])
+        self.assertEqual(_lookup_setup_ops(self.setup1, op_map), [self.op1_1])
+
+        default_dict = SetupListDefaultDict()
+        default_dict[self.setup1].append(self.op1_2)
+        self.assertEqual(default_dict[self.setup1], [self.op1_2])
+        self.assertEqual(default_dict["Setup1"], [self.op1_2])
 
 
 if __name__ == "__main__":
