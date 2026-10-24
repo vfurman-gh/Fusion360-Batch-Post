@@ -129,41 +129,72 @@ function makeSection(s, idx) {
     strategy: s.strategy,
     getId: function() { return idx; },
     getType: function() { return s.type; },
+    getMachiningType: function() { return s.type; },
     getQuality: function() { return s.quality || 0; },
     getJetMode: function() { return s.jetMode || 0; },
     getWorkOffset: function() { return s.workOffset; },
     getWCS: function() { return s.wcs; },
+    getProbeWorkOffset: function() { return s.probeWorkOffset; },
     getWorkOrigin: function() { return wo; },
+    getGlobalWorkOrigin: function() { return wo; },
     getWorkPlane: function() { return wp; },
+    getGlobalWorkPlane: function() { return wp; },
+    getWCSOrigin: function() { return wo; },
+    getWCSPlane: function() { return wp; },
     getSpindle: function() { return s.spindle; },
     getFeedMode: function() { return s.feedMode; },
+    toolOrientation: s.toolOrientation || 0,
     getToolOrientation: function() { return s.toolOrientation || 0; },
     getPartCatcher: function() { return s.partCatcher; },
     getTailstock: function() { return s.tailstock; },
+    getStrategy: function() { return s.strategy; },
     getTool: function() { return toolObj; },
     getInitialPosition: function() { return toVec(s.initialPosition); },
-    getGlobalInitialPosition: function() { return toVec(s.globalInitialPosition); },
-    getFinalPosition: function() { return toVec(s.finalPosition); },
-    getInitialToolAxis: function() { return toVec(s.initialToolAxis); },
-    getGlobalInitialToolAxis: function() { return toVec(s.globalInitialToolAxis); },
-    getInitialToolAxisABC: function() { return toVec(s.initialToolAxisABC); },
-    getABCByPreference: function() { return toVec(s.initialToolAxisABC); },
+    getGlobalInitialPosition: function() { return toVec(s.globalInitialPosition || s.initialPosition); },
+    getFinalPosition: function() { return toVec(s.finalPosition || s.endPos || s.initialPosition); },
+    getGlobalFinalPosition: function() { return toVec(s.globalFinalPosition || s.finalPosition || s.endPos || s.globalInitialPosition || s.initialPosition); },
+    getFirstPosition: function() { return toVec(s.initialPosition); },
+    getGlobalPosition: function() { return toVec(s.globalInitialPosition || s.initialPosition); },
+    getInitialToolAxis: function() { return toVec(s.initialToolAxis || {x: 0, y: 0, z: 1}); },
+    getGlobalInitialToolAxis: function() { return toVec(s.globalInitialToolAxis || s.initialToolAxis || {x: 0, y: 0, z: 1}); },
+    getInitialToolAxisABC: function() { return toVec(s.initialToolAxisABC || {x: 0, y: 0, z: 0}); },
+    getFinalToolAxis: function() { return toVec(s.finalToolAxis || s.initialToolAxis || {x: 0, y: 0, z: 1}); },
+    getGlobalFinalToolAxis: function() { return toVec(s.globalFinalToolAxis || s.globalInitialToolAxis || s.finalToolAxis || s.initialToolAxis || {x: 0, y: 0, z: 1}); },
+    getFinalToolAxisABC: function() { return toVec(s.finalToolAxisABC || s.initialToolAxisABC || {x: 0, y: 0, z: 0}); },
+    getABCByPreference: function() { return toVec(s.initialToolAxisABC || {x: 0, y: 0, z: 0}); },
     getForceToolChange: function() { return !!s.forceToolChange; },
     getMovements: function() { return s.movements || 0; },
     getPatternId: function() { return s.patternId || 0; },
     getInternalPatternId: function() { return s.internalPatternId || 0; },
+    getNumberOfPatternInstances: function() { return 1; },
     isPatterned: function() { return !!s.isPatterned; },
     hasAnyCycle: function() { return !!s.hasAnyCycle; },
+    hasCycle: function() { return !!s.hasAnyCycle; },
     isOptional: function() { return !!s.isOptional; },
     isMultiAxis: function() { return !!s.isMultiAxis; },
     isOptimizedForMachine: function() { return !!s.isOptimizedForMachine; },
     getOptimizedTCPMode: function() { return s.optimizedTCPMode || 0; },
     isConnectionSection: function() { return false; },
+    hasRewind: function() { return false; },
+    isCuttingMotionAwayFromRotary: function() { return false; },
+    doesToolpathFitWithinLimits: function() { return true; },
     optimize3DPositionsByMachine: function() {},
     optimizeMachineAnglesByMachine: function() {},
     getGlobalZRange: function() {
-      var minVal = s.zRangeMin;
-      var maxVal = s.zRangeMax;
+      var minVal = (s.zRangeMin !== undefined) ? s.zRangeMin : 0;
+      var maxVal = (s.zRangeMax !== undefined) ? s.zRangeMax : 0;
+      return {
+        getMinimum: function() { return minVal; },
+        getMaximum: function() { return maxVal; },
+        expandToRange: function(other) {
+          if (other.getMinimum() < minVal) minVal = other.getMinimum();
+          if (other.getMaximum() > maxVal) maxVal = other.getMaximum();
+        }
+      };
+    },
+    getZRange: function() {
+      var minVal = (s.zRangeMin !== undefined) ? s.zRangeMin : 0;
+      var maxVal = (s.zRangeMax !== undefined) ? s.zRangeMax : 0;
       return {
         getMinimum: function() { return minVal; },
         getMaximum: function() { return maxVal; },
@@ -174,10 +205,10 @@ function makeSection(s, idx) {
       };
     },
     hasParameter: function(name) {
-      return Object.prototype.hasOwnProperty.call(s.params, name);
+      return !!(s.params && Object.prototype.hasOwnProperty.call(s.params, name));
     },
     getParameter: function(name, def) {
-      return Object.prototype.hasOwnProperty.call(s.params, name) ? s.params[name] : def;
+      return (s.params && Object.prototype.hasOwnProperty.call(s.params, name)) ? s.params[name] : def;
     },
     getProperty: function(name) { return undefined; },
     checkGroup: function() { return false; }
@@ -318,8 +349,105 @@ function onClose() {
     "function isLastSection() { return currentSection.getId() === (getNumberOfSections() - 1); }\n" +
     "function hasPreviousSection() { return currentSection.getId() > 0; }\n" +
     "function hasNextSection() { return (currentSection.getId() + 1) < getNumberOfSections(); }\n" +
-    "function getPreviousSection() { return getSection(currentSection.getId() - 1); }\n" +
-    "function getNextSection() { return getSection(currentSection.getId() + 1); }\n" +
+    "function getPreviousSection() {\n" +
+    "  if (!currentSection || currentSection.getId() <= 0) return currentSection;\n" +
+    "  return getSection(currentSection.getId() - 1);\n" +
+    "}\n" +
+    "function getNextSection() {\n" +
+    "  if (!currentSection || (currentSection.getId() + 1) >= getNumberOfSections()) return currentSection;\n" +
+    "  return getSection(currentSection.getId() + 1);\n" +
+    "}\n" +
+    "function isNewWorkPlane(sec) {\n" +
+    "  var section = (sec && typeof sec === 'object') ? sec : currentSection;\n" +
+    "  if (!section) return false;\n" +
+    "  var firstSection = section.getId() === 0;\n" +
+    "  var newWorkPlane = firstSection;\n" +
+    "  if (!firstSection) {\n" +
+    "    var previousSection = getSection(section.getId() - 1);\n" +
+    "    if (previousSection) {\n" +
+    "      var isOptimized = section.isOptimizedForMachine() && previousSection.isOptimizedForMachine();\n" +
+    "      newWorkPlane = newWorkPlane || !isSameDirection(previousSection.getGlobalFinalToolAxis(), section.getGlobalInitialToolAxis());\n" +
+    "      newWorkPlane = newWorkPlane || (isOptimized && Vector.diff(previousSection.getFinalToolAxisABC(), section.getInitialToolAxisABC()).length > 1e-4);\n" +
+    "      newWorkPlane = newWorkPlane || (typeof machineConfiguration !== 'undefined' && machineConfiguration && !machineConfiguration.isMultiAxisConfiguration() && section.isMultiAxis());\n" +
+    "      newWorkPlane = newWorkPlane || (previousSection.isMultiAxis() !== section.isMultiAxis());\n" +
+    "    }\n" +
+    "  }\n" +
+    "  return newWorkPlane;\n" +
+    "}\n" +
+    "function isNewWorkOffset(sec) {\n" +
+    "  var section = (sec && typeof sec === 'object') ? sec : currentSection;\n" +
+    "  if (!section) return false;\n" +
+    "  var firstSection = section.getId() === 0;\n" +
+    "  var newWorkOffset = firstSection;\n" +
+    "  if (!firstSection) {\n" +
+    "    var previousSection = getSection(section.getId() - 1);\n" +
+    "    if (previousSection) {\n" +
+    "      newWorkOffset = newWorkOffset || (previousSection.workOffset !== section.workOffset);\n" +
+    "    }\n" +
+    "  }\n" +
+    "  return newWorkOffset;\n" +
+    "}\n" +
+    "function isToolChangeNeeded() {\n" +
+    "  var start = (arguments.length > 0 && typeof arguments[0] === 'object') ? 1 : 0;\n" +
+    "  var section = (arguments.length > 0 && typeof arguments[0] === 'object') ? arguments[0] : currentSection;\n" +
+    "  if (!section) return false;\n" +
+    "  var firstSection = section.getId() === 0;\n" +
+    "  var currentTool = section.getTool();\n" +
+    "  if (firstSection || section.getForceToolChange()) return true;\n" +
+    "  var previousSection = getSection(section.getId() - 1);\n" +
+    "  if (!previousSection) return true;\n" +
+    "  var previousTool = previousSection.getTool();\n" +
+    "  if (!previousTool) return true;\n" +
+    "  if (arguments.length === start) {\n" +
+    "    return currentTool.number !== previousTool.number;\n" +
+    "  } else {\n" +
+    "    for (var i = start; i < arguments.length; ++i) {\n" +
+    "      var prop = arguments[i];\n" +
+    "      if (previousTool[prop] !== currentTool[prop]) return true;\n" +
+    "    }\n" +
+    "  }\n" +
+    "  return false;\n" +
+    "}\n" +
+    "function getNextTool() {\n" +
+    "  var start = (arguments.length > 0 && typeof arguments[0] === 'object') ? 1 : 0;\n" +
+    "  var section = (arguments.length > 0 && typeof arguments[0] === 'object') ? arguments[0] : currentSection;\n" +
+    "  if (!section) return undefined;\n" +
+    "  var currentSectionId = section.getId();\n" +
+    "  var numSections = getNumberOfSections();\n" +
+    "  var returnFirstTool = (arguments.length > start && typeof arguments[start] === 'boolean') ? arguments[start] : false;\n" +
+    "  for (var i = currentSectionId + 1; i < numSections; ++i) {\n" +
+    "    var nextSec = getSection(i);\n" +
+    "    if (nextSec && nextSec.getTool().number !== section.getTool().number) {\n" +
+    "      return nextSec.getTool();\n" +
+    "    }\n" +
+    "  }\n" +
+    "  return returnFirstTool ? getSection(0).getTool() : undefined;\n" +
+    "}\n" +
+    "function isSpindleSpeedDifferent(sec) {\n" +
+    "  var section = (sec && typeof sec === 'object') ? sec : currentSection;\n" +
+    "  if (!section || section.getId() === 0) return true;\n" +
+    "  var previousSection = getSection(section.getId() - 1);\n" +
+    "  if (!previousSection) return true;\n" +
+    "  if (previousSection.getTool().clockwise !== section.getTool().clockwise) return true;\n" +
+    "  if (section.getTool().getSpindleMode() === SPINDLE_CONSTANT_SURFACE_SPEED) {\n" +
+    "    return (previousSection.getTool().getSpindleMode() !== SPINDLE_CONSTANT_SURFACE_SPEED) ||\n" +
+    "      Math.round(previousSection.getTool().surfaceSpeed - section.getTool().surfaceSpeed) !== 0;\n" +
+    "  } else {\n" +
+    "    return (previousSection.getTool().getSpindleMode() !== SPINDLE_CONSTANT_SPINDLE_SPEED) ||\n" +
+    "      Math.round(previousSection.getTool().spindleRPM - section.getTool().spindleRPM) !== 0;\n" +
+    "  }\n" +
+    "}\n" +
+    "function isProbeOperation(sec) {\n" +
+    "  var section = (sec && typeof sec === 'object') ? sec : currentSection;\n" +
+    "  if (!section) return false;\n" +
+    "  var strat = section.getParameter('operation-strategy', '');\n" +
+    "  return strat === 'probe' || strat === 'probe_geometry';\n" +
+    "}\n" +
+    "function isDrillingCycle(sec) {\n" +
+    "  var section = (sec && typeof sec === 'object') ? sec : currentSection;\n" +
+    "  if (!section) return false;\n" +
+    "  return section.strategy === 'drill';\n" +
+    "}\n" +
     "function hasParameter(name) { return (currentSection && currentSection.hasParameter(name)) || hasGlobalParameter(name); }\n" +
     "function getParameter(name, def) { return (currentSection && currentSection.hasParameter(name)) ? currentSection.getParameter(name, def) : getGlobalParameter(name, def); }\n" +
     "function getProperty(name, def) {\n" +
@@ -505,6 +633,10 @@ function onClose() {
   }
 
   if (sections.length > 0) {
+    try {
+      currentSection = sections[0];
+      tool = sections[0].getTool();
+    } catch (e) {}
     vendor.setState({
       currentSection: sections[0],
       tool: sections[0].getTool(),
@@ -531,6 +663,11 @@ function onClose() {
     for (var pk in rawSec.params) {
       if (vendor.onParameter) vendor.onParameter(pk, rawSec.params[pk]);
     }
+
+    try {
+      currentSection = sec;
+      tool = sec.getTool();
+    } catch (e) {}
 
     vendor.setState({
       currentSection: sec,

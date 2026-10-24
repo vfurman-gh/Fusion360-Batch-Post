@@ -160,10 +160,39 @@ class TestWorkpieceExtraction(unittest.TestCase):
         self.assertEqual(len(wp.fixtures), 1)
 
     def test_04_resolve_base_post_path(self):
-        """Prove _ResolveBasePostPath safely returns existing vendor post."""
+        """Prove _ResolveBasePostPath safely returns existing vendor post for both turning and milling."""
         from PostProcessAll import _ResolveBasePostPath
-        base_post = _ResolveBasePostPath(None)
-        self.assertTrue(os.path.isfile(base_post), f"Resolved base post must exist: {base_post}")
+
+        # When program is None, no fallback guessing is performed; returns empty string
+        self.assertEqual(_ResolveBasePostPath(None), "")
+        self.assertEqual(_ResolveBasePostPath(None, is_turning=True), "")
+        self.assertEqual(_ResolveBasePostPath(None, is_turning=False), "")
+
+        # Mock NCProgram with Centroid turning post for turning setup
+        class MockTurningConfig:
+            name = "centroid_turning"
+            description = "Centroid Turning"
+        class MockTurningProg:
+            postConfiguration = MockTurningConfig()
+
+        resolved_turn = _ResolveBasePostPath(MockTurningProg(), is_turning=True)
+        self.assertTrue(os.path.isfile(resolved_turn))
+        self.assertTrue(resolved_turn.endswith("centroid_turning.cps"))
+
+        # Mock NCProgram with Tormach milling post for milling setup
+        class MockPostConfig:
+            name = "tormach"
+            description = "Tormach PathPilot"
+        class MockProg:
+            postConfiguration = MockPostConfig()
+
+        resolved_tormach = _ResolveBasePostPath(MockProg(), is_turning=False)
+        self.assertTrue(os.path.isfile(resolved_tormach))
+        self.assertTrue(resolved_tormach.endswith("tormach.cps"))
+
+        # Incompatible turning post on milling setup rejected without guessing
+        resolved_incompat = _ResolveBasePostPath(MockTurningProg(), is_turning=False)
+        self.assertEqual(resolved_incompat, "")
 
 
 if __name__ == "__main__":

@@ -249,9 +249,15 @@ onSection = function() {
       currentSection.getGlobalInitialPosition ? currentSection.getGlobalInitialPosition() : currentSection.getInitialPosition()
     ),
     finalPosition: serializeVector(currentSection.getFinalPosition()),
+    globalFinalPosition: serializeVector(
+      currentSection.getGlobalFinalPosition ? currentSection.getGlobalFinalPosition() : currentSection.getFinalPosition()
+    ),
     initialToolAxis: currentSection.getInitialToolAxis ? serializeVector(currentSection.getInitialToolAxis()) : {x: 0, y: 0, z: 1},
     globalInitialToolAxis: currentSection.getGlobalInitialToolAxis ? serializeVector(currentSection.getGlobalInitialToolAxis()) : {x: 0, y: 0, z: 1},
+    finalToolAxis: currentSection.getFinalToolAxis ? serializeVector(currentSection.getFinalToolAxis()) : {x: 0, y: 0, z: 1},
+    globalFinalToolAxis: currentSection.getGlobalFinalToolAxis ? serializeVector(currentSection.getGlobalFinalToolAxis()) : {x: 0, y: 0, z: 1},
     initialToolAxisABC: (isMulti && currentSection.getInitialToolAxisABC) ? serializeVector(currentSection.getInitialToolAxisABC()) : {x: 0, y: 0, z: 0},
+    finalToolAxisABC: (isMulti && currentSection.getFinalToolAxisABC) ? serializeVector(currentSection.getFinalToolAxisABC()) : {x: 0, y: 0, z: 0},
     forceToolChange: currentSection.getForceToolChange ? currentSection.getForceToolChange() : false,
     movements: currentSection.getMovements ? currentSection.getMovements() : 0,
     patternId: currentSection.getPatternId ? currentSection.getPatternId() : 0,
@@ -440,6 +446,23 @@ onSectionEnd = function() {
   var endPos = getCurrentPosition();
   curSec.endPos = serializeVector(endPos);
   curSec.endSpindleSpeed = spindleSpeed;
+  if (typeof currentSection !== "undefined" && currentSection) {
+    if (currentSection.getFinalPosition) {
+      curSec.finalPosition = serializeVector(currentSection.getFinalPosition());
+    }
+    if (currentSection.getGlobalFinalPosition) {
+      curSec.globalFinalPosition = serializeVector(currentSection.getGlobalFinalPosition());
+    }
+    if (currentSection.getFinalToolAxis) {
+      curSec.finalToolAxis = serializeVector(currentSection.getFinalToolAxis());
+    }
+    if (currentSection.getGlobalFinalToolAxis) {
+      curSec.globalFinalToolAxis = serializeVector(currentSection.getGlobalFinalToolAxis());
+    }
+    if (currentSection.isMultiAxis && currentSection.isMultiAxis() && currentSection.getFinalToolAxisABC) {
+      curSec.finalToolAxisABC = serializeVector(currentSection.getFinalToolAxisABC());
+    }
+  }
   curSec = null;
 };
 

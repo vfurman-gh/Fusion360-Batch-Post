@@ -2,10 +2,11 @@
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
 import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
-version = 13
+version = 14
 
 # Initial default values of settings
 defaultSettings = {
@@ -16,14 +17,10 @@ defaultSettings = {
     "twoDigits" : False,
     "delFiles" : False,
     "delFolder" : False,
-    "splitSetup" : False,
-    "combineTool" : False,
-    "fastZ" : True,
-    "fastZHeuristic" : True,
+    "combineTool" : True,
+    "restore_rapid" : True,
     "verifyGcode" : True,
-    "toolChange" : "M9 G30",
     "numericName" : False,
-    "endCodes" : "M5 M9 M30",
     "onlySelected" : False,
     # Groups are expanded or not
     "groupPersonal" : True,
@@ -47,16 +44,6 @@ constAttrName = "settings"
 constAttrCompressedName = "CompressedName"
 constSettingsFileExt = ".settings"
 constPostLoopDelay = 0.1
-constBodyTmpFile = "gcodeBody"
-constOpTmpFile = "8910"   # in case name must be numeric
-constRapidZgcode = 'G00 Z{} (Changed from: "{}")\n'
-constRapidXYgcode = 'G00 {} (Changed from: "{}")\n'
-constFeedZgcode = 'G01 Z{} F{} (Changed from: "{}")\n'
-constFeedXYgcode = 'G01 {} F{} (Changed from: "{}")\n'
-constFeedXYZgcode = 'G01 {} Z{} F{} (Changed from: "{}")\n'
-constAddFeedGcode = " F{} (Feed rate added)\n"
-constMotionGcodeSet = {0,1,2,3,33,38,73,76,80,81,82,84,85,86,87,88,89}
-constHomeGcodeSet = {28, 30}
 constLineNumInc = 5
 constNcProgramName = "PostProcessAll NC Program"
 constAddonDir = os.path.dirname(os.path.abspath(__file__))
@@ -191,12 +178,10 @@ class SettingsManager:
         docAttr.add(constAttrGroup, constAttrName, json.dumps(docSettings))
             
     def UpdateSettings(self, src, dst):
-        if "homeEndsOp" in dst:
-            if dst["homeEndsOp"] and not ("endCodes" in dst):
-                dst["endCodes"] = "M5 M9 M30 G28 G30"
-            del dst["homeEndsOp"]
-        if "fastZHeuristic" not in dst:
-            dst["fastZHeuristic"] = dst.get("fastZ", True)
+        if "restore_rapid" not in dst:
+            dst["restore_rapid"] = dst.get("fastZ", dst.get("fastZHeuristic", True))
+        for k in ("splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp"):
+            dst.pop(k, None)
         for item in src:
             if not (item in dst):
                 dst[item] = src[item]
@@ -308,8 +293,6 @@ def GetNcProgram(cam, settings):
             break
     if target is None and cam.ncPrograms.count > 0:
         target = cam.ncPrograms.item(0)
-    if target is not None:
-        _HealProgramPostConfigIfNeeded(target)
     return target
 
 
@@ -387,8 +370,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 if not haveProgram:
                     program = programs.item(0)              
             docSettings["ncProgram"] = program.name
-            for p_item in programs:
-                _HealProgramPostConfigIfNeeded(p_item)
 
             # Connect to the execute event.
             onExecute = CommandExecuteHandler(docSettings, selectedSetups)
@@ -499,134 +480,42 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 '"01" to "09". This could be useful for formatting or sorting.')
 
             # "Personal Use" version
-            # check box to split up setup into individual operations
-            inputGroup = inputs.addGroupCommandInput("groupPersonal", "Personal Use")
-            input = inputGroup.children.addBoolValueInput("splitSetup",
-                                                          "Use individual operations",
-                                                          True,
-                                                          "",
-                                                          docSettings["splitSetup"])
-            input.tooltip = "Split Setup Into Individual Operations"
-            input.tooltipDescription = (
-                "Generate output for each operation individually. This is usually "
-                "REQUIRED when using Fusion for Personal Use, because tool "
-                "changes are not allowed. The individual operations will be "
-                "grouped back together into the same file, eliminating this "
-                "limitation. You will get an error if there is a tool change "
-                "in a setup and this options is not selected.")
+            inputGroup = inputs.addGroupCommandInput("groupPersonal", "Optimization & Verification")
 
             # check box to combine operation that use the same tool
             input = inputGroup.children.addBoolValueInput("combineTool",
                                                           "Combine operations using same tool",
                                                           True,
                                                           "",
-                                                          docSettings["combineTool"])
-            input.isEnabled = docSettings["splitSetup"] # enable only if using individual operations
+                                                          docSettings.get("combineTool", True))
             input.tooltip = "Combine Consecutive Operations That Use the Same Tool"
             input.tooltipDescription = (
-                "If consecutive operations use the same tool, have Fusion generate "
-                "their output together. This can optimize G-code for some routers. "
-                "However, it will cause the logic that restores rapid moves to also "
-                "treat it as one operation, which can have negative effects if the "
-                "feed heights for the operations are different.")
+                "If consecutive operations use the same tool, group them into the same batch. "
+                "This optimizes tool changes across all setups.")
 
-            # text box as a label for tool change command
-            input = inputGroup.children.addTextBoxCommandInput("toolLabel", 
-                                                               "", 
-                                                               "G-code for tool change:",
-                                                               1,
-                                                               True)
-            input.isFullWidth = True
-            label = input
-
-            # enter G-code for tool change
-            input = inputGroup.children.addStringValueInput("toolChange", "", docSettings["toolChange"])
-            input.isEnabled = docSettings["splitSetup"] # enable only if using individual operations
-            input.isFullWidth = True
-            input.tooltip = "G-code to Precede Tool Change"
-            input.tooltipDescription = (
-                "Allows inserting a line of code before tool changes. For example, "
-                "you might want M5 (spindle stop), M9 (coolant stop), and/or G28 or G30 "
-                "(return to home). The code will be placed on the line before the "
-                "tool change. You can get mulitple lines by separating them with "
-                "a colon (:)."
-                "<p>If you want a line number, just put a dummy line number in front. "
-                "If you use the colon to get multiple lines, only put the dummy line "
-                "number on the first line. For example, <b>N10 M9:G30</b> will give "
-                "you two lines, both with properly sequenced line numbers.</p>"
-            )
-            label.tooltip = input.tooltip
-            label.tooltipDescription = input.tooltipDescription
-           
-            # text box as a label for operation end commands
-            input = inputGroup.children.addTextBoxCommandInput("endLabel", 
-                                                               "", 
-                                                               "G-codes that mark ending sequence:",
-                                                               1,
-                                                               True)
-            input.isFullWidth = True
-            label = input
-
-            # enter G-codes for end of operation
-            input = inputGroup.children.addStringValueInput("endCodes", "", docSettings["endCodes"])
-            input.isEnabled = docSettings["splitSetup"] # enable only if using individual operations
-            input.isFullWidth = True
-            input.tooltip = "G-codes That Mark the Ending Sequence"
-            input.tooltipDescription = (
-                "To combine operations generated individually, the ending sequence "
-                "(which should only appear once) must be found. This entry is the "
-                "list of G-codes that start this ending sequence. For example, M30 "
-                "(end program) would normally be here, but it may not be the first "
-                "G-code of the ending sequence. M5 (spindle stop), M9 (coolant "
-                "stop) and G28/G30 (move home) are also candidates, but you should "
-                "look at the code from your post processor to determine what "
-                "will work in your case. Any one of the G-codes you enter here "
-                "will mark the start of ending sequence."
-            )
-            label.tooltip = input.tooltip
-            label.tooltipDescription = input.tooltipDescription
-           
-            # check box to enable restoring rapid moves via 2D IPW verifier (Turning setups only)
-            input = inputGroup.children.addBoolValueInput("fastZ",
-                                                          "Restore rapid moves (stock simulation)",
+            # check box to restore rapid moves
+            input = inputGroup.children.addBoolValueInput("restore_rapid",
+                                                          "Restore rapid moves (G0)",
                                                           True,
                                                           "",
-                                                          docSettings["fastZ"])
-            input.isEnabled = hasTurningSetup
-            input.tooltip = "Restore Rapid Moves via 2D IPW Stock Simulation (Turning Only)"
+                                                          docSettings.get("restore_rapid", True))
+            input.tooltip = "Restore Safe Rapid Moves (G0)"
             input.tooltipDescription = (
-                "For Turning setups, analyze the generated lathe G-code with 2D "
-                "In-Process Workpiece (IPW) simulation, promote collision-free G1 "
-                "air moves (with safety clearance margin) to G0 rapids, and re-verify "
-                "the modified G-code in Pass 2. Ignored for Milling setups.")
+                "Analyze toolpaths and restore safe rapid (G0) moves.<br>"
+                "• <b>Turning:</b> Promotes collision-free air moves verified against dynamic 2D IPW simulation.<br>"
+                "• <b>Milling:</b> Promotes upward vertical Z+ retract moves reaching or exceeding clearance height.<br>"
+                "Restored moves are annotated with comments in the output program.")
 
-            # check box to enable restoring rapid moves via fast_z heuristics (Milling setups only)
-            input = inputGroup.children.addBoolValueInput("fastZHeuristic",
-                                                          "Restore rapid moves (fast_z heuristics)",
-                                                          True,
-                                                          "",
-                                                          docSettings.get("fastZHeuristic", docSettings.get("fastZ", True)))
-            input.isEnabled = hasMillingSetup and docSettings["splitSetup"]
-            input.tooltip = "Restore Rapid Moves via Fast-Z Heuristics (Milling Only)"
-            input.tooltipDescription = (
-                "For Milling setups using individual operations, analyze G-code to find moves "
-                "at or above the feed height and replace them with rapid (G0) moves.<br>"
-                "Requires 'Use individual operations' to be checked."
-                "<p><b>WARNING!</b> Review G-code to verify accuracy. Comments indicate the changes.</p>")
-
-            # check box to run 2D collision verification & MRR analysis (Turning setups only)
+            # check box to run 2D collision verification & MRR analysis
             input = inputGroup.children.addBoolValueInput("verifyGcode",
-                                                          "Verify Lathe G-code & plot MRR",
+                                                          "Verify G-code & collision guard",
                                                           True,
                                                           "",
-                                                          docSettings.get("verifyGcode", True) or docSettings["fastZ"])
-            input.isEnabled = hasTurningSetup
-            input.tooltip = "Verify Lathe G-Code & Plot MRR Time-Series (Turning Only)"
+                                                          docSettings.get("verifyGcode", True))
+            input.tooltip = "Verify G-Code & Collision Guard"
             input.tooltipDescription = (
-                "For Turning setups, run 2D Lathe G-code collision verification "
-                "(Insert, Holder, Stock IPW, Chuck), export the 3D Material Removal "
-                "Rate (MRR) time-series CSV, and generate the 2-panel verification "
-                "& MRR plot. Ignored for Milling setups.")
+                "Run toolpath verification, detect potential collisions (Rapid-into-stock, Holder strikes, "
+                "Fixture keep-out boundaries), and generate summary report.")
            
             inputGroup.isExpanded = docSettings["groupPersonal"]
 
@@ -800,38 +689,7 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                 item.value = input.value and item.value
                 item.isEnabled = input.value
 
-            # Update setup-dependent options when onlySelected changes
-            if input.id == "onlySelected":
-                hasTurning, hasMilling = GetSetupTypes(cam, self.selectedSetups, input.value)
-                fastZItem = inputs.itemById("fastZ")
-                if fastZItem:
-                    fastZItem.isEnabled = hasTurning
-                fastZHeuristicItem = inputs.itemById("fastZHeuristic")
-                if fastZHeuristicItem:
-                    splitVal = inputs.itemById("splitSetup").value if inputs.itemById("splitSetup") else False
-                    fastZHeuristicItem.isEnabled = hasMilling and splitVal
-                verifyItem = inputs.itemById("verifyGcode")
-                if verifyItem:
-                    verifyItem.isEnabled = hasTurning
-
-            # Options for splitSetup
-            if input.id == "splitSetup":
-                inputs.itemById("combineTool").isEnabled = input.value
-                inputs.itemById("toolChange").isEnabled = input.value
-                inputs.itemById("toolLabel").isEnabled = input.value
-                inputs.itemById("endCodes").isEnabled = input.value
-                inputs.itemById("endLabel").isEnabled = input.value
-                onlySelVal = inputs.itemById("onlySelected").value if inputs.itemById("onlySelected") else False
-                _, hasMilling = GetSetupTypes(cam, self.selectedSetups, onlySelVal)
-                fastZHeuristicItem = inputs.itemById("fastZHeuristic")
-                if fastZHeuristicItem:
-                    fastZHeuristicItem.isEnabled = hasMilling and input.value
-
-            if input.id == "fastZ" and input.value:
-                verifyItem = inputs.itemById("verifyGcode")
-                if verifyItem:
-                    verifyItem.value = True
-                    self.docSettings["verifyGcode"] = True
+            pass
 
         except:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -887,7 +745,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                             self.docSettings[key] = inp.selectedItem.name
                     elif hasattr(inp, "value"):
                         self.docSettings[key] = inp.value
-            _dbg_global(f"CommandExecuteHandler execute: splitSetup={self.docSettings.get('splitSetup')}, verifyGcode={self.docSettings.get('verifyGcode')}, fastZ={self.docSettings.get('fastZ')}")
+            _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, verifyGcode={self.docSettings.get('verifyGcode')}, restore_rapid={self.docSettings.get('restore_rapid')}")
             PerformPostProcess(self.docSettings, self.selectedSetups)
 
 
@@ -1146,71 +1004,76 @@ def _IsInternalHelperPost(post_cfg) -> bool:
     return False
 
 
-def _HealProgramPostConfigIfNeeded(program):
-    """If an NCProgram (e.g. Rapid_Restore) was accidentally left pointing to universal_dumper.cps, restore it to centroid_turning.cps."""
-    if not program:
-        return
+def _GetPostSearchDirs():
+    """Return all directories on this machine where Autodesk Fusion and user post processors live."""
+    dirs = []
     try:
-        post_cfg = getattr(program, "postConfiguration", None)
-        is_helper = _IsInternalHelperPost(post_cfg)
-        ext_param = None
-        try:
-            ext_param = program.parameters.itemByName("nc_program_nc_extension")
-        except Exception:
-            pass
-        cur_ext = ext_param.value.value if ext_param else ""
-
-        if is_helper:
-            default_p = os.path.join(constAddonDir, "centroid_turning.cps")
-            if os.path.isfile(default_p):
-                healed_cfg = _GetPostConfigObj(default_p)
-                if healed_cfg:
-                    program.postConfiguration = healed_cfg
-                    _dbg_global(f"Auto-healed NCProgram '{program.name}' postConfiguration back to centroid_turning.cps")
-            if ext_param:
-                ext_param.value.value = ".cnc"
-        elif ext_param and cur_ext.lower().lstrip(".") == "json":
-            cfg_ext = getattr(post_cfg, "extension", "") if post_cfg else ""
-            if cfg_ext and cfg_ext.lower().lstrip(".") != "json":
-                ext_param.value.value = "." + cfg_ext.lstrip(".")
-            else:
-                ext_param.value.value = ".cnc"
-
-        # Also heal nc_program_name / nc_program_filename if they were overwritten by a setup name
-        prog_name = getattr(program, "name", "")
-        if prog_name:
-            try:
-                app = adsk.core.Application.get()
-                doc = app.activeDocument if app else None
-                cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId)) if doc else None
-                setup_names = {s.name.split(":")[-1].strip() for s in cam.setups} if cam else set()
-            except Exception:
-                setup_names = set()
-            for p_key in ("nc_program_name", "nc_program_filename"):
-                try:
-                    p_item = program.parameters.itemByName(p_key)
-                    if p_item and p_item.value.value in setup_names and prog_name not in setup_names:
-                        p_item.value.value = prog_name
-                except Exception:
-                    pass
+        from pipeline import find_autodesk_apt_cps, find_autodesk_post_binary
+        apt_p = find_autodesk_apt_cps()
+        if apt_p:
+            d = os.path.dirname(apt_p)
+            if os.path.isdir(d) and d not in dirs:
+                dirs.append(d)
+        post_b = find_autodesk_post_binary()
+        if post_b:
+            cam_dir = os.path.dirname(post_b)
+            for sub in ("Data/Posts", "Posts"):
+                c = os.path.join(cam_dir, sub).replace("\\", "/")
+                if os.path.isdir(c) and c not in dirs:
+                    dirs.append(c)
     except Exception as exc:
-        _dbg_global(f"_HealProgramPostConfigIfNeeded error: {exc}")
+        _dbg_global(f"_GetPostSearchDirs pipeline search exception: {exc}")
+
+    std_dirs = [
+        constAddonDir,
+        os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts"),
+        os.path.expanduser("~/Library/Application Support/Autodesk/Autodesk Fusion 360/CAM/Posts"),
+        os.path.expanduser("~/Library/Application Support/Autodesk/Autodesk Fusion 360/CAM/cache/posts"),
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        std_dirs.append(os.path.join(appdata, "Autodesk", "Fusion 360 CAM", "Posts"))
+        std_dirs.append(os.path.join(appdata, "Autodesk", "Autodesk Fusion 360", "CAM", "Posts"))
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    if localappdata:
+        std_dirs.append(os.path.join(localappdata, "Autodesk", "Autodesk Fusion 360", "CAM", "cache", "posts"))
+
+    for d in std_dirs:
+        norm_d = d.replace("\\", "/")
+        if os.path.isdir(norm_d) and norm_d not in dirs:
+            dirs.append(norm_d)
+
+    for pattern in (
+        os.path.expanduser("~/Library/Application Support/Autodesk/Autodesk Fusion 360/*/W.login/*/CAMPosts"),
+        os.path.join(localappdata, "Autodesk", "Autodesk Fusion 360", "*", "W.login", "*", "CAMPosts") if localappdata else "",
+    ):
+        if pattern:
+            for cd in glob.glob(pattern):
+                cd_norm = cd.replace("\\", "/")
+                if os.path.isdir(cd_norm) and cd_norm not in dirs:
+                    dirs.append(cd_norm)
+
+    return dirs
 
 
-def _ResolveBasePostPath(program=None):
-    """Resolve target machine post processor path from NCProgram or fallback to centroid_turning.cps."""
-    _HealProgramPostConfigIfNeeded(program)
-    default_p = os.path.join(constAddonDir, "centroid_turning.cps")
+def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str:
+    """Resolve target machine post processor path from NCProgram without mutating user settings."""
+    search_dirs = _GetPostSearchDirs()
 
     if program and hasattr(program, "postConfiguration") and program.postConfiguration:
         post_cfg = program.postConfiguration
         if not _IsInternalHelperPost(post_cfg):
             candidates = []
-            for attr in ("postPath", "location", "name"):
+            for attr in ("postPath", "location", "name", "description"):
                 val = getattr(post_cfg, attr, None)
                 if val and isinstance(val, str):
                     if os.path.isfile(val):
-                        return os.path.abspath(val)
+                        # Verify turning/milling compatibility
+                        if is_turning is False and "centroid_turning" in os.path.basename(val).lower():
+                            pass
+                        else:
+                            _dbg_global(f"_ResolveBasePostPath: resolved directly via postConfiguration.{attr} -> {val}")
+                            return os.path.abspath(val)
                     candidates.append(val)
             try:
                 if hasattr(post_cfg, "url") and post_cfg.url:
@@ -1220,41 +1083,57 @@ def _ResolveBasePostPath(program=None):
                             import urllib.parse
                             f_path = urllib.parse.unquote(u_str[len("file://"):])
                             if os.path.isfile(f_path):
-                                return os.path.abspath(f_path)
+                                if not (is_turning is False and "centroid_turning" in os.path.basename(f_path).lower()):
+                                    _dbg_global(f"_ResolveBasePostPath: resolved via url file:// -> {f_path}")
+                                    return os.path.abspath(f_path)
                         candidates.append(os.path.basename(u_str))
-            except Exception:
-                pass
+            except Exception as u_exc:
+                _dbg_global(f"_ResolveBasePostPath url inspection exception: {u_exc}")
 
-            search_dirs = [
-                os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts"),
-                constAddonDir,
-            ]
-            appdata = os.environ.get("APPDATA", "")
-            if appdata:
-                search_dirs.insert(0, os.path.join(appdata, "Autodesk", "Fusion 360 CAM", "Posts"))
-            try:
-                from pipeline import _find_post_exe
-                post_exe = _find_post_exe()
-                if post_exe:
-                    sys_posts = os.path.join(os.path.dirname(post_exe), "Posts")
-                    if os.path.isdir(sys_posts):
-                        search_dirs.append(sys_posts)
-            except Exception:
-                pass
-
+            _dbg_global(f"_ResolveBasePostPath: candidate names={candidates}, is_turning={is_turning}")
             for cand in candidates:
-                bname = os.path.basename(cand)
+                bname = os.path.basename(cand).split("?")[0].strip()
+                if not bname:
+                    continue
+                if is_turning is False and "centroid_turning" in bname.lower():
+                    continue
+                names_to_try = [bname]
                 if not bname.lower().endswith(".cps"):
-                    bname_cps = bname + ".cps"
-                else:
-                    bname_cps = bname
-                for sdir in search_dirs:
-                    if os.path.isdir(sdir):
-                        p_try = os.path.join(sdir, bname_cps)
+                    names_to_try.append(bname + ".cps")
+                for name_try in names_to_try:
+                    for sdir in search_dirs:
+                        p_try = os.path.join(sdir, name_try)
                         if os.path.isfile(p_try):
+                            _dbg_global(f"_ResolveBasePostPath: matched {name_try} in {sdir} -> {p_try}")
                             return os.path.abspath(p_try)
 
-    return default_p if os.path.isfile(default_p) else ""
+            # Try matching candidate against post descriptions in search_dirs
+            for cand in candidates:
+                cand_clean = cand.strip().lower()
+                if not cand_clean or len(cand_clean) < 3:
+                    continue
+                for sdir in search_dirs:
+                    if not os.path.isdir(sdir):
+                        continue
+                    try:
+                        for entry in os.listdir(sdir):
+                            if entry.lower().endswith(".cps"):
+                                entry_path = os.path.join(sdir, entry)
+                                if is_turning is False and "centroid_turning" in entry.lower():
+                                    continue
+                                try:
+                                    with open(entry_path, "r", encoding="utf-8", errors="ignore") as f:
+                                        first_lines = [f.readline() for _ in range(30)]
+                                    for line in first_lines:
+                                        if "description" in line and cand_clean in line.lower():
+                                            _dbg_global(f"_ResolveBasePostPath: matched description '{cand}' in {entry_path}")
+                                            return os.path.abspath(entry_path)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+    return ""
 
 
 def _ExtractPostProperties(program=None) -> dict:
@@ -1308,6 +1187,7 @@ def _EnsureLocalModulesLoaded():
         "geometry.stock_generator",
         "geometry.legacy_adapter",
         "geometry.lathe_engine",
+        "geometry.mill_engine",
         "geometry.plotter",
         "geometry",
         "context_parser",
@@ -1576,7 +1456,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     1. Ingest WorkpieceDefinition and ToolAssembly models analytically from Setup.
     2. Extract full post context (.json) and Compact-NCI (.cnc) via universal_dumper.cps.
     3. Simulate 2D IPW stock removal and verify collisions via Lathe2DIPWVerifier.
-    4. If fastZ is enabled, restore native G0 rapid moves via universal_replayer.cps.
+    4. If restore_rapid is enabled, restore native G0 rapid moves via universal_replayer.cps.
     5. Compile markdown verification report and generate high-res verification plot (.png).
     """
     _dbg = _dbg_global
@@ -1585,10 +1465,10 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         _dbg("RunLatheVerifier: setup is None or not TurningOperation, skipping")
         return None
     verify_flag = docSettings.get("verifyGcode", True)
-    fastz_flag = docSettings.get("fastZ", False)
-    _dbg(f"RunLatheVerifier: verifyGcode={verify_flag}, fastZ={fastz_flag}")
+    fastz_flag = docSettings.get("restore_rapid", True)
+    _dbg(f"RunLatheVerifier: verifyGcode={verify_flag}, restore_rapid={fastz_flag}")
     if not (verify_flag or fastz_flag):
-        _dbg("RunLatheVerifier: neither verifyGcode nor fastZ enabled, skipping")
+        _dbg("RunLatheVerifier: neither verifyGcode nor restore_rapid enabled, skipping")
         return None
     if not os.path.isfile(cncPath):
         _dbg(f"RunLatheVerifier: cncPath does not exist: {cncPath}")
@@ -1598,7 +1478,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         with open(cncPath, "r", encoding="utf8", errors="replace") as f:
             gcode_content = f.read()
 
-        promote = bool(docSettings.get("fastZ", False))
+        promote = bool(docSettings.get("restore_rapid", True))
         basePath = os.path.splitext(cncPath)[0]
         base_no_ext = basePath
         reportPath = basePath + "_report.md"
@@ -1913,32 +1793,57 @@ def _OpenFile(path):
         return str(exc)
 
 
-def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt):
+def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt):
     """
-    2-pass Context-Dump & Single-Pass Replay turning pipeline for Fusion Personal Edition & multi-tool setups:
+    Unified 2-pass Context-Dump & Single-Pass Replay pipeline for Milling and Turning setups:
     Pass 1 (Context Extraction): Post each single-tool batch inside Fusion using universal_dumper.cps
-            (inheriting vendor BASE_POST settings) to emit batch_i.json and capture a bootstrap .cnc.
-    Pass 2 (Merge, Unified Verification & Single-Pass Replay):
+            (inheriting vendor BASE_POST settings) to emit batch_i.json and capture bootstrap .cnc.
+    Pass 2 (Merge, Universal Domain Extraction, Unified Verification & Single-Pass Replay):
             - Merge all batch_i.json files into a unified multi-section context dump.
-            - Extract continuous MotionSegments across all tools and run a single Lathe2DIPWVerifier pass.
-            - Generate verification plot (.png) and markdown report (_report.md); halt on fatal collisions.
-            - Stamp promoted rapid flags onto the merged context and invoke universal_replayer.cps once
-              with the unmodified vendor post to emit the final combined G-code program.
+            - Extract domain WorkpieceDefinition & tools from context:
+              * Turning: AxisymmetricStock2D + exact kernel SVG profiles.
+              * Milling: BoxStock3D + parametric MillToolGeometry.
+            - Verify toolpath:
+              * Turning: Lathe2DIPWVerifier (dynamic 2D IPW simulation + chuck guard).
+              * Milling: MillClearanceVerifier (Z+ upward retracts reaching or exceeding clearance height).
+            - Universal fatal collision check (RAPID_INTO_STOCK, HOLDER_STRIKE, FIXTURE_COLLISION, SHANK_RUB).
+              Halts post-processing and generates markdown diagnostic report if fatal collision detected.
+            - If restore_rapid is enabled, stamp promotions onto merged context.
+            - Single-pass replay of unmodified vendor post via universal_replayer.cps.
+            - Generate summary report (_report.md) and record verify results for UI.
     """
     _dbg = _dbg_global
-    _dbg(f"_PostProcessLathePipeline entered for {fname}, path={path}")
+    is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
+    _dbg(f"_PostProcessUnifiedPipeline entered for {fname}, path={path}, is_turning={is_turning}")
 
     # 0. Ensure Add-In modules are on sys.path and reloaded in Fusion's persistent interpreter
     _EnsureLocalModulesLoaded()
 
-    # 1. Base post processor & custom post properties resolution (from user's NCProgram)
-    base_post_path = _ResolveBasePostPath(program)
+    base_post_path = _ResolveBasePostPath(program, is_turning=is_turning)
     if not base_post_path or not os.path.isfile(base_post_path):
-        base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
-    if not os.path.isfile(base_post_path):
-        return f"Base machine post processor not found: {base_post_path}"
+        prog_name = getattr(program, "name", "None")
+        post_cfg = getattr(program, "postConfiguration", None)
+        post_name = getattr(post_cfg, "name", None) or getattr(post_cfg, "description", None) or "None"
+        setup_type = "Turning" if is_turning else "Milling"
+        if is_turning is False and "centroid_turning" in str(post_name).lower():
+            return (
+                f"NC Program '{prog_name}' is configured with turning post '{post_name}', "
+                f"which does not support milling toolpaths. "
+                f"Please select or configure a milling NC Program for setup '{setup.name}'."
+            )
+        if is_turning is True and any(m in str(post_name).lower() for m in ("tormach", "mill", "router")):
+            return (
+                f"NC Program '{prog_name}' is configured with milling post '{post_name}', "
+                f"which does not support turning toolpaths. "
+                f"Please select or configure a turning NC Program for setup '{setup.name}'."
+            )
+        return (
+            f"Could not locate machine post processor for {setup_type} setup '{setup.name}' "
+            f"(NC Program '{prog_name}', post '{post_name}'). "
+            f"Please verify the post processor configuration in your NC Program."
+        )
     post_props = _ExtractPostProperties(program)
-    _dbg(f"_PostProcessLathePipeline: base_post_path={base_post_path}, post_props={post_props}")
+    _dbg(f"_PostProcessUnifiedPipeline: base_post_path={base_post_path}, post_props={post_props}")
 
     # Ensure output path never uses .json extension
     if path.lower().endswith(".json"):
@@ -1947,10 +1852,7 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             ext_fix = "." + ext_fix
         path = os.path.splitext(path)[0] + ext_fix
 
-    # 2. Extract workpiece from native Setup model
-    workpiece = _ExtractWorkpieceFromSetup(setup)
-
-    # 3. Partition setup operations into single-tool batches
+    # 2. Partition setup operations into single-tool batches (mandatory for Personal Edition compatibility)
     batches = []
     i = 0
     ops = setup.allOperations
@@ -1971,11 +1873,11 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             i += 1
         batches.append((curTool, opList))
 
-    _dbg(f"_PostProcessLathePipeline: partitioned into {len(batches)} batches: {[b[0] for b in batches]}")
+    _dbg(f"_PostProcessUnifiedPipeline: partitioned into {len(batches)} batches: {[b[0] for b in batches]}")
     if not batches:
         return "No active operations to post process."
 
-    tmp_dir = tempfile.mkdtemp(prefix="lathe_pipe_")
+    tmp_dir = tempfile.mkdtemp(prefix="unified_pipe_")
     tmp_prog = None
     try:
         # -------------------------------------------------------------
@@ -1986,7 +1888,7 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         app = adsk.core.Application.get()
         cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType(constCAMProductId))
         nc_input = cam.ncPrograms.createInput()
-        nc_input.displayName = "_Tmp_Lathe_Context_Dumper"
+        nc_input.displayName = "_Tmp_Unified_Context_Dumper"
         tmp_prog = cam.ncPrograms.add(nc_input)
         try:
             tmp_prog.parameters.itemByName("nc_program_createInBrowser").value.value = False
@@ -2048,7 +1950,7 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             batch_json_files.append(b_json)
 
         # -------------------------------------------------------------
-        # PASS 2: Merge Contexts, Unified Verification & Single-Pass Replay
+        # PASS 2: Merge Contexts, Universal Domain Extraction & Single-Pass Replay
         # -------------------------------------------------------------
         from context_parser import (
             merge_context_dumps,
@@ -2057,58 +1959,67 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             extract_workpiece_from_context,
             extract_tools_from_context,
         )
-        from geometry import Lathe2DIPWVerifier, CollisionKind
+        from geometry import CollisionKind
         from pipeline import PipelineOrchestrator
 
         combined_ctx = merge_context_dumps(batch_json_files)
-        # Override programName with the target setup filename and forward custom post properties
+        # Override programName with target setup filename and forward custom post properties
         combined_ctx["programName"] = str(fname)
         if post_props:
             combined_ctx["postProperties"] = post_props
 
-        # Extract workpiece (WCS frame) and tools (exact kernel SVG cutter/holder profiles) from context dump
-        workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=workpiece)
-        tools_by_op = extract_tools_from_context(combined_ctx)
-        if not tools_by_op:
+        # Universal domain extraction: WorkpieceDefinition & Tools
+        fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
+        workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_wp, is_turning=is_turning)
+        tools_by_op = extract_tools_from_context(combined_ctx, is_turning=is_turning)
+        if is_turning and not tools_by_op:
             return "No lathe operations with valid tools found in context dump."
 
         combined_segments = parse_context_dump(combined_ctx)
         _dbg(f"Pass 2: Combined {len(combined_segments)} motion segments across {len(batches)} batches.")
 
-        verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
-        report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
-
         base_no_ext = os.path.splitext(path)[0]
         report_path = base_no_ext + "_report.md"
-        plot_path = base_no_ext + ".png"
+        plot_path = (base_no_ext + ".png") if is_turning else None
 
-        # Generate verification plot (.png)
-        try:
-            from geometry.plotter import generate_verification_plot
-            is_inch = (combined_ctx.get("unit", 1) == 0)
-            generate_verification_plot(
-                workpiece=workpiece,
-                final_ipw=getattr(verifier, "ipw", None),
-                chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
-                segments=combined_segments,
-                report=report,
-                tools_by_op=tools_by_op,
-                out_png_path=plot_path,
-                unit_is_inch=is_inch,
-            )
-            _dbg(f"Pass 2: Generated verification plot: {plot_path}")
-        except Exception as pl_exc:
-            _dbg(f"Pass 2: generate_verification_plot exception: {pl_exc}")
+        # Instantiate verification engine based on setup operation type
+        if is_turning:
+            from geometry import Lathe2DIPWVerifier
+            verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
+        else:
+            from geometry.mill_engine import MillClearanceVerifier
+            verifier = MillClearanceVerifier()
+
+        report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
+
+        # Generate verification plot (.png) for turning setups
+        if is_turning and plot_path:
+            try:
+                from geometry.plotter import generate_verification_plot
+                is_inch = (combined_ctx.get("unit", 1) == 0)
+                generate_verification_plot(
+                    workpiece=workpiece,
+                    final_ipw=getattr(verifier, "ipw", None),
+                    chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
+                    segments=combined_segments,
+                    report=report,
+                    tools_by_op=tools_by_op,
+                    out_png_path=plot_path,
+                    unit_is_inch=is_inch,
+                )
+                _dbg(f"Pass 2: Generated verification plot: {plot_path}")
+            except Exception as pl_exc:
+                _dbg(f"Pass 2: generate_verification_plot exception: {pl_exc}")
 
         orchestrator = PipelineOrchestrator(
             dumper_cps=constDumperScript,
             replayer_cps=constReplayerScript,
         )
 
-        # Check for fatal collisions before replaying vendor post
+        # Universal collision check: halt before replaying vendor post if any fatal collision is found
         fatal_cols = [
             c for c in report.collisions
-            if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
+            if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION, CollisionKind.SHANK_RUB)
         ]
         if fatal_cols:
             _dbg(f"Pass 2: {len(fatal_cols)} fatal collision(s) detected! Halting machine post replay.")
@@ -2127,17 +2038,17 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
                 collisions=report.collisions,
                 error=f"{len(fatal_cols)} fatal collision(s) detected",
             )
-            return f"{len(fatal_cols)} fatal collision(s) detected in setup {setup.name}! See {os.path.basename(report_path)} and {os.path.basename(plot_path)}."
+            return f"{len(fatal_cols)} fatal collision(s) detected in setup {setup.name}! See {os.path.basename(report_path)}."
 
-        # Stamp promoted rapid flags directly onto the merged context
-        do_promote = bool(docSettings.get("fastZ", False))
+        # Stamp promoted rapid flags directly onto merged context
+        do_promote = bool(docSettings.get("restore_rapid", True))
         promoted_total = 0
         if do_promote and report.promoted_vectors:
             promoted_total = apply_promotions_to_context(
                 combined_ctx, report.promoted_vectors
             )
 
-        # Single-pass replay of the unmodified vendor post across all merged sections
+        # Single-pass replay of unmodified vendor post across all merged sections
         _dbg(f"Pass 2: Replaying merged context ({len(combined_ctx.get('sections', []))} sections, {promoted_total} promoted moves) with universal_replayer.cps...")
         final_gcode = orchestrator.replay_combined_context(
             combined_context=combined_ctx,
@@ -2169,8 +2080,8 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         return None
 
     except Exception as exc:
-        _dbg(f"_PostProcessLathePipeline exception: {traceback.format_exc()}")
-        return f"Lathe pipeline error: {str(exc)}"
+        _dbg(f"_PostProcessUnifiedPipeline exception: {traceback.format_exc()}")
+        return f"PostProcess pipeline error: {str(exc)}"
     finally:
         _ClearDumperConfig()
         if tmp_prog is not None:
@@ -2184,11 +2095,12 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             pass
 
 
+# Backwards compatibility alias
+_PostProcessLathePipeline = _PostProcessUnifiedPipeline
+
+
 def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
     ui = None
-    fileHead = None
-    fileBody = None
-    fileOp = None
     retVal = "Fusion reported an exception"
 
     try:
@@ -2196,7 +2108,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         ui  = app.userInterface
         doc = app.activeDocument
         cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
-        _HealProgramPostConfigIfNeeded(program)
         parameters = program.parameters
 
         # Verify file name is valid by creating it now
@@ -2208,14 +2119,11 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
             except Exception:
                 pass
         path = setupFolder + "/" + fname + fileExt
-        is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
-        do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf8"):
                 pass
-            if docSettings["splitSetup"] or do_lathe_pipeline:
-                os.remove(path)
+            os.remove(path)
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
         
@@ -2226,438 +2134,12 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                 time.sleep(.1)
 
         _dbg = _dbg_global
-        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, splitSetup={docSettings.get('splitSetup')}")
-        _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
+        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}")
 
-        if do_lathe_pipeline:
-            return _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
+        # Unified 2-pass dump & single-pass replay pipeline for all setups
+        return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
 
-        # Post directly to setupFolder/fname so Fusion's toast notification links to the real output file
-        opName = fname
-        opFolder = setupFolder
-        tmpFolder = tempfile.gettempdir().replace("\\", "/")
-
-        parameters.itemByName("nc_program_openInEditor").value.value = False
-        AssignOutputFolder(parameters, opFolder)
-        parameters.itemByName("nc_program_filename").value.value = opName
-        parameters.itemByName("nc_program_name").value.value = fname
-
-        # Do it all at once?
-        if not docSettings["splitSetup"]:
-            try:
-                valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
-                _dbg(f"allOperations count={len(setup.allOperations)}, valid_ops count={len(valid_ops)}: {[op.name for op in valid_ops]}")
-                if valid_ops:
-                    try:
-                        program.operations = valid_ops
-                        _dbg(f"Assigned valid_ops to program.operations successfully (count={len(program.operations)})")
-                    except Exception as op_exc:
-                        _dbg(f"Failed to assign valid_ops to program.operations: {op_exc}, falling back to [setup]")
-                        program.operations = [setup]
-                else:
-                    program.operations = [setup]
-
-                opts = adsk.cam.NCProgramPostProcessOptions.create()
-                if hasattr(opts, "isFailOnToolNumberDuplication"):
-                    opts.isFailOnToolNumberDuplication = False
-
-                _dbg("Calling program.postProcess...")
-                post_success = bool(program.postProcess(opts))
-                _dbg(f"program.postProcess completed, success={post_success}")
-                if not post_success:
-                    _dbg(f"Posting failed on setup {setup.name}")
-                    return "Fusion reported an error during post processing."
-                time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
-                return None
-            except Exception as exc:
-                try:
-                    adsk.core.Application.get().log(f"[PostProcessAll] PostProcessSetup error: {traceback.format_exc()}")
-                except Exception:
-                    pass
-                retVal += ": " + str(exc)
-                return retVal
-
-
-        # Split setup into individual operations
-        opPath = path
-        fileHead = io.StringIO()
-        fileBody = open(tmpFolder + "/" + constBodyTmpFile + fileExt, "w", encoding="utf8")
-        fFirst = True
-        fBlankOk = False
-        lineNum = 10
-        regToolComment = re.compile(r"\(T[0-9]+\s")
-        regBody = re.compile(r""
-            r"(?P<N>N[0-9]+ *)?" # line number
-            r"(?P<line>"         # line w/o number
-            r"(M(?P<M>[0-9]+) *)?" # M-code
-            r"(G(?P<G>[0-9]+) *)?" # G-code
-            r"(T(?P<T>[0-9]+))?" # Tool
-            r".+)",              # to end of line
-            re.IGNORECASE | re.DOTALL)
-        toolChange = docSettings["toolChange"]
-        fToolChangeNum = False
-        if len(toolChange) != 0:
-            toolChange = toolChange.replace(":", "\n")
-            toolChange += "\n"
-            match = regBody.match(toolChange).groupdict()
-            if match["N"] != None:
-                fToolChangeNum = True
-                toolChange = match["line"]
-                # split into individual lines to add line numbers
-                toolChange = toolChange.splitlines(True)
-        # Parse end code list, splitting into G-codes and M-codes
-        endCodes = docSettings["endCodes"]
-        endGcodes = re.findall("G([0-9]+)", endCodes)
-        endGcodeSet = set()
-        for code in endGcodes:
-            endGcodeSet.add(int(code))
-        endMcodes = re.findall("M([0-9]+)", endCodes)
-        endMcodeSet = set()
-        for code in endMcodes:
-            endMcodeSet.add(int(code))
-
-        fFastZenabled = bool(docSettings.get("fastZHeuristic", docSettings.get("fastZ", False))) and not is_turning
-        if fFastZenabled:
-            regParseLine = re.compile(r""
-                r"(G(?P<G>[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
-                r"(?P<XY>((X-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
-                r"((Y-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?)"
-                r"(Z(?P<Z>-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
-                r"(F(?P<F>-?[0-9]+(\.[0-9]*)?)[^XYZF]*)?",
-                re.IGNORECASE)
-            regGcodes = re.compile(r"G([0-9]+(?:\.[0-9]*)?)")
-
-        i = 0
-        ops = setup.allOperations
-        while i < ops.count:
-            op = ops[i]
-            i += 1
-            if op.isSuppressed:
-                continue
-
-            # Look ahead for operations without a toolpath. This can happen
-            # with a manual operation. Group it with current operation.
-            # Or if first, group it with subsequent ones.
-            # Also optionally group together operations with the same tool number
-            opHasTool = None
-            curTool = -1
-            hasTool = op.hasToolpath
-            if hasTool:
-                opHasTool = op
-                curTool = op.tool.parameters.itemByName("tool_number").value.value
-            opList = [op]
-            while i < ops.count:
-                op = ops[i]
-                if not op.isSuppressed:
-                    if op.hasToolpath and (not docSettings["combineTool"] or op.tool.parameters.itemByName("tool_number").value.value != curTool):
-                        if not hasTool:
-                            opList.append(op)
-                            opHasTool = op
-                            i += 1
-                        break
-                    opList.append(op)
-                i += 1
-
-            retries = docSettings["postRetries"]
-            delay = docSettings["initialDelay"]
-            while True:
-                try:
-                    program.operations = opList
-                    opts = adsk.cam.NCProgramPostProcessOptions.create()
-                    if hasattr(opts, "isFailOnToolNumberDuplication"):
-                        opts.isFailOnToolNumberDuplication = False
-                    if not program.postProcess(opts):
-                        retVal = "Fusion reported an error processing operation"
-                        if (opHasTool != None):
-                            retVal += ": " +  opHasTool.name
-                        return retVal
-                except Exception as exc:
-                    if (opHasTool != None):
-                        retVal += " in operation " +  opHasTool.name
-                    retVal += ": " + str(exc)
-                    return retVal
-
-                time.sleep(delay) # wait for it to finish (??)
-                try:
-                    fileOp = open(opPath, encoding="utf8", errors='replace')
-                    break
-                except:
-                    delay *= 2
-                    retries -= 1
-                    if retries > 0:
-                        continue
-                    # Maybe the file name extension is wrong
-                    for file in os.listdir(opFolder):
-                        if file.startswith(opName):
-                            ext = file[len(opName):]
-                            if ext != fileExt:
-                                return ("Unable to open output file. "
-                                    "Found the file with extension '{}' instead "
-                                    "of '{}'. Make sure you have the correct file "
-                                    "extension set in the Post Process All "
-                                    "dialog.".format(ext, fileExt))
-                            break
-                    return "Unable to open " + opPath
-            
-            # Space between operations
-            if not fFirst and fBlankOk:
-                fileBody.write("\n")
-
-            # % at start only
-            line = fileOp.readline()
-            if line[0] == "%":
-                if fFirst:
-                    fileHead.write(line)
-                line = fileOp.readline()
-
-            # check for initial comments and tool
-            # send it to header
-            while line[0] == "(" or line[0] == "O" or line[0] == "\n":
-                if line[0] == "\n":
-                    fBlankOk = True
-                if regToolComment.match(line) != None:
-                    fileHead.write(line)
-                    line = fileOp.readline()
-                    break
-
-                if fFirst:
-                    pos = line.upper().find(opName.upper())
-                    if pos != -1:
-                        pos += len(opName)
-                        if docSettings["numericName"]:
-                            fill = "0" * (pos - len(fname) - 1)
-                        else:
-                            fill = ""
-                        line = line[0] + fill + fname + line[pos:]    # correct file name
-                    fileHead.write(line)
-                line = fileOp.readline()
-
-            # Body starts at tool code, T
-            while True:
-                match = regBody.match(line).groupdict()
-                line = match["line"]        # filter off line number if present
-                fNum = match["N"] != None
-
-                if (match["T"] != None):
-                    if not fFirst and len(toolChange) != 0:
-                        # have tool change G-codes to add
-                        if fToolChangeNum:
-                            # Add line number to tool change
-                            for code in toolChange:
-                                fileBody.write("N" + str(lineNum) + " " + code)
-                                lineNum += constLineNumInc
-                        else:
-                            fileBody.write(toolChange)
-                    break
-
-                if fFirst or line[0] == "(" or line[0] == ";":
-                    if (fNum):
-                        fileBody.write("N" + str(lineNum) + " ")
-                        lineNum += constLineNumInc
-                    fileBody.write(line)
-                line = fileOp.readline()
-                if len(line) == 0:
-                    return "Tool change G-code (Txx) not found; this post processor is not compatible with Post Process All."
-                if line[0] == "\n":
-                    fBlankOk = True
-
-            # Note that match, line, and fNum are already set
-            # Initialize rapid move optimizations for milling operations
-            fFastZ = fFastZenabled and (setup.operationType != adsk.cam.OperationTypes.TurningOperation)
-            Gcode = None
-            Zcur = None
-            Zlast = None
-            Zfeed = None
-            feedCur = 0
-            fNeedFeed = False
-            fLockSpeed = False
-
-            while True:
-                # End of program marker?
-                endMark = match["M"]
-                if endMark != None:
-                    endMark = int(endMark)
-                    if endMark in endMcodeSet:
-                        break
-                    # When M49/M48 is used to turn off speed changes, disable fast moves as well
-                    if endMark == 49:
-                        fLockSpeed = True
-                    elif endMark == 48:
-                        fLockSpeed = False
-                endMark = match["G"]
-                if endMark != None:
-                    endMark = int(endMark)
-                    if endMark in endGcodeSet:
-                        break
-
-                if fFastZ:
-                    # Analyze code for chances to make rapid moves
-                    matchParsed = regParseLine.match(line)
-                    if matchParsed is not None and matchParsed.end() != 0:
-                        try:
-                            matchDict = matchParsed.groupdict()
-                            Gcodes = regGcodes.findall(line)
-                            fNoMotionGcode = True
-                            fHomeGcode = False
-                            for GcodeTmp in Gcodes:
-                                GcodeTmp = int(float(GcodeTmp))
-                                if GcodeTmp in constHomeGcodeSet:
-                                    fHomeGcode = True
-                                    break
-
-                                if GcodeTmp in constMotionGcodeSet:
-                                    fNoMotionGcode = False
-                                    Gcode = GcodeTmp
-                                    if Gcode == 0:
-                                        fNeedFeed = False
-                                    break
-
-                            if not fHomeGcode:
-                                Ztmp = matchDict["Z"]
-                                if Ztmp is not None:
-                                    Zlast = Zcur
-                                    Zcur = float(Ztmp)
-
-                                feedTmp = matchDict["F"]
-                                prevFeed = feedCur
-                                if feedTmp is not None:
-                                    feedCur = float(feedTmp)
-
-                                XYcur = matchDict["XY"].rstrip("\n ")
-
-                                # 1. Learn Zfeed on the first pure-Z move (G0 clearance or initial feed-height move)
-                                if Zfeed is None and (Gcode == 0 or Gcode == 1) and Ztmp is not None and len(XYcur) == 0:
-                                    Zfeed = Zcur
-                                    if Gcode != 0:
-                                        # Replace line with rapid move
-                                        line = constRapidZgcode.format(Zcur, line[:-1])
-                                        fNeedFeed = True
-                                        Gcode = 0
-
-                                # 2. Candidate rapid moves at or above feed height
-                                if Gcode == 1 and not fLockSpeed:
-                                    if Ztmp is not None:
-                                        is_at_feed = (Zfeed is not None and Zcur >= Zfeed)
-                                        is_upward_safe = (Zlast is not None and Zcur >= Zlast and Zfeed is not None and Zcur >= Zfeed)
-                                        is_zero_feed = (feedCur == 0)
-                                        if len(XYcur) == 0 and (is_at_feed or is_upward_safe or is_zero_feed):
-                                            # Move at or above feed height, or anomalous feed rate -> promote to rapid
-                                            line = constRapidZgcode.format(Zcur, line[:-1])
-                                            fNeedFeed = True
-                                            Gcode = 0
-
-                                    elif Zcur is not None and Zfeed is not None and Zcur >= Zfeed:
-                                        # No Z move, at/above feed height -> promote XY traverse to rapid
-                                        line = constRapidXYgcode.format(XYcur, line[:-1])
-                                        fNeedFeed = True
-                                        Gcode = 0
-
-                                # 3. Restoring G01 and modal feedrate when descending below feed height
-                                elif fNeedFeed and fNoMotionGcode:
-                                    # No explicit G-code present on line, changing back to G1
-                                    if Ztmp is not None:
-                                        if len(XYcur) != 0:
-                                            # Combined XYZ cutting move -> restore G1 with feedrate
-                                            line = constFeedXYZgcode.format(XYcur, Zcur, feedCur, line[:-1])
-                                            fNeedFeed = False
-                                            Gcode = 1
-                                        elif Zfeed is not None and Zcur < Zfeed:
-                                            # Pure Z move below feed height -> restore G1 with feedrate
-                                            line = constFeedZgcode.format(Zcur, feedCur, line[:-1])
-                                            fNeedFeed = False
-                                            Gcode = 1
-
-                                    elif len(XYcur) != 0 and Zcur is not None and Zfeed is not None and Zcur < Zfeed:
-                                        # No Z move, below feed height -> restore G1 with feedrate
-                                        line = constFeedXYgcode.format(XYcur, feedCur, line[:-1])
-                                        fNeedFeed = False
-                                        Gcode = 1
-
-                                # 4. Re-add feedrate if motion was restored to cutting G1 without an explicit F word
-                                if Gcode != 0 and fNeedFeed:
-                                    if feedTmp is None:
-                                        line = line[:-1] + constAddFeedGcode.format(feedCur)
-                                    fNeedFeed = False
-
-                                # 5. Adapt Zfeed upwards if a cutting move occurs at or above current Zfeed
-                                if Zcur is not None and Zfeed is not None and Zcur >= Zfeed and Gcode is not None and \
-                                    Gcode != 0 and len(XYcur) != 0 and (Ztmp is not None or Gcode != 1):
-                                    Zfeed = Zcur + 0.001
-                        except Exception:
-                            fFastZ = False # Safely skip changes on parse error
-
-                # copy line to output
-                if (fNum):
-                    fileBody.write("N" + str(lineNum) + " ")
-                    lineNum += constLineNumInc
-                fileBody.write(line)
-                lineFull = fileOp.readline()
-                if len(lineFull) == 0:
-                    break
-                match = regBody.match(lineFull).groupdict()
-                line = match["line"]        # filter off line number if present
-                fNum = match["N"] != None
-
-            # Found tail of program
-            if fFirst:
-                tailGcode = lineFull + fileOp.read()
-            fFirst = False
-            fileOp.close()
-            os.remove(fileOp.name)
-            fileOp = None
-
-        # Completed all operations, add tail
-        # Update line numbers if present
-        if len(tailGcode) != 0:
-            tailGcode = tailGcode.splitlines(True)
-            for code in tailGcode:
-                match = regBody.match(code).groupdict()
-                if match["N"] != None:
-                    fileBody.write("N" + str(lineNum) + " " + match["line"])
-                    lineNum += constLineNumInc
-                else:
-                    fileBody.write(code)
-
-        # Write combined header + body to final output path
-        fileBody.close()
-        fileBody = open(fileBody.name, "r", encoding="utf8", errors="replace")
-        with open(path, "w", encoding="utf8") as outFile:
-            outFile.write(fileHead.getvalue())
-            while True:
-                block = fileBody.read(10240)
-                if len(block) == 0:
-                    break
-                outFile.write(block)
-        fileBody.close()
-        os.remove(fileBody.name)
-        fileBody = None
-        fileHead.close()
-        fileHead = None
-
-        return None
-
-    except:
-        if fileHead:
-            try:
-                fileHead.close()
-            except:
-                pass
-
-        if fileBody:
-            try:
-                fileBody.close()
-                os.remove(fileBody.name)
-            except:
-                pass
-
-        if fileOp:
-            try:
-                fileOp.close()
-                os.remove(fileOp.name)
-            except:
-                pass
-
+    except Exception as exc:
         if ui:
             retVal += " " + traceback.format_exc()
-
         return retVal

@@ -490,6 +490,112 @@ class TestUniversalReplayerFourPosts(unittest.TestCase):
             self.assertIn("G98 G90", gcode)
             self.assertNotRegex(gcode, r"(?m)^N\d+\s+")
 
+    def test_10_multi_section_milling_tormach_mill(self):
+        """
+        Verify multi-section milling replay on Tormach PathPilot (tormach.cps):
+        Tests a 6-operation milling setup (such as setup OilLid) where successive
+        operations query previousSection.getGlobalFinalToolAxis(), getFinalToolAxis(),
+        and isNewWorkPlane() without errors.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            b0_json = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.milling_cnc, self.tormach_cps, b0_json)
+
+            multi_ctx = copy.deepcopy(b0_ctx)
+            base_sec = b0_ctx["sections"][0]
+            multi_ctx["sections"] = []
+            for i in range(6):
+                s = copy.deepcopy(base_sec)
+                s["id"] = i
+                tool_num = 15 if i < 3 else 20
+                s["tool"]["number"] = tool_num
+                s["tool"]["_toolId"] = str(tool_num)
+                s["tool"]["description"] = f"Tool {tool_num}"
+                s["tool"]["_description"] = f"Tool {tool_num}"
+                s["params"]["operation-comment"] = f"Milling_Op_{i}_T{tool_num}"
+                multi_ctx["sections"].append(s)
+
+            out_nc = os.path.join(tmp_dir, "tormach_6sec.nc")
+            gcode = self.orchestrator.replay_combined_context(
+                combined_context=multi_ctx,
+                bootstrap_cnc_path=self.milling_cnc,
+                base_post_path=self.tormach_cps,
+                final_cnc_path=out_nc,
+            )
+
+            # All 6 operation comments must be emitted
+            for i in range(6):
+                tool_num = 15 if i < 3 else 20
+                self.assertIn(f"(Milling_Op_{i}_T{tool_num})", gcode)
+
+            # Both T15 and T20 must appear in header and tool calls
+            self.assertIn("(T15", gcode)
+            self.assertIn("(T20", gcode)
+            self.assertIn("T15 G43 H15 M6", gcode)
+            self.assertIn("T20 G43 H15 M6", gcode)
+            self.assertEqual(gcode.count("M30"), 1)
+
+    def test_11_oillid_exact_setup_simulation(self):
+        """
+        Faithfully mimic the user's exact OilLid milling setup on Tormach PathPilot:
+        - Setup: OilLid
+        - 1 Batch with Tool 2, 6 operations (single tool multi-operation)
+        - Post: tormach.cps
+        - Post properties: metric=True, safePositionMethod='G30', useSmoothing='-1',
+          showSequenceNumbers='false'
+        - Multi-section bootstrap CNC file (where C++ kernel finishes at section index > 0,
+          exercising getPreviousSection(), isNewWorkPlane(), and defineWorkPlane())
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            b0_json = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.milling_cnc, self.tormach_cps, b0_json)
+
+            multi_ctx = copy.deepcopy(b0_ctx)
+            base_sec = b0_ctx["sections"][0]
+            multi_ctx["programName"] = "1 OilLid"
+            multi_ctx["sections"] = []
+            for i in range(6):
+                s = copy.deepcopy(base_sec)
+                s["id"] = i
+                s["tool"]["number"] = 2
+                s["tool"]["_toolId"] = "2"
+                s["tool"]["compensationOffset"] = 2
+                s["tool"]["lengthOffset"] = 2
+                s["tool"]["description"] = "1/4 Flat Endmill T2"
+                s["tool"]["_description"] = "1/4 Flat Endmill T2"
+                s["params"]["operation-comment"] = f"OilLid_Op_{i}"
+                multi_ctx["sections"].append(s)
+
+            multi_ctx["postProperties"] = {
+                "metric": True,
+                "group_configuration": True,
+                "safePositionMethod": "G30",
+                "useSmoothing": "-1",
+                "showSequenceNumbers": "false",
+            }
+
+            out_nc = os.path.join(tmp_dir, "1_OilLid.nc")
+            # Using self.turning_cnc (which has 3 sections) simulates captured.intermediate.cnc
+            # having multiple sections, ensuring getPreviousSection() and isNewWorkPlane()
+            # execute without 'can't access property workPlane, _section is undefined'.
+            gcode = self.orchestrator.replay_combined_context(
+                combined_context=multi_ctx,
+                bootstrap_cnc_path=self.turning_cnc,
+                base_post_path=self.tormach_cps,
+                final_cnc_path=out_nc,
+            )
+
+            # Verify all 6 operations are present
+            for i in range(6):
+                self.assertIn(f"(OilLid_Op_{i})", gcode)
+
+            # Tool 2 call is emitted
+            self.assertIn("T2 G43 H2 M6", gcode)
+            # Safe position retract G30 is emitted
+            self.assertIn("G30", gcode)
+            # Clean M30 program termination
+            self.assertEqual(gcode.count("M30"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,7 +94,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 f.write(meta_header)
 
             setup = DummySetup(name="Profile Roughing", is_turning=True)
-            docSettings = {"verifyGcode": True, "fastZ": True}
+            docSettings = {"verifyGcode": True, "restore_rapid": True}
 
             # 3. Execute RunLatheVerifier
             err = RunLatheVerifier(cnc_output, setup, docSettings)
@@ -178,7 +178,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             setup = DummySetup(name="Profile Roughing Native", is_turning=True)
             setup.parameters = MockParams(d_outer_cm=3.175, len_cm=6.35, d_inner_cm=1.27, offset_front_cm=0.0)
 
-            docSettings = {"verifyGcode": True, "fastZ": True}
+            docSettings = {"verifyGcode": True, "restore_rapid": True}
 
             # 3. Execute RunLatheVerifier
             err = RunLatheVerifier(cnc_output, setup, docSettings)
@@ -206,7 +206,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 pass
 
             setup = DummySetup(name="Obj Post Setup", is_turning=True)
-            docSettings = {"verifyGcode": True, "fastZ": False}
+            docSettings = {"verifyGcode": True, "restore_rapid": False}
 
             # Passing MockPostConfigurationObject instance instead of string path
             err = RunLatheVerifier(cnc_output, setup, docSettings, base_post=MockPostConfigurationObject())

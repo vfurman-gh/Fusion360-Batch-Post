@@ -39,12 +39,32 @@ class MillClearanceVerifier(IVerificationEngine):
         self.xy_tol_mm = float(xy_tol_mm)
         self.z_tol_mm = float(z_tol_mm)
         self.workpiece: Optional[WorkpieceDefinition] = None
+        self.active_tool: Optional[ToolAssembly] = None
         self._sec_clearance_mm: Dict[int, float] = {}
+        self.total_machining_time_sec = 0.0
+        self.all_collisions: List[CollisionRecord] = []
+        self.vector_total_occurrences: Dict[str, int] = {}
+        self.vector_last_non_air_occurrence: Dict[str, int] = {}
+        self.vector_has_air_occurrence: Dict[str, bool] = {}
 
-    def reset_workpiece(self, workpiece: WorkpieceDefinition) -> None:
+    def reset(self, workpiece: WorkpieceDefinition) -> None:
         """Initialize or reset the workpiece state and per-section clearance cache."""
         self.workpiece = workpiece
+        self.active_tool = None
         self._sec_clearance_mm.clear()
+        self.total_machining_time_sec = 0.0
+        self.all_collisions.clear()
+        self.vector_total_occurrences.clear()
+        self.vector_last_non_air_occurrence.clear()
+        self.vector_has_air_occurrence.clear()
+
+    def reset_workpiece(self, workpiece: WorkpieceDefinition) -> None:
+        """Alias for reset() for backwards compatibility."""
+        self.reset(workpiece)
+
+    def load_tool(self, tool: ToolAssembly) -> None:
+        """Mount the active tool."""
+        self.active_tool = tool
 
     def _resolve_clearance_z_mm(self, segment: MotionSegment) -> Optional[float]:
         """Resolve the target clearance Z height (in mm) for `segment.sec_id`."""
@@ -116,58 +136,68 @@ class MillClearanceVerifier(IVerificationEngine):
             collisions=[],
         )
 
+    def step(self, move: MotionSegment) -> MoveEvaluation:
+        """
+        Evaluate a single kinematic move against clearance rules and record metrics.
+        """
+        eval_res = self.step_segment(move, self.active_tool)
+        self.total_machining_time_sec += max(0.0, float(move.duration_sec))
+
+        if eval_res.collisions:
+            self.all_collisions.extend(eval_res.collisions)
+
+        meta = move.metadata or {}
+        if move.motion == MotionKind.LINEAR and not bool(meta.get("in_cycle", False)):
+            vkey = eval_res.vector_key
+            occ = self.vector_total_occurrences.get(vkey, 0) + 1
+            self.vector_total_occurrences[vkey] = occ
+            if eval_res.is_air_move:
+                self.vector_has_air_occurrence[vkey] = True
+            else:
+                self.vector_last_non_air_occurrence[vkey] = occ
+
+        return eval_res
+
+    def generate_report(self) -> VerificationReport:
+        """Compile VerificationReport with promoted_vectors for Z+ clearance retracts."""
+        promoted_vectors: Dict[str, PromotedVectorRule] = {}
+        for vkey, total_occ in self.vector_total_occurrences.items():
+            if not self.vector_has_air_occurrence.get(vkey, False):
+                continue
+            last_non_air = self.vector_last_non_air_occurrence.get(vkey, 0)
+            if last_non_air < total_occ:
+                promoted_vectors[vkey] = PromotedVectorRule(min_occur=last_non_air + 1)
+
+        return VerificationReport(
+            total_machining_time_sec=self.total_machining_time_sec,
+            total_volume_removed_mm3=0.0,
+            collisions=list(self.all_collisions),
+            promoted_vectors=promoted_vectors,
+            mrr_timeline=[],
+            mrr_spikes=[],
+        )
+
     def verify_toolpath(
         self,
-        segments: Sequence[MotionSegment],
-        tools_by_op: Dict[str, ToolAssembly],
-        workpiece: WorkpieceDefinition,
+        moves: Optional[Sequence[MotionSegment]] = None,
+        tools_by_op: Optional[Dict[str, ToolAssembly]] = None,
+        workpiece: Optional[WorkpieceDefinition] = None,
+        segments: Optional[Sequence[MotionSegment]] = None,
     ) -> VerificationReport:
         """
         Run the complete Milling verification pass across all segments and return
         a `VerificationReport` with `promoted_vectors` for `Z+` clearance retracts.
         """
-        self.reset_workpiece(workpiece)
+        moves_seq = moves if moves is not None else (segments or [])
+        if workpiece is not None:
+            self.reset(workpiece)
+        current_op = None
 
-        total_time_sec = 0.0
-        all_collisions: List[CollisionRecord] = []
-        mrr_timeline: List[MRRSample] = []
-        mrr_spikes: List[MRRSample] = []
+        for move in moves_seq:
+            if move.op_id != current_op:
+                current_op = move.op_id
+                if tools_by_op and current_op in tools_by_op:
+                    self.load_tool(tools_by_op[current_op])
+            self.step(move)
 
-        vector_total_occurrences: Dict[str, int] = {}
-        vector_last_non_air_occurrence: Dict[str, int] = {}
-        vector_has_air_occurrence: Dict[str, bool] = {}
-
-        for seg in segments:
-            tool = tools_by_op.get(seg.op_id) if tools_by_op else None
-            eval_res = self.step_segment(seg, tool)
-            total_time_sec += max(0.0, float(seg.duration_sec))
-
-            if eval_res.collisions:
-                all_collisions.extend(eval_res.collisions)
-
-            meta = seg.metadata or {}
-            if seg.motion == MotionKind.LINEAR and not bool(meta.get("in_cycle", False)):
-                vkey = eval_res.vector_key
-                occ = vector_total_occurrences.get(vkey, 0) + 1
-                vector_total_occurrences[vkey] = occ
-                if eval_res.is_air_move:
-                    vector_has_air_occurrence[vkey] = True
-                else:
-                    vector_last_non_air_occurrence[vkey] = occ
-
-        promoted_vectors: Dict[str, PromotedVectorRule] = {}
-        for vkey, total_occ in vector_total_occurrences.items():
-            if not vector_has_air_occurrence.get(vkey, False):
-                continue
-            last_non_air = vector_last_non_air_occurrence.get(vkey, 0)
-            if last_non_air < total_occ:
-                promoted_vectors[vkey] = PromotedVectorRule(min_occur=last_non_air + 1)
-
-        return VerificationReport(
-            total_machining_time_sec=total_time_sec,
-            total_volume_removed_mm3=0.0,
-            collisions=all_collisions,
-            promoted_vectors=promoted_vectors,
-            mrr_timeline=mrr_timeline,
-            mrr_spikes=mrr_spikes,
-        )
+        return self.generate_report()

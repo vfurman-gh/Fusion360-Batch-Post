@@ -16,7 +16,7 @@ Processes structured JSON context dumps emitted by `universal_dumper.cps`:
 import copy
 import json
 import math
-from typing import Any, Dict, List, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from geometry.models import (
     MotionKind,
@@ -431,19 +431,41 @@ def apply_promotions_to_context(
 def extract_workpiece_from_context(
     context_data: Dict[str, Any],
     fallback_workpiece: Any = None,
+    is_turning: Optional[bool] = None,
 ) -> Any:
     """
-    Construct a canonical metric `WorkpieceDefinition` (`mm`) from `context_data["workpiece"]`
-    (captured via the C++ Post Kernel's `getWorkpiece()` in exact Setup WCS coordinates),
-    preserving `inner_radius` and `fixtures` from `fallback_workpiece` if provided.
+    Construct a metric `WorkpieceDefinition` (`mm`) from `context_data["workpiece"]`
+    (and chuck obstacles / stock dimensions from globalParams if turning).
+    Supports:
+    - Turning: AxisymmetricStock2D with AxisymmetricChuckObstacle fixtures.
+    - Milling: BoxStock3D (prismatic stock bounding box).
     """
     from geometry.models import (
         AxisymmetricChuckObstacle,
         AxisymmetricStock2D,
+        BoxStock3D,
         WorkpieceDefinition,
     )
 
     wp = context_data.get("workpiece")
+    if not wp or not isinstance(wp, dict):
+        stock_data = context_data.get("stock")
+        if isinstance(stock_data, dict):
+            if "lower" in stock_data and "upper" in stock_data:
+                wp = stock_data
+            elif "x_min" in stock_data:
+                wp = {
+                    "lower": {
+                        "x": stock_data.get("x_min", 0.0),
+                        "y": stock_data.get("y_min", 0.0),
+                        "z": stock_data.get("z_min", 0.0),
+                    },
+                    "upper": {
+                        "x": stock_data.get("x_max", 0.0),
+                        "y": stock_data.get("y_max", 0.0),
+                        "z": stock_data.get("z_max", 0.0),
+                    },
+                }
     if not wp or not isinstance(wp, dict):
         return fallback_workpiece
 
@@ -451,6 +473,32 @@ def extract_workpiece_from_context(
     upper = wp.get("upper") or {}
     unit = context_data.get("unit", 0)
     scale = 25.4 if unit == 0 else 1.0
+
+    if is_turning is None:
+        # Auto-detect turning if any section is turning type (1) or has turning tool
+        is_turning = any(
+            sec.get("type") == 1 or bool(sec.get("tool", {}).get("_isTurningTool", False))
+            for sec in context_data.get("sections", [])
+        )
+
+    if not is_turning:
+        x_min = float(lower.get("x", 0.0)) * scale
+        x_max = float(upper.get("x", 0.0)) * scale
+        y_min = float(lower.get("y", 0.0)) * scale
+        y_max = float(upper.get("y", 0.0)) * scale
+        z_min = float(lower.get("z", 0.0)) * scale
+        z_max = float(upper.get("z", 0.0)) * scale
+        return WorkpieceDefinition(
+            stock=BoxStock3D(
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
+                z_min=z_min,
+                z_max=z_max,
+            ),
+            fixtures=[],
+        )
 
     z_min = float(lower.get("z", 0.0)) * scale
     z_max = float(upper.get("z", 0.0)) * scale
@@ -512,23 +560,21 @@ def extract_workpiece_from_context(
 def extract_tools_from_context(
     context_data: Dict[str, Any],
     fallback_tools: Any = None,
+    is_turning: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Construct exact metric `ToolAssembly` objects (`mm`) from the kernel-provided
-    2D SVG profiles (`_cutterSVG` and `_holderSVG`) in `context_data["sections"]`,
-    falling back to `fallback_tools` for any operation without SVG profiles.
+    profiles in `context_data["sections"]`.
+    - Turning operations: LatheToolGeometry using 2D SVG profiles (_cutterSVG / _holderSVG).
+    - Milling operations: MillToolGeometry using parametric tool dimensions.
     """
     from geometry.models import (
         LatheToolGeometry,
+        MillToolGeometry,
         ToolAssembly,
         ToolCompensationQuadrant,
     )
     from geometry.legacy_adapter import transform_tool_svg
-
-    try:
-        from shapely.affinity import scale as shapely_scale
-    except (ImportError, OSError):
-        return dict(fallback_tools) if fallback_tools else {}
 
     unit = context_data.get("unit", 0)
     scale = 25.4 if unit == 0 else 1.0
@@ -536,12 +582,47 @@ def extract_tools_from_context(
 
     for sec_idx, sec in enumerate(context_data.get("sections", [])):
         sec_id = sec.get("id", sec_idx)
+        sec_type = sec.get("type", 0)
         params = sec.get("params") or {}
         op_name = params.get("operation-comment", f"Section_{sec_id}")
         t = sec.get("tool") or {}
         cutter_svg = t.get("_cutterSVG", "")
         holder_svg = t.get("_holderSVG", "")
-        if not cutter_svg:
+
+        is_turning_tool = bool(t.get("_isTurningTool", False)) or (sec_type == 1)
+        if is_turning is False:
+            is_turning_tool = False
+        elif is_turning is True:
+            is_turning_tool = True
+
+        if not is_turning_tool or not cutter_svg:
+            # Construct MillToolGeometry for milling tools
+            dia = float(t.get("diameter", 0.0) or 0.0) * scale
+            cr = float(t.get("cornerRadius", t.get("corner_radius", t.get("noseRadius", 0.0))) or 0.0) * scale
+            flute_l = float(t.get("fluteLength", t.get("flute_length", 0.0)) or 0.0) * scale
+            overall_l = float(t.get("overallLength", t.get("overall_length", 0.0)) or 0.0) * scale
+            taper_a = float(t.get("taperAngle", t.get("taper_angle", 0.0)) or 0.0)
+            holder_d = float(t.get("holderDiameter", t.get("holder_diameter", 40.0)) or 40.0) * scale
+            holder_l = float(t.get("holderLength", t.get("holder_length", 60.0)) or 60.0) * scale
+            mill_geom = MillToolGeometry(
+                diameter=dia,
+                corner_radius=cr,
+                flute_length=flute_l,
+                overall_length=overall_l,
+                taper_angle_deg=taper_a,
+                holder_diameter=holder_d,
+                holder_length=holder_l,
+            )
+            tools_by_op[op_name] = ToolAssembly(
+                tool_id=int(t.get("number", 0) or 0),
+                name=op_name,
+                geometry=mill_geom,
+            )
+            continue
+
+        try:
+            from shapely.affinity import scale as shapely_scale
+        except (ImportError, OSError):
             continue
 
         comp_d = t.get("_compDisplacement") or {"x": 0.0, "y": 0.0}
