@@ -1709,22 +1709,36 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         parameters.itemByName("nc_program_filename").value.value = opName
         parameters.itemByName("nc_program_name").value.value = fname
 
+        def _dbg(msg):
+            try:
+                with open("/tmp/postprocess_debug.log", "a", encoding="utf8") as f:
+                    f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] {msg}\n")
+            except Exception:
+                pass
+
+        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, splitSetup={docSettings.get('splitSetup')}")
+
         # Check if lathe verification pipeline should handle this setup
         is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
         do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
+        _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
 
         # Do it all at once? (Always handle turning setups through unified verification pipeline)
         if do_lathe_pipeline or not docSettings["splitSetup"]:
             orig_post_config = None
             try:
                 valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
+                _dbg(f"allOperations count={len(setup.allOperations)}, valid_ops count={len(valid_ops)}: {[op.name for op in valid_ops]}")
                 if valid_ops:
                     try:
                         program.operations = valid_ops
-                    except Exception:
+                        _dbg(f"Assigned valid_ops to program.operations successfully (count={len(program.operations)})")
+                    except Exception as op_exc:
+                        _dbg(f"Failed to assign valid_ops to program.operations: {op_exc}, falling back to [setup]")
                         program.operations = [setup]
                 else:
                     program.operations = [setup]
+
                 if do_lathe_pipeline and os.path.isfile(constAptExtractorScript):
                     intermediate_cnc = path + ".intermediate.cnc"
                     if os.path.isfile(intermediate_cnc):
@@ -1737,11 +1751,14 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     sys_apt = _FindSystemAptPost()
                     os.environ["SYSTEM_APT_CPS"] = sys_apt
                     os.environ["TARGET_INTERMEDIATE_CNC"] = intermediate_cnc
+                    _dbg(f"Set env SYSTEM_APT_CPS={sys_apt}, TARGET_INTERMEDIATE_CNC={intermediate_cnc}")
 
                     # Save original post configuration object for restoration in finally
                     try:
                         orig_post_config = program.postConfiguration
-                    except Exception:
+                        _dbg(f"Original program.postConfiguration: {getattr(orig_post_config, 'description', orig_post_config)}")
+                    except Exception as pc_exc:
+                        _dbg(f"Could not read orig_post_config: {pc_exc}")
                         orig_post_config = None
 
                     # Ensure apt_extractor_wrapper.cps and apt.cps are available in Fusion's local Posts library folder
@@ -1755,65 +1772,87 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                                         if os.path.exists(dest) or os.path.islink(dest):
                                             os.remove(dest)
                                         shutil.copyfile(src_p, dest)
-                                except Exception:
-                                    pass
+                                        _dbg(f"Copied {src_p} -> {dest}")
+                                except Exception as cpy_exc:
+                                    _dbg(f"Failed to copy {f_name}: {cpy_exc}")
 
                     # Query LocalLibraryLocation for on-disk PostConfiguration object
                     apt_post_obj = None
                     if hasattr(cam, "postLibrary"):
                         try:
                             query = cam.postLibrary.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
-                            for p in query.execute():
-                                if "APT Extractor" in getattr(p, "description", "") or "apt_extractor_wrapper" in getattr(p, "name", ""):
+                            local_posts = query.execute()
+                            _dbg(f"LocalLibraryLocation posts count={len(local_posts)}")
+                            for p in local_posts:
+                                p_desc = getattr(p, "description", "")
+                                p_name = getattr(p, "name", "")
+                                if "APT Extractor" in p_desc or "apt_extractor_wrapper" in p_name:
                                     apt_post_obj = p
+                                    _dbg(f"Found apt_post_obj in LocalLibrary: name={p_name}, desc={p_desc}")
                                     break
-                        except Exception:
+                        except Exception as q_exc:
+                            _dbg(f"Query LocalLibraryLocation threw: {q_exc}")
                             apt_post_obj = None
 
                     if apt_post_obj is not None:
                         try:
                             program.postConfiguration = apt_post_obj
-                        except Exception:
+                            _dbg(f"Assigned apt_post_obj to program.postConfiguration")
+                        except Exception as set_pc_exc:
+                            _dbg(f"Failed to assign apt_post_obj to program.postConfiguration: {set_pc_exc}")
                             apt_post_obj = None
                     else:
+                        _dbg(f"apt_post_obj was None, attempting assignment with constAptExtractorScript: {constAptExtractorScript}")
                         try:
                             program.postConfiguration = constAptExtractorScript
-                        except Exception:
-                            pass
+                        except Exception as set_str_exc:
+                            _dbg(f"Failed to assign string to program.postConfiguration: {set_str_exc}")
 
                 post_success = False
                 post_err = None
                 try:
+                    _dbg("Calling program.postProcess...")
                     post_success = bool(program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()))
+                    _dbg(f"program.postProcess completed, success={post_success}")
                 except Exception as p_exc:
                     post_err = str(p_exc)
+                    _dbg(f"program.postProcess exception: {traceback.format_exc()}")
                     post_success = False
 
                 # Fallback to direct cam.postProcess with file path if NCProgram posting failed
                 if not post_success and do_lathe_pipeline:
+                    _dbg("Attempting fallback to cam.postProcess...")
                     if hasattr(cam, "postProcess") and hasattr(adsk.cam, "PostProcessInput"):
                         try:
                             units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
+                            post_cfg_to_use = apt_post_obj if apt_post_obj is not None else constAptExtractorScript
                             post_input = adsk.cam.PostProcessInput.create(
                                 fname,
-                                constAptExtractorScript,
+                                post_cfg_to_use,
                                 setupFolder,
                                 units,
                             )
                             post_input.isOpenInEditor = False
+                            _dbg(f"Calling cam.postProcess(setup, post_input) with post_cfg={post_cfg_to_use}...")
                             post_success = bool(cam.postProcess(setup, post_input))
+                            _dbg(f"cam.postProcess completed, success={post_success}")
                             if post_success:
                                 post_err = None
                         except Exception as p_exc2:
                             post_err = str(p_exc2)
+                            _dbg(f"cam.postProcess exception: {traceback.format_exc()}")
                             post_success = False
 
                 if not post_success:
+                    _dbg(f"Posting failed completely on setup {setup.name}: {post_err}")
                     return f"Fusion reported an error: {post_err or 'postProcess failed'}"
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
                     base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
-                    return RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
+                    _dbg(f"Calling RunLatheVerifier for {path}...")
+                    res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
+                    _dbg(f"RunLatheVerifier returned: {res}")
+                    return res
                 return None
             except Exception as exc:
                 try:

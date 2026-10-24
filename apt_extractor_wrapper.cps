@@ -20,6 +20,16 @@ minimumRevision = 45000;
 capabilities = CAPABILITY_TURNING | CAPABILITY_MILLING | CAPABILITY_INTERMEDIATE;
 extension = "apt";
 
+function _logCPS(msg) {
+  try {
+    var f = new TextFile("/tmp/postprocess_debug.log", true, "ansi");
+    f.writeln("[CPS " + (new Date()).toISOString() + "] " + msg);
+    f.close();
+  } catch (e) {}
+}
+
+_logCPS("apt_extractor_wrapper.cps evaluated");
+
 var systemAptPath = "";
 try {
   systemAptPath = getEnvironmentVariable("SYSTEM_APT_CPS");
@@ -77,6 +87,7 @@ wrapFormat(ijkFormat);
 
 var baseOnOpen = (typeof onOpen === "function") ? onOpen : null;
 onOpen = function() {
+  _logCPS("onOpen called");
   if (baseOnOpen) {
     baseOnOpen();
   }
@@ -119,6 +130,7 @@ writeCutter = function() {
 var baseOnClose = (typeof onClose === "function") ? onClose : null;
 
 onClose = function() {
+  _logCPS("onClose called");
   if (baseOnClose) {
     try {
       baseOnClose();
@@ -139,9 +151,11 @@ onClose = function() {
     } catch (ignored) {}
   }
 
+  _logCPS("onClose targetCnc=" + targetCnc);
   if (targetCnc) {
     try {
       var intermediateSrc = getIntermediatePath();
+      _logCPS("onClose intermediateSrc=" + intermediateSrc);
       if (intermediateSrc && FileSystem.isFile(intermediateSrc)) {
         if (FileSystem.isFile(targetCnc)) {
           try {
@@ -149,8 +163,10 @@ onClose = function() {
           } catch (ignored) {}
         }
         FileSystem.copyFile(intermediateSrc, targetCnc);
+        _logCPS("onClose copyFile succeeded to " + targetCnc);
       }
     } catch (e) {
+      _logCPS("onClose copyFile failed: " + e.toString());
       writeComment("APT EXTRACTOR ERROR: " + e.toString());
     }
   }
