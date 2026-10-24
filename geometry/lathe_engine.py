@@ -214,12 +214,14 @@ class Lathe2DIPWVerifier(IVerificationEngine):
             self.cutter_is_convex = not cutter.is_empty and (abs(cutter.area - cutter.convex_hull.area) < 1e-4)
             self.holder_is_convex = not holder.is_empty and (abs(holder.area - holder.convex_hull.area) < 1e-4)
             self.holder_has_neg_y = (holder.bounds[1] < -1e-4) if not holder.is_empty else False
+            self.is_boring = getattr(tool.geometry, "is_boring", False)
         else:
             self.active_cutter = Polygon()
             self.active_holder = Polygon()
             self.cutter_is_convex = False
             self.holder_is_convex = False
             self.holder_has_neg_y = False
+            self.is_boring = False
 
     def step(self, move: MotionSegment) -> MoveEvaluation:
         """
@@ -271,7 +273,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
 
         # For internal boring bars crossing the center axis (Y < 0),
         # reflect negative Y coordinates into R >= 0 to check the opposite bore wall
-        if self.holder_has_neg_y and not swept_holder.is_empty and swept_holder.bounds[1] < -1e-4:
+        if self.is_boring and self.holder_has_neg_y and not swept_holder.is_empty and swept_holder.bounds[1] < -1e-4:
             sh_refl = Polygon([(z, -y) for z, y in swept_holder.exterior.coords])
             swept_holder_radial = unary_union([swept_holder, sh_refl]).intersection(box(-1e6, 0.0, 1e6, 1e6))
         else:

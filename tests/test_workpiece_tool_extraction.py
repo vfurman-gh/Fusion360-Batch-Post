@@ -248,7 +248,87 @@ class TestWorkpieceAndToolExtraction(unittest.TestCase):
         self.assertIsInstance(tool_asm, ToolAssembly)
         self.assertFalse(tool_asm.geometry.cutter_polygon.is_empty)
         self.assertFalse(tool_asm.geometry.holder_polygon.is_empty)
+        self.assertTrue(tool_asm.geometry.is_boring)
+
+    def test_06_od_vs_boring_holder_orientation(self):
+        """Prove OD turning tool shank extends into +R while boring bar extends into -R."""
+        from PostProcessAll import _BuildToolAssembly
+
+        od_info = {
+            "name": "OD Roughing",
+            "tool_id": 1,
+            "insert_shape": "rhombic",
+            "is_boring": False,
+            "shank_width": 16.0,
+            "shank_length": 100.0,
+            "nose_radius": 0.4,
+            "edge_length": 9.525,
+            "lead_angle": 5.0,
+        }
+        od_asm = _BuildToolAssembly(od_info)
+        # OD toolholder must strictly reside in positive R (away from workpiece centerline)
+        self.assertFalse(od_asm.geometry.is_boring)
+        self.assertGreaterEqual(od_asm.geometry.holder_polygon.bounds[1], 0.0, "OD holder must have R >= 0")
+        self.assertGreater(od_asm.geometry.holder_polygon.bounds[3], 50.0, "OD holder extends radially into +R > 50 mm")
+
+        bore_info = {
+            "name": "ID Boring",
+            "tool_id": 6,
+            "insert_shape": "rhombic",
+            "is_boring": True,
+            "shank_width": 16.0,
+            "shank_length": 100.0,
+            "nose_radius": 0.4,
+            "edge_length": 9.525,
+            "lead_angle": 5.0,
+        }
+        bore_asm = _BuildToolAssembly(bore_info)
+        self.assertTrue(bore_asm.geometry.is_boring)
+        self.assertLess(bore_asm.geometry.holder_polygon.bounds[1], -10.0, "Boring holder must extend in -R towards centerline")
+
+    def test_07_od_turning_roughing_no_false_positive_collisions(self):
+        """Simulate realistic multi-pass OD roughing with _BuildToolAssembly tool and prove 0 false-positive collisions."""
+        from PostProcessAll import _BuildToolAssembly
+        from geometry import Lathe2DIPWVerifier, MotionSegment, MotionKind, Vector3D, VectorKey
+
+        od_info = {
+            "name": "OD Roughing",
+            "tool_id": 1,
+            "insert_shape": "rhombic",
+            "is_boring": False,
+            "shank_width": 16.0,
+            "shank_length": 100.0,
+            "nose_radius": 0.4,
+            "edge_length": 9.525,
+            "lead_angle": 5.0,
+        }
+        od_asm = _BuildToolAssembly(od_info)
+
+        stock = AxisymmetricStock2D(z_min=-50.0, z_max=0.0, outer_radius=20.0, inner_radius=0.0)
+        workpiece = WorkpieceDefinition(stock=stock)
+
+        # 3 sequential roughing passes turning OD from 20 mm down to 17 mm, then 14 mm
+        segments = [
+            # Pass 1: Cut at R=17 mm from Z=0 to Z=-30 mm
+            MotionSegment(1, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(22.0, 0, 1.0), Vector3D(17.0, 0, 0.0), 300.0, 1000.0, 1.0, VectorKey.from_floats(0, Vector3D(22.0, 0, 1.0), Vector3D(17.0, 0, 0.0))),
+            MotionSegment(2, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(17.0, 0, 0.0), Vector3D(17.0, 0, -30.0), 300.0, 1000.0, 6.0, VectorKey.from_floats(0, Vector3D(17.0, 0, 0.0), Vector3D(17.0, 0, -30.0))),
+            MotionSegment(3, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(17.0, 0, -30.0), Vector3D(22.0, 0, -29.0), 300.0, 1000.0, 1.0, VectorKey.from_floats(0, Vector3D(17.0, 0, -30.0), Vector3D(22.0, 0, -29.0))),
+            # Personal use air retract emitted as LINEAR move:
+            MotionSegment(4, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(22.0, 0, -29.0), Vector3D(22.0, 0, 1.0), 300.0, 1000.0, 5.0, VectorKey.from_floats(0, Vector3D(22.0, 0, -29.0), Vector3D(22.0, 0, 1.0))),
+            # Pass 2: Cut at R=14 mm from Z=0 to Z=-30 mm
+            MotionSegment(5, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(22.0, 0, 1.0), Vector3D(14.0, 0, 0.0), 300.0, 1000.0, 1.0, VectorKey.from_floats(0, Vector3D(22.0, 0, 1.0), Vector3D(14.0, 0, 0.0))),
+            MotionSegment(6, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(14.0, 0, 0.0), Vector3D(14.0, 0, -30.0), 300.0, 1000.0, 6.0, VectorKey.from_floats(0, Vector3D(14.0, 0, 0.0), Vector3D(14.0, 0, -30.0))),
+            MotionSegment(7, "OD Roughing", 0, MotionKind.LINEAR, Vector3D(14.0, 0, -30.0), Vector3D(22.0, 0, -29.0), 300.0, 1000.0, 1.0, VectorKey.from_floats(0, Vector3D(14.0, 0, -30.0), Vector3D(22.0, 0, -29.0))),
+        ]
+
+        verifier = Lathe2DIPWVerifier()
+        report = verifier.verify_toolpath(segments, {"OD Roughing": od_asm}, workpiece)
+
+        self.assertEqual(len(report.collisions), 0, f"Expected 0 collisions on valid OD roughing, got: {[c.description for c in report.collisions]}")
+        self.assertGreater(report.total_volume_removed_mm3, 1000.0, "Expected significant material removal")
+        self.assertGreaterEqual(len(report.promoted_vectors), 1, "Expected air move promotion")
 
 
 if __name__ == "__main__":
     unittest.main()
+

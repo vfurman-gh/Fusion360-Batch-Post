@@ -130,6 +130,7 @@ class LatheToolGeometry:
     quadrant: ToolCompensationQuadrant
     cutter_polygon: Polygon                         # Valid Shapely Polygon at tip (0, 0)
     holder_polygon: Polygon                         # Valid Shapely Polygon for shank keep-out
+    is_boring: bool = False
 
 
 @dataclass(frozen=True)

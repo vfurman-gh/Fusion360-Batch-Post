@@ -106,45 +106,36 @@ def main():
                         blade_depth=t_info.get("blade_depth", 12.0),
                         corner_radius=nose_r,
                     )
-                    try:
-                        holder = generate_turning_holder(
-                            shank_width=shank_w,
-                            shank_length=shank_l,
-                            clearance_x=nose_r,
-                            clearance_z=nose_r,
-                            is_boring=is_boring,
-                        )
-                    except TypeError:
-                        holder = generate_turning_holder(
-                            shank_width=shank_w,
-                            shank_length=shank_l,
-                            clearance_x=nose_r,
-                            clearance_z=nose_r,
-                        )
+                    if not is_boring:
+                        from shapely.affinity import scale as shapely_scale
+                        cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
+                    clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+                    clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+                    holder = generate_turning_holder(
+                        shank_width=shank_w,
+                        shank_length=shank_l,
+                        clearance_x=clr_x,
+                        clearance_z=clr_z,
+                        is_boring=is_boring,
+                    )
                 else:  # rhombic / general turning
                     cutter = generate_rhombic_insert(
                         edge_length=t_info.get("edge_length", 9.525),
                         nose_radius=nose_r,
                         lead_angle_deg=t_info.get("lead_angle", 5.0),
                     )
-                    clr_x = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
-                    clr_z = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
-                    try:
-                        holder = generate_turning_holder(
-                            shank_width=shank_w,
-                            shank_length=shank_l,
-                            clearance_x=clr_x,
-                            clearance_z=clr_z,
-                            is_boring=is_boring,
-                        )
-                    except TypeError:
-                        holder = generate_turning_holder(
-                            shank_width=shank_w,
-                            shank_length=shank_l,
-                            clearance_x=clr_x,
-                            clearance_z=clr_z,
-                        )
-
+                    if not is_boring:
+                        from shapely.affinity import scale as shapely_scale
+                        cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
+                    clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+                    clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+                    holder = generate_turning_holder(
+                        shank_width=shank_w,
+                        shank_length=shank_l,
+                        clearance_x=clr_x,
+                        clearance_z=clr_z,
+                        is_boring=is_boring,
+                    )
 
                 clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
                 geom = LatheToolGeometry(
@@ -154,6 +145,7 @@ def main():
                     quadrant=ToolCompensationQuadrant.P3,
                     cutter_polygon=cutter,
                     holder_polygon=clean_holder,
+                    is_boring=is_boring,
                 )
                 tools_by_op[op_name] = ToolAssembly(
                     tool_id=tool_id,

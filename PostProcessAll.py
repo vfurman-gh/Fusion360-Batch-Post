@@ -1328,45 +1328,36 @@ def _BuildToolAssembly(t_info):
             blade_depth=t_info.get("blade_depth", 12.0),
             corner_radius=nose_r,
         )
-        try:
-            holder = generate_turning_holder(
-                shank_width=shank_w,
-                shank_length=shank_l,
-                clearance_x=nose_r,
-                clearance_z=nose_r,
-                is_boring=is_boring,
-            )
-        except TypeError:
-            holder = generate_turning_holder(
-                shank_width=shank_w,
-                shank_length=shank_l,
-                clearance_x=nose_r,
-                clearance_z=nose_r,
-            )
+        if not is_boring:
+            from shapely.affinity import scale as shapely_scale
+            cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
+        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+        holder = generate_turning_holder(
+            shank_width=shank_w,
+            shank_length=shank_l,
+            clearance_x=clr_x,
+            clearance_z=clr_z,
+            is_boring=is_boring,
+        )
     else:
         cutter = generate_rhombic_insert(
             edge_length=t_info.get("edge_length", 9.525),
             nose_radius=nose_r,
             lead_angle_deg=t_info.get("lead_angle", 5.0),
         )
-        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
-        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
-        try:
-            holder = generate_turning_holder(
-                shank_width=shank_w,
-                shank_length=shank_l,
-                clearance_x=clr_x,
-                clearance_z=clr_z,
-                is_boring=is_boring,
-            )
-        except TypeError:
-            holder = generate_turning_holder(
-                shank_width=shank_w,
-                shank_length=shank_l,
-                clearance_x=clr_x,
-                clearance_z=clr_z,
-            )
-
+        if not is_boring:
+            from shapely.affinity import scale as shapely_scale
+            cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
+        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
+        holder = generate_turning_holder(
+            shank_width=shank_w,
+            shank_length=shank_l,
+            clearance_x=clr_x,
+            clearance_z=clr_z,
+            is_boring=is_boring,
+        )
 
     clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
     geom = LatheToolGeometry(
@@ -1376,6 +1367,7 @@ def _BuildToolAssembly(t_info):
         quadrant=ToolCompensationQuadrant.P3,
         cutter_polygon=cutter,
         holder_polygon=clean_holder,
+        is_boring=is_boring,
     )
     return ToolAssembly(tool_id=tool_id, name=op_name, geometry=geom)
 
@@ -1578,18 +1570,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                     intermediate_path = cand
                     break
 
-        if not os.path.isfile(intermediate_path):
-            inter_dir = "/Users/vadimf/Documents/NCs/intermediates"
-            if os.path.isdir(inter_dir):
-                candidates = sorted(
-                    glob.glob(os.path.join(inter_dir, "*.cnc")),
-                    key=os.path.getmtime,
-                    reverse=True,
-                )
-                if candidates and (time.time() - os.path.getmtime(candidates[0])) < 120:
-                    intermediate_path = candidates[0]
-
-        if not os.path.isfile(intermediate_path):
+        if not os.path.isfile(intermediate_path) and setup:
             extracted = _ExtractIntermediateWithApt(setup, base_no_ext + ".intermediate.cnc")
             if extracted and os.path.isfile(extracted):
                 intermediate_path = extracted
@@ -1664,7 +1645,6 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             venvCandidates = [
                 os.path.join(constAddonDir, ".venv", "bin", "python"),
                 os.path.join(constAddonDir, ".venv", "bin", "python3"),
-                os.path.expanduser("~/.gemini/antigravity-cli/brain/a05954bb-1c8d-4776-80f8-88db191a980c/scratch/venv/bin/python"),
                 os.path.expanduser("~/Documents/.lathe_venv/bin/python"),
             ]
             venvPy = next((p for p in venvCandidates if os.path.isfile(p)), None)
@@ -1976,7 +1956,7 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         for code in endMcodes:
             endMcodeSet.add(int(code))
 
-        fFastZenabled = bool(docSettings.get("fastZHeuristic", docSettings.get("fastZ", False)))
+        fFastZenabled = bool(docSettings.get("fastZHeuristic", docSettings.get("fastZ", False))) and not is_turning
         if fFastZenabled:
             regParseLine = re.compile(r""
                 r"(G(?P<G>[0-9]+(\.[0-9]*)?)[^XYZF]*)?"
