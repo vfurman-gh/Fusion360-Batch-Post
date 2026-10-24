@@ -1420,8 +1420,13 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         # Locate intermediate Compact-NCI (.cnc)
         intermediate_path = cncPath + ".intermediate.cnc"
         if not os.path.isfile(intermediate_path):
-            base_no_ext = os.path.splitext(cncPath)[0]
-            for cand in [base_no_ext + ".intermediate.cnc", base_no_ext + ".apt.intermediate.cnc"]:
+            cand_list = [
+                base_no_ext + ".intermediate.cnc",
+                base_no_ext + ".apt.intermediate.cnc",
+                os.path.join(tempfile.gettempdir(), os.path.basename(base_no_ext) + ".intermediate.cnc"),
+                os.path.join(tempfile.gettempdir(), os.path.basename(base_no_ext) + ".apt.intermediate.cnc"),
+            ]
+            for cand in cand_list:
                 if os.path.isfile(cand):
                     intermediate_path = cand
                     break
@@ -1712,7 +1717,14 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         if do_lathe_pipeline or not docSettings["splitSetup"]:
             orig_post_config = None
             try:
-                program.operations = [setup]
+                valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
+                if valid_ops:
+                    try:
+                        program.operations = valid_ops
+                    except Exception:
+                        program.operations = [setup]
+                else:
+                    program.operations = [setup]
                 if do_lathe_pipeline and os.path.isfile(constAptExtractorScript):
                     intermediate_cnc = path + ".intermediate.cnc"
                     if os.path.isfile(intermediate_cnc):
@@ -1737,9 +1749,12 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     if os.path.isdir(local_posts_dir):
                         for f_name, src_p in [("apt_extractor_wrapper.cps", constAptExtractorScript), ("apt.cps", os.path.join(constAddonDir, "apt.cps"))]:
                             dest = os.path.join(local_posts_dir, f_name)
-                            if not os.path.exists(dest) and os.path.isfile(src_p):
+                            if os.path.isfile(src_p):
                                 try:
-                                    shutil.copyfile(src_p, dest)
+                                    if not os.path.islink(dest) or not os.path.exists(dest):
+                                        if os.path.exists(dest) or os.path.islink(dest):
+                                            os.remove(dest)
+                                        shutil.copyfile(src_p, dest)
                                 except Exception:
                                     pass
 
