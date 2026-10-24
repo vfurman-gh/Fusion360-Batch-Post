@@ -85,7 +85,9 @@ class PipelineOrchestrator:
         final_cnc_path: str,
         report_output_path: Optional[str] = None,
         plot_output_path: Optional[str] = None,
+        **kwargs,
     ) -> Tuple[VerificationReport, str]:
+
         """
         Execute the full 6-stage pipeline.
         Returns (VerificationReport, final_gcode_content).

@@ -9,8 +9,13 @@ Constructs exact 2D Shapely Polygons for standard turning inserts and tools:
 """
 
 import math
-from typing import List, Optional, Tuple
-from shapely.geometry import Polygon
+from typing import Any, List, Optional, Tuple
+
+try:
+    from shapely.geometry import Polygon
+except (ImportError, OSError):
+    Polygon = Any
+
 
 
 def _sample_arc(cx: float, cy: float, r: float, a_start: float, a_end: float, steps: int = 16) -> List[Tuple[float, float]]:

@@ -5,7 +5,12 @@ Core Domain Models for Workpiece, Tool, and Kinematic Verification.
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-from shapely.geometry import Polygon
+
+try:
+    from shapely.geometry import Polygon
+except (ImportError, OSError):
+    Polygon = Any  # Type alias fallback for Fusion 360 embedded Python
+
 
 
 class MotionKind(Enum):

@@ -2,7 +2,14 @@
 Analytical Workpiece and Fixture Geometry Generators.
 """
 
-from shapely.geometry import Polygon, box
+from typing import Any
+
+try:
+    from shapely.geometry import Polygon, box
+except (ImportError, OSError):
+    Polygon = Any
+    box = None
+
 from .models import AxisymmetricStock2D, AxisymmetricChuckObstacle
 
 

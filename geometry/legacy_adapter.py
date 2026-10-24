@@ -9,7 +9,12 @@ import json
 import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from shapely.geometry import Polygon
+
+try:
+    from shapely.geometry import Polygon
+except (ImportError, OSError):
+    Polygon = Any
+
 
 from .models import (
     AxisymmetricStock2D,

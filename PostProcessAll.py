@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -869,7 +869,19 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                         inputs.itemById("regex").value)
             button.value = False
         else:
+            for key in list(self.docSettings.keys()):
+                inp = inputs.itemById(key)
+                if inp:
+                    if inp.objectType == adsk.core.GroupCommandInput.classType():
+                        self.docSettings[key] = inp.isExpanded
+                    elif inp.objectType == adsk.core.DropDownCommandInput.classType():
+                        if inp.selectedItem:
+                            self.docSettings[key] = inp.selectedItem.name
+                    elif hasattr(inp, "value"):
+                        self.docSettings[key] = inp.value
+            _dbg_global(f"CommandExecuteHandler execute: splitSetup={self.docSettings.get('splitSetup')}, verifyGcode={self.docSettings.get('verifyGcode')}, fastZ={self.docSettings.get('fastZ')}")
             PerformPostProcess(self.docSettings, self.selectedSetups)
+
 
 
 def PerformPostProcess(docSettings, setups):
@@ -1117,31 +1129,43 @@ def _ExtractWorkpieceFromSetup(setup):
                     if p is not None:
                         val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
                         if isinstance(val, (int, float)):
+                            if math.isnan(val) or math.isinf(val):
+                                continue
                             return float(val) * 10.0  # Fusion internal length unit (cm) to mm
                         elif isinstance(val, str):
                             s = val.strip().lower()
                             if s.endswith("in"):
-                                return float(s[:-2].strip()) * 25.4
+                                fval = float(s[:-2].strip()) * 25.4
                             elif s.endswith("mm"):
-                                return float(s[:-2].strip())
-                            return float(s) * 10.0
+                                fval = float(s[:-2].strip())
+                            else:
+                                fval = float(s) * 10.0
+                            if not math.isnan(fval) and not math.isinf(fval):
+                                return fval
                 except Exception:
                     pass
             return default
 
-        d_outer_mm = _get_float_param(["job_stockDiameter", "stockDiameter", "job_stockDimensionsX", "job_stockDimensionsY"])
-        length_mm = _get_float_param(["job_stockLength", "stockLength", "job_stockDimensionsZ"])
-        if d_outer_mm is None or length_mm is None:
+        d_outer_mm = _get_float_param(["job_stockDiameter", "stockDiameter", "job_stockDimensionsX", "job_stockDimensionsY", "stock_diameter"])
+        length_mm = _get_float_param(["job_stockLength", "stockLength", "job_stockDimensionsZ", "stock_length"])
+        if d_outer_mm is None or math.isnan(d_outer_mm) or d_outer_mm <= 0.0:
+            return None
+        if length_mm is None or math.isnan(length_mm) or length_mm <= 0.0:
             return None
 
         d_inner_mm = _get_float_param(["job_stockDiameterInner", "stockDiameterInner"], default=0.0)
+        if d_inner_mm is None or math.isnan(d_inner_mm) or d_inner_mm < 0.0:
+            d_inner_mm = 0.0
         z_max_mm = _get_float_param(["job_stockOffsetFront", "stockOffsetFront", "job_stockOffsetZPositive"], default=0.0)
+        if z_max_mm is None or math.isnan(z_max_mm):
+            z_max_mm = 0.0
         z_min_mm = z_max_mm - length_mm
+
 
         fixtures = []
         clamp_len_mm = _get_float_param(["job_stockClampingLength", "stockClampingLength"], default=0.0)
         if clamp_len_mm and clamp_len_mm > 0.1:
-            from geometry import AxisymmetricChuckObstacle
+            from geometry.models import AxisymmetricChuckObstacle
             fixtures.append(
                 AxisymmetricChuckObstacle(
                     z_min=z_min_mm - 50.0,
@@ -1151,7 +1175,7 @@ def _ExtractWorkpieceFromSetup(setup):
                 )
             )
 
-        from geometry import AxisymmetricStock2D, WorkpieceDefinition
+        from geometry.models import AxisymmetricStock2D, WorkpieceDefinition
         return WorkpieceDefinition(
             stock=AxisymmetricStock2D(
                 z_min=z_min_mm,
@@ -1161,8 +1185,10 @@ def _ExtractWorkpieceFromSetup(setup):
             ),
             fixtures=fixtures,
         )
-    except Exception:
+    except Exception as exc:
+        _dbg_global(f"_ExtractWorkpieceFromSetup exception: {exc}")
         return None
+
 
 
 def _ExtractToolsFromSetup(setup):
@@ -1433,11 +1459,19 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     4. If fastZ is enabled, restore native G0 rapid moves via universal_wrapper.cps.
     5. Compile markdown verification report and generate high-res verification plot (.png).
     """
+    _dbg = _dbg_global
+    _dbg(f"RunLatheVerifier entered: cncPath={cncPath}, setup={getattr(setup, 'name', None)}")
     if setup is None or setup.operationType != adsk.cam.OperationTypes.TurningOperation:
+        _dbg("RunLatheVerifier: setup is None or not TurningOperation, skipping")
         return None
-    if not (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False)):
+    verify_flag = docSettings.get("verifyGcode", True)
+    fastz_flag = docSettings.get("fastZ", False)
+    _dbg(f"RunLatheVerifier: verifyGcode={verify_flag}, fastZ={fastz_flag}")
+    if not (verify_flag or fastz_flag):
+        _dbg("RunLatheVerifier: neither verifyGcode nor fastZ enabled, skipping")
         return None
     if not os.path.isfile(cncPath):
+        _dbg(f"RunLatheVerifier: cncPath does not exist: {cncPath}")
         return None
 
     try:
@@ -1459,7 +1493,14 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
 
         can_import_in_process = False
         try:
+            import importlib
             import shapely
+            import pipeline
+            importlib.reload(pipeline)
+            import geometry.lathe_engine
+            importlib.reload(geometry.lathe_engine)
+
+
             from geometry import (
                 Lathe2DIPWVerifier,
                 ToolAssembly,
@@ -1472,10 +1513,16 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         except (ImportError, OSError):
             can_import_in_process = False
 
+
         # Ingest workpiece and tools directly from native Fusion Setup API
         workpiece = _ExtractWorkpieceFromSetup(setup)
         tools_data = _ExtractToolsFromSetup(setup)
         tools_by_op = {}
+
+        if workpiece and workpiece.stock:
+            if math.isnan(workpiece.stock.outer_radius) or workpiece.stock.outer_radius <= 0.0:
+                _dbg("RunLatheVerifier: extracted workpiece has invalid/NaN outer_radius, discarding for fallback")
+                workpiece = None
 
         is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
         tool_scale = 1.0
@@ -1484,6 +1531,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             from geometry import parse_legacy_stock, parse_legacy_tool_op
             for line in gcode_content.splitlines():
                 if not workpiece and line.startswith(";META_STOCK:"):
+
                     workpiece = parse_legacy_stock(line)
                     if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
                         workpiece = WorkpieceDefinition(
@@ -1511,7 +1559,9 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             if not tools_data and is_inch:
                 tool_scale = 25.4
 
+        _dbg(f"RunLatheVerifier: workpiece={workpiece}, tools count={len(tools_data) if tools_data else 0}")
         if not workpiece:
+            _dbg(f"RunLatheVerifier: workpiece extraction returned None! Skipping {cncPath}")
             return None
 
         # Locate intermediate Compact-NCI (.cnc)
@@ -1544,14 +1594,11 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             if extracted and os.path.isfile(extracted):
                 intermediate_path = extracted
 
+        _dbg(f"RunLatheVerifier: intermediate_path={intermediate_path}, exists={os.path.isfile(intermediate_path)}")
         if not os.path.isfile(intermediate_path):
-            try:
-                adsk.core.Application.get().log(
-                    f"[PostProcessAll] Intermediate toolpath not found for {cncPath}; skipping pipeline verification."
-                )
-            except Exception:
-                pass
+            _dbg(f"RunLatheVerifier: Intermediate toolpath not found for {cncPath}! Skipping verification.")
             return None
+
 
         # Base post processor configuration
         if not base_post or not isinstance(base_post, str) or not os.path.isfile(base_post):
@@ -1568,16 +1615,40 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             )
 
             # Run 6-stage end-to-end pipeline in-process
-            report, final_gcode = orchestrator.run(
-                intermediate_cnc_path=intermediate_path,
-                base_post_path=base_post,
-                workpiece=workpiece,
-                tools_by_op=tools_by_op,
-                verifier=verifier,
-                final_cnc_path=cncPath,
-                report_output_path=reportPath,
-                plot_output_path=plotPath,
-            )
+            try:
+                report, final_gcode = orchestrator.run(
+                    intermediate_cnc_path=intermediate_path,
+                    base_post_path=base_post,
+                    workpiece=workpiece,
+                    tools_by_op=tools_by_op,
+                    verifier=verifier,
+                    final_cnc_path=cncPath,
+                    report_output_path=reportPath,
+                    plot_output_path=plotPath,
+                )
+            except TypeError:
+                report, final_gcode = orchestrator.run(
+                    intermediate_cnc_path=intermediate_path,
+                    base_post_path=base_post,
+                    workpiece=workpiece,
+                    tools_by_op=tools_by_op,
+                    verifier=verifier,
+                    final_cnc_path=cncPath,
+                    report_output_path=reportPath,
+                )
+                try:
+                    from geometry.plotter import generate_verification_plot
+                    generate_verification_plot(
+                        stock=workpiece.stock,
+                        fixtures=workpiece.fixtures,
+                        tools_by_op=tools_by_op,
+                        motion_segments=report.evaluated_moves,
+                        collisions=report.collisions,
+                        output_path=plotPath,
+                    )
+                except Exception:
+                    pass
+
 
             fatal_cols = [
                 c for c in report.collisions
@@ -1645,9 +1716,12 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                     k: v for k, v in os.environ.items()
                     if not k.startswith("PYTHON") and k not in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH")
                 }
+                _dbg(f"RunLatheVerifier: running subprocess: {cmd}")
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=cleanEnv)
+                _dbg(f"RunLatheVerifier: subprocess completed, exit={proc.returncode}, stdout_len={len(proc.stdout)}, stderr_len={len(proc.stderr)}")
                 if proc.returncode != 0:
                     err_line = (proc.stderr.strip().splitlines() or proc.stdout.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+                    _dbg(f"RunLatheVerifier: subprocess failed: {err_line}")
                     return f"Verification pipeline failed: {err_line}"
 
                 vol_mm3 = 0.0
@@ -1684,6 +1758,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             with open(reportPath, "r", encoding="utf8", errors="replace") as rf:
                 report_md = rf.read()
 
+        _dbg(f"RunLatheVerifier: recording result for {setup.name}: cols={len(cols_list)}, promoted={promoted_cnt}, err={err}")
         _RecordVerifyResult(
             setup=setup,
             cncPath=cncPath,
@@ -1702,10 +1777,12 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         return None
 
     except Exception as exc:
+        _dbg(f"RunLatheVerifier threw exception: {exc}\n{traceback.format_exc()}")
         return f"Lathe pipeline verifier failed on {os.path.basename(cncPath)}: {exc}"
 
 
 def ShowVerifyResults(ui):
+    _dbg_global(f"ShowVerifyResults called: verifyResults count={len(verifyResults)}")
     if not verifyResults:
         return
     lines = []
@@ -2219,7 +2296,10 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
 
         if do_lathe_pipeline:
             base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
-            return RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
+            _dbg(f"splitSetup: Calling RunLatheVerifier for {path}...")
+            res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
+            _dbg(f"splitSetup: RunLatheVerifier returned: {res}")
+            return res
         return None
 
     except:

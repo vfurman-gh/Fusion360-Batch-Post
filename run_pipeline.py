@@ -176,8 +176,13 @@ def main():
     is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
     tool_scale = 1.0 if analytical_tools_loaded else (25.4 if is_inch else 1.0)
 
+    if workpiece and workpiece.stock:
+        if math.isnan(workpiece.stock.outer_radius) or workpiece.stock.outer_radius <= 0.0:
+            workpiece = None
+
     for line in gcode_content.splitlines():
         if not workpiece and line.startswith(";META_STOCK:"):
+
             workpiece = parse_legacy_stock(line)
             if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
                 workpiece = WorkpieceDefinition(
@@ -211,16 +216,41 @@ def main():
     verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
     orchestrator = PipelineOrchestrator(wrapper_cps=args.wrapper)
 
-    report, final_gcode = orchestrator.run(
-        intermediate_cnc_path=args.intermediate,
-        base_post_path=args.base_post,
-        workpiece=workpiece,
-        tools_by_op=tools_by_op,
-        verifier=verifier,
-        final_cnc_path=args.final_cnc,
-        report_output_path=args.report,
-        plot_output_path=args.plot,
-    )
+    try:
+        report, final_gcode = orchestrator.run(
+            intermediate_cnc_path=args.intermediate,
+            base_post_path=args.base_post,
+            workpiece=workpiece,
+            tools_by_op=tools_by_op,
+            verifier=verifier,
+            final_cnc_path=args.final_cnc,
+            report_output_path=args.report,
+            plot_output_path=args.plot,
+        )
+    except TypeError:
+        report, final_gcode = orchestrator.run(
+            intermediate_cnc_path=args.intermediate,
+            base_post_path=args.base_post,
+            workpiece=workpiece,
+            tools_by_op=tools_by_op,
+            verifier=verifier,
+            final_cnc_path=args.final_cnc,
+            report_output_path=args.report,
+        )
+        if args.plot:
+            try:
+                from geometry.plotter import generate_verification_plot
+                generate_verification_plot(
+                    stock=workpiece.stock,
+                    fixtures=workpiece.fixtures,
+                    tools_by_op=tools_by_op,
+                    motion_segments=report.evaluated_moves,
+                    collisions=report.collisions,
+                    output_path=args.plot,
+                )
+            except Exception:
+                pass
+
 
     result_summary = {
         "volume_mm3": report.total_volume_removed_mm3,
