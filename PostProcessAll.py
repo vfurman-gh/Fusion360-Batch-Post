@@ -1338,6 +1338,76 @@ def _BuildToolAssembly(t_info):
     return ToolAssembly(tool_id=tool_id, name=op_name, geometry=geom)
 
 
+def _ExtractIntermediateWithApt(setup, target_cnc_path):
+    """
+    Extract Compact-NCI intermediate file using apt_extractor_wrapper.cps
+    by querying PostLibrary and posting all valid operations of the setup.
+    """
+    try:
+        camMgr = adsk.cam.CAMManager.get()
+        libMgr = camMgr.libraryManager if camMgr else None
+        postLib = libMgr.postLibrary if libMgr else None
+        apt_post_obj = None
+        if postLib:
+            try:
+                query = postLib.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
+                for p in query.execute():
+                    if "APT Extractor" in getattr(p, "description", "") or "apt_extractor_wrapper" in getattr(p, "name", ""):
+                        apt_post_obj = p
+                        break
+            except Exception as q_exc:
+                _dbg_global(f"LocalLibrary query threw: {q_exc}")
+
+        if apt_post_obj is None and hasattr(adsk.cam.PostConfiguration, "createFromContent"):
+            try:
+                with open(constAptExtractorScript, "r", encoding="utf-8") as f:
+                    apt_post_obj = adsk.cam.PostConfiguration.createFromContent(f.read())
+            except Exception as cfc_exc:
+                _dbg_global(f"createFromContent threw: {cfc_exc}")
+
+        if not apt_post_obj:
+            _dbg_global("Could not obtain apt_post_obj")
+            return None
+
+        # Setup environment variables for capture
+        sys_apt = _FindSystemAptPost()
+        os.environ["SYSTEM_APT_CPS"] = sys_apt
+        os.environ["TARGET_INTERMEDIATE_CNC"] = target_cnc_path
+
+        app = adsk.core.Application.get()
+        doc = app.activeDocument
+        cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
+        if not cam or not hasattr(cam, "ncPrograms"):
+            return None
+
+        nc_input = cam.ncPrograms.createInput()
+        nc_prog = cam.ncPrograms.add(nc_input)
+        try:
+            nc_prog.postConfiguration = apt_post_obj
+            valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
+            nc_prog.operations = valid_ops if valid_ops else [setup]
+            params = nc_prog.parameters
+            AssignOutputFolder(params, tempfile.gettempdir().replace("\\", "/"))
+            params.itemByName("nc_program_filename").value.value = "apt_extract_tmp"
+            params.itemByName("nc_program_openInEditor").value.value = False
+            opts = adsk.cam.NCProgramPostProcessOptions.create()
+            if hasattr(opts, "isFailOnToolNumberDuplication"):
+                opts.isFailOnToolNumberDuplication = False
+            nc_prog.postProcess(opts)
+        finally:
+            try:
+                nc_prog.deleteMe()
+            except Exception:
+                pass
+
+        if os.path.isfile(target_cnc_path):
+            _dbg_global(f"_ExtractIntermediateWithApt successfully created {target_cnc_path}")
+            return target_cnc_path
+    except Exception as exc:
+        _dbg_global(f"_ExtractIntermediateWithApt threw: {exc}")
+    return None
+
+
 def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     """
     Execute 6-stage toolpath verification and rapid-promotion pipeline:
@@ -1360,6 +1430,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
 
         promote = bool(docSettings.get("fastZ", False))
         basePath = os.path.splitext(cncPath)[0]
+        base_no_ext = basePath
         reportPath = basePath + "_report.md"
         plotPath = basePath + ".png"
 
@@ -1451,6 +1522,11 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                 )
                 if candidates and (time.time() - os.path.getmtime(candidates[0])) < 120:
                     intermediate_path = candidates[0]
+
+        if not os.path.isfile(intermediate_path):
+            extracted = _ExtractIntermediateWithApt(setup, base_no_ext + ".intermediate.cnc")
+            if extracted and os.path.isfile(extracted):
+                intermediate_path = extracted
 
         if not os.path.isfile(intermediate_path):
             try:
@@ -1727,9 +1803,8 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
         _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
 
-        # Do it all at once? (Always handle turning setups through unified verification pipeline)
-        if do_lathe_pipeline or not docSettings["splitSetup"]:
-            orig_post_config = None
+        # Do it all at once?
+        if not docSettings["splitSetup"]:
             try:
                 valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
                 _dbg(f"allOperations count={len(setup.allOperations)}, valid_ops count={len(valid_ops)}: {[op.name for op in valid_ops]}")
@@ -1743,113 +1818,16 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                 else:
                     program.operations = [setup]
 
-                if do_lathe_pipeline and os.path.isfile(constAptExtractorScript):
-                    intermediate_cnc = path + ".intermediate.cnc"
-                    if os.path.isfile(intermediate_cnc):
-                        try:
-                            os.remove(intermediate_cnc)
-                        except Exception:
-                            pass
+                opts = adsk.cam.NCProgramPostProcessOptions.create()
+                if hasattr(opts, "isFailOnToolNumberDuplication"):
+                    opts.isFailOnToolNumberDuplication = False
 
-                    # Configure environment variables for apt_extractor_wrapper.cps
-                    sys_apt = _FindSystemAptPost()
-                    os.environ["SYSTEM_APT_CPS"] = sys_apt
-                    os.environ["TARGET_INTERMEDIATE_CNC"] = intermediate_cnc
-                    _dbg(f"Set env SYSTEM_APT_CPS={sys_apt}, TARGET_INTERMEDIATE_CNC={intermediate_cnc}")
-
-                    # Save original post configuration object for restoration in finally
-                    try:
-                        orig_post_config = program.postConfiguration
-                        _dbg(f"Original program.postConfiguration: {getattr(orig_post_config, 'description', orig_post_config)}")
-                    except Exception as pc_exc:
-                        _dbg(f"Could not read orig_post_config: {pc_exc}")
-                        orig_post_config = None
-
-                    # Ensure apt_extractor_wrapper.cps and apt.cps are available in Fusion's local Posts library folder
-                    local_posts_dir = os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts")
-                    if os.path.isdir(local_posts_dir):
-                        for f_name, src_p in [("apt_extractor_wrapper.cps", constAptExtractorScript), ("apt.cps", os.path.join(constAddonDir, "apt.cps"))]:
-                            dest = os.path.join(local_posts_dir, f_name)
-                            if os.path.isfile(src_p):
-                                try:
-                                    if not os.path.islink(dest) or not os.path.exists(dest):
-                                        if os.path.exists(dest) or os.path.islink(dest):
-                                            os.remove(dest)
-                                        shutil.copyfile(src_p, dest)
-                                        _dbg(f"Copied {src_p} -> {dest}")
-                                except Exception as cpy_exc:
-                                    _dbg(f"Failed to copy {f_name}: {cpy_exc}")
-
-                    # Query LocalLibraryLocation for on-disk PostConfiguration object
-                    apt_post_obj = None
-                    if hasattr(cam, "postLibrary"):
-                        try:
-                            query = cam.postLibrary.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
-                            local_posts = query.execute()
-                            _dbg(f"LocalLibraryLocation posts count={len(local_posts)}")
-                            for p in local_posts:
-                                p_desc = getattr(p, "description", "")
-                                p_name = getattr(p, "name", "")
-                                if "APT Extractor" in p_desc or "apt_extractor_wrapper" in p_name:
-                                    apt_post_obj = p
-                                    _dbg(f"Found apt_post_obj in LocalLibrary: name={p_name}, desc={p_desc}")
-                                    break
-                        except Exception as q_exc:
-                            _dbg(f"Query LocalLibraryLocation threw: {q_exc}")
-                            apt_post_obj = None
-
-                    if apt_post_obj is not None:
-                        try:
-                            program.postConfiguration = apt_post_obj
-                            _dbg(f"Assigned apt_post_obj to program.postConfiguration")
-                        except Exception as set_pc_exc:
-                            _dbg(f"Failed to assign apt_post_obj to program.postConfiguration: {set_pc_exc}")
-                            apt_post_obj = None
-                    else:
-                        _dbg(f"apt_post_obj was None, attempting assignment with constAptExtractorScript: {constAptExtractorScript}")
-                        try:
-                            program.postConfiguration = constAptExtractorScript
-                        except Exception as set_str_exc:
-                            _dbg(f"Failed to assign string to program.postConfiguration: {set_str_exc}")
-
-                post_success = False
-                post_err = None
-                try:
-                    _dbg("Calling program.postProcess...")
-                    post_success = bool(program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()))
-                    _dbg(f"program.postProcess completed, success={post_success}")
-                except Exception as p_exc:
-                    post_err = str(p_exc)
-                    _dbg(f"program.postProcess exception: {traceback.format_exc()}")
-                    post_success = False
-
-                # Fallback to direct cam.postProcess with file path if NCProgram posting failed
-                if not post_success and do_lathe_pipeline:
-                    _dbg("Attempting fallback to cam.postProcess...")
-                    if hasattr(cam, "postProcess") and hasattr(adsk.cam, "PostProcessInput"):
-                        try:
-                            units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
-                            post_cfg_to_use = apt_post_obj if apt_post_obj is not None else constAptExtractorScript
-                            post_input = adsk.cam.PostProcessInput.create(
-                                fname,
-                                post_cfg_to_use,
-                                setupFolder,
-                                units,
-                            )
-                            post_input.isOpenInEditor = False
-                            _dbg(f"Calling cam.postProcess(setup, post_input) with post_cfg={post_cfg_to_use}...")
-                            post_success = bool(cam.postProcess(setup, post_input))
-                            _dbg(f"cam.postProcess completed, success={post_success}")
-                            if post_success:
-                                post_err = None
-                        except Exception as p_exc2:
-                            post_err = str(p_exc2)
-                            _dbg(f"cam.postProcess exception: {traceback.format_exc()}")
-                            post_success = False
-
+                _dbg("Calling program.postProcess...")
+                post_success = bool(program.postProcess(opts))
+                _dbg(f"program.postProcess completed, success={post_success}")
                 if not post_success:
-                    _dbg(f"Posting failed completely on setup {setup.name}: {post_err}")
-                    return f"Fusion reported an error: {post_err or 'postProcess failed'}"
+                    _dbg(f"Posting failed on setup {setup.name}")
+                    return "Fusion reported an error during post processing."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
                     base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
@@ -1865,12 +1843,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     pass
                 retVal += ": " + str(exc)
                 return retVal
-            finally:
-                if orig_post_config is not None:
-                    try:
-                        program.postConfiguration = orig_post_config
-                    except Exception:
-                        pass
 
 
         # Split setup into individual operations
@@ -1958,7 +1930,10 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
             while True:
                 try:
                     program.operations = opList
-                    if not program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()):
+                    opts = adsk.cam.NCProgramPostProcessOptions.create()
+                    if hasattr(opts, "isFailOnToolNumberDuplication"):
+                        opts.isFailOnToolNumberDuplication = False
+                    if not program.postProcess(opts):
                         retVal = "Fusion reported an error processing operation"
                         if (opHasTool != None):
                             retVal += ": " +  opHasTool.name
@@ -2226,7 +2201,10 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         fileHead.close()
         fileHead = None
 
-        return RunLatheVerifier(path, setup, docSettings)
+        if do_lathe_pipeline:
+            base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
+            return RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
+        return None
 
     except:
         if fileHead:
