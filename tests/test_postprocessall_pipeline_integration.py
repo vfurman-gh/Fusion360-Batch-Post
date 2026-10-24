@@ -125,6 +125,11 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertIn("# Toolpath Verification & Rapid-Promotion Report", md_content)
             self.assertIn("Zero collisions detected", md_content)
 
+            # Verify verification plot png exists
+            plot_png_path = os.path.splitext(cnc_output)[0] + ".png"
+            self.assertTrue(os.path.isfile(plot_png_path), "Expected dual-panel verification plot image (.png)")
+            self.assertGreater(os.path.getsize(plot_png_path), 5000, "Expected non-trivial PNG plot image")
+
             # Verify sidecar intermediate file was cleaned up
             self.assertFalse(os.path.isfile(sidecar_cnc), "Sidecar intermediate should be removed after pipeline completion")
 

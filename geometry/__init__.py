@@ -45,6 +45,7 @@ from .legacy_adapter import (
     parse_svg_polygon,
     transform_tool_svg,
 )
+from .plotter import generate_verification_plot
 
 __all__ = [
     "MotionKind",
@@ -77,4 +78,5 @@ __all__ = [
     "parse_legacy_tool_op",
     "parse_svg_polygon",
     "transform_tool_svg",
+    "generate_verification_plot",
 ]

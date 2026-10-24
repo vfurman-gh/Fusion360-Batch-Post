@@ -14,6 +14,7 @@ import glob
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict
 from typing import Dict, Optional, Tuple
@@ -83,6 +84,7 @@ class PipelineOrchestrator:
         verifier: IVerificationEngine,
         final_cnc_path: str,
         report_output_path: Optional[str] = None,
+        plot_output_path: Optional[str] = None,
     ) -> Tuple[VerificationReport, str]:
         """
         Execute the full 6-stage pipeline.
@@ -100,6 +102,10 @@ class PipelineOrchestrator:
             report_dir = os.path.dirname(os.path.abspath(report_output_path))
             if report_dir:
                 os.makedirs(report_dir, exist_ok=True)
+        if plot_output_path:
+            plot_dir = os.path.dirname(os.path.abspath(plot_output_path))
+            if plot_dir:
+                os.makedirs(plot_dir, exist_ok=True)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # -----------------------------------------------------------------
@@ -152,8 +158,27 @@ class PipelineOrchestrator:
                 final_gcode = f.read()
 
             # -----------------------------------------------------------------
-            # Step 6: Generate Summary Report
+            # Step 6: Generate Summary Report & Verification Plot
             # -----------------------------------------------------------------
+            if plot_output_path:
+                try:
+                    from geometry.plotter import generate_verification_plot
+                    is_inch = ("G20" in final_gcode) or not ("G21" in final_gcode)
+                    final_ipw = getattr(verifier, "ipw", None)
+                    chuck_obs = getattr(verifier, "chuck_obstacle", None)
+                    generate_verification_plot(
+                        workpiece=workpiece,
+                        final_ipw=final_ipw,
+                        chuck_obstacle=chuck_obs,
+                        segments=segments,
+                        report=report,
+                        tools_by_op=tools_by_op,
+                        out_png_path=plot_output_path,
+                        unit_is_inch=is_inch,
+                    )
+                except Exception as exc:
+                    print(f"WARNING: Verification plot generation failed: {exc}", file=sys.stderr)
+
             report_summary = self._format_summary_report(report, final_gcode, base_post_path)
             if report_output_path:
                 with open(report_output_path, "w", encoding="utf-8") as f:

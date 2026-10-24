@@ -1035,10 +1035,12 @@ def PerformPostProcess(docSettings, setups):
 verifyResults = []
 
 
-def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, promoted=None, spikes=None, volume_mm3=None, collisions=None, error=None):
+def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=None, promoted=None, spikes=None, volume_mm3=None, collisions=None, error=None):
     basePath = os.path.splitext(cncPath)[0]
     if not reportPath:
         reportPath = basePath + "_report.md"
+    if not pngPath:
+        pngPath = basePath + ".png"
     try:
         with open(reportPath, "w", encoding="utf8") as f:
             f.write(reportText)
@@ -1051,7 +1053,7 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, promoted=No
     verifyResults.append({
         "setup": setup.name,
         "cnc": cncPath,
-        "png": basePath + "_verification.png",
+        "png": pngPath,
         "report": reportPath,
         "promoted": promoted,
         "spikes": spikes,
@@ -1122,6 +1124,7 @@ def RunLatheVerifier(cncPath, setup, docSettings):
         promote = bool(docSettings.get("fastZ", False))
         basePath = os.path.splitext(cncPath)[0]
         reportPath = basePath + "_report.md"
+        plotPath = basePath + ".png"
 
         # Ensure add-on root and packages are in sys.path
         import sys
@@ -1227,6 +1230,7 @@ def RunLatheVerifier(cncPath, setup, docSettings):
                 verifier=verifier,
                 final_cnc_path=cncPath,
                 report_output_path=reportPath,
+                plot_output_path=plotPath,
             )
 
             fatal_cols = [
@@ -1256,6 +1260,7 @@ def RunLatheVerifier(cncPath, setup, docSettings):
                 "--base-post", base_post,
                 "--final-cnc", cncPath,
                 "--report", reportPath,
+                "--plot", plotPath,
             ]
             if not promote:
                 cmd.append("--no-promote")
@@ -1310,6 +1315,7 @@ def RunLatheVerifier(cncPath, setup, docSettings):
             cncPath=cncPath,
             reportText=report_md,
             reportPath=reportPath,
+            pngPath=plotPath,
             promoted=promoted_cnt,
             spikes=spikes_cnt,
             volume_mm3=vol_mm3,
@@ -1343,10 +1349,12 @@ def ShowVerifyResults(ui):
         for kind, n in sorted(r["kinds"].items()):
             lines.append(f"    {kind}: {n}")
         lines.append(f"    G-code: {r['cnc']}")
+        if r.get("png") and os.path.isfile(r["png"]):
+            lines.append(f"    Plot:   {r['png']}")
         if r.get("report") and os.path.isfile(r["report"]):
             lines.append(f"    Report: {r['report']}")
         lines.append("")
-    lines.append("Open the verification report(s) now?")
+    lines.append("Open the verification plot(s) and report(s) now?")
     res = ui.messageBox("\n".join(lines),
                         constCmdName + " - Lathe Verification",
                         adsk.core.MessageBoxButtonTypes.YesNoButtonType,
@@ -1354,11 +1362,11 @@ def ShowVerifyResults(ui):
     if res == adsk.core.DialogResults.DialogYes:
         failures = []
         for r in verifyResults:
-            p = r.get("report")
-            if p and os.path.isfile(p):
-                err = _OpenFile(p)
-                if err:
-                    failures.append(f"{p}: {err}")
+            for p in (r.get("png"), r.get("report")):
+                if p and os.path.isfile(p):
+                    err = _OpenFile(p)
+                    if err:
+                        failures.append(f"{p}: {err}")
         if failures:
             ui.messageBox("Could not open:\n" + "\n".join(failures), constCmdName,
                           adsk.core.MessageBoxButtonTypes.OKButtonType,
@@ -1429,17 +1437,40 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         parameters.itemByName("nc_program_filename").value.value = opName
         parameters.itemByName("nc_program_name").value.value = fname
 
-        # Do it all at once?
-        if not docSettings["splitSetup"]:
+        # Check if lathe verification pipeline should handle this setup
+        is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
+        do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
+
+        # Do it all at once? (Always handle turning setups through unified verification pipeline)
+        if do_lathe_pipeline or not docSettings["splitSetup"]:
+            orig_post = None
+            capture_post = os.path.join(constAddonDir, "capture_stock_tools.cps")
             try:
                 program.operations = [setup]
+                if do_lathe_pipeline and os.path.isfile(capture_post):
+                    try:
+                        orig_post = program.postConfiguration
+                        os.environ["BASE_CPS"] = orig_post
+                        os.environ["TARGET_INTERMEDIATE_CNC"] = path + ".intermediate.cnc"
+                        program.postConfiguration = capture_post
+                    except Exception:
+                        orig_post = None
+
                 if not program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()):
                     return "Fusion reported an error."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
-                return RunLatheVerifier(path, setup, docSettings)
+                if do_lathe_pipeline:
+                    return RunLatheVerifier(path, setup, docSettings)
+                return None
             except Exception as exc:
                 retVal += ": " + str(exc)
                 return retVal
+            finally:
+                if orig_post:
+                    try:
+                        program.postConfiguration = orig_post
+                    except Exception:
+                        pass
 
         # Split setup into individual operations
         opPath = path

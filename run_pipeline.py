@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--base-post", required=True, help="Path to base machine post processor (.cps)")
     parser.add_argument("--final-cnc", required=True, help="Path to final output machine G-code (.cnc)")
     parser.add_argument("--report", required=True, help="Path to verification markdown report (.md)")
+    parser.add_argument("--plot", help="Path to verification plot image (.png)")
     parser.add_argument("--wrapper", default=os.path.join(_SCRIPT_DIR, "universal_wrapper.cps"), help="Path to universal_wrapper.cps")
     parser.add_argument("--meta-gcode", help="Path to G-code file containing metadata comments")
     parser.add_argument("--stock-json", help="JSON string for WorkpieceDefinition")
@@ -109,6 +110,7 @@ def main():
         verifier=verifier,
         final_cnc_path=args.final_cnc,
         report_output_path=args.report,
+        plot_output_path=args.plot,
     )
 
     result_summary = {
