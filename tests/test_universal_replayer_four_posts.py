@@ -552,7 +552,7 @@ class TestUniversalReplayerFourPosts(unittest.TestCase):
 
             multi_ctx = copy.deepcopy(b0_ctx)
             base_sec = b0_ctx["sections"][0]
-            multi_ctx["programName"] = "1 OilLid"
+            multi_ctx["programName"] = "OilLid"
             multi_ctx["sections"] = []
             for i in range(6):
                 s = copy.deepcopy(base_sec)
@@ -574,7 +574,7 @@ class TestUniversalReplayerFourPosts(unittest.TestCase):
                 "showSequenceNumbers": "false",
             }
 
-            out_nc = os.path.join(tmp_dir, "1_OilLid.nc")
+            out_nc = os.path.join(tmp_dir, "OilLid.nc")
             # Using self.turning_cnc (which has 3 sections) simulates captured.intermediate.cnc
             # having multiple sections, ensuring getPreviousSection() and isNewWorkPlane()
             # execute without 'can't access property workPlane, _section is undefined'.

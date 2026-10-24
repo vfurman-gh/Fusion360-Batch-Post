@@ -6,15 +6,13 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
-version = 14
+version = 15
 
 # Initial default values of settings
 defaultSettings = {
     "version" : version,
     "ncProgram": "",
     "output" : "",
-    "sequence" : True,
-    "twoDigits" : False,
     "delFiles" : False,
     "delFolder" : False,
     "combineTool" : True,
@@ -67,11 +65,7 @@ toolTip = (
     "file adding the appropriate extension. A colon (':') in the name indicates "
     "the preceding portion is the name of a subfolder. Multiple "
     "colons can be used to nest subfolders. Spaces around colons "
-    "are removed.\n\n"
-    "Setups within a folder are optionally preceded by a "
-    "sequence number. This identifies the order in which the "
-    "setups appear. The sequence numbers for each folder begin "
-    "with 1."
+    "are removed."
     )
 
 # Global list to keep all event handlers in scope.
@@ -426,12 +420,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 "Delete all files in each output folder before post processing. "
                 "This will help prevent accumulation of G-code files which are "
                 "no longer used."
-                "<p>For example, you could decide to add sequence numbers after "
-                "already post processing without them. If this option is not "
-                "checked, you will have two of each file, a newer one with a "
-                "sequence number and older one without. With this option checked, "
-                "all previous files will be deleted so only current results will "
-                "be present.</p>"
                 "<p>This option will only delete the files in folders in which new "
                 "G-code files are being written. If you change the name of a "
                 "folder, for example, it will not be deleted.</p>")
@@ -454,30 +442,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 "correct folder. An incorrect setting of the output folder with "
                 "this option selected could result in unintentionally wiping out "
                 "a vast number of files.</p>")
-
-            # check box to prepend sequence numbers
-            input = inputs.addBoolValueInput("sequence", 
-                                             "Prepend sequence number", 
-                                             True, 
-                                             "", 
-                                             docSettings["sequence"])
-            input.tooltip = "Add Sequence Numbers to Name"
-            input.tooltipDescription = (
-                "Begin each file name with a sequence number. The numbering "
-                "represents the order that the setups appear in the browser tree. "
-                "Each folder has its own sequence numbers starting with 1.")
-
-            # check box to select 2-digit sequence numbers
-            input = inputs.addBoolValueInput("twoDigits", 
-                                             "Use 2-digit numbers", 
-                                             True, 
-                                             "", 
-                                             docSettings["twoDigits"])
-            input.isEnabled = docSettings["sequence"] # enable only if using sequence numbers
-            input.tooltip = "Use 2-Digit Sequence Numbers"
-            input.tooltipDescription = (
-                "Sequence numbers 0 - 9 will have a leading zero added, becoming"
-                '"01" to "09". This could be useful for formatting or sorting.')
 
             # "Personal Use" version
             inputGroup = inputs.addGroupCommandInput("groupPersonal", "Optimization & Verification")
@@ -616,8 +580,7 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             input.tooltip = "Output File Name Must Be Numeric"
             input.tooltipDescription = (
                 "The name of the setup will not be used in the file name, "
-                "only sequence numbers. The option to prepend sequence numbers "
-                "will have no effect.")
+                "only sequence numbers.")
 
             # button to save default settings
             input = inputs.addBoolValueInput("save", "Save as default", False)
@@ -678,10 +641,6 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     self.docSettings[input.id] = input.selectedItem.name
                 else:
                     self.docSettings[input.id] = input.value
-
-            # Enable twoDigits only if sequence is true
-            if input.id == "sequence":
-                inputs.itemById("twoDigits").isEnabled = input.value
 
             # Enable delFolder only if delFiles is true
             if input.id == "delFiles":
@@ -880,17 +839,10 @@ def PerformPostProcess(docSettings, setups):
                                 except:
                                     pass #ignore errors
 
-                        # prepend sequence number if enabled
                         fname = nameList[i].strip()
-                        if docSettings["sequence"] or docSettings["numericName"]:
+                        if docSettings.get("numericName"):
                             seq = seqDict[setupFolder]
-                            seqStr = str(seq)
-                            if docSettings["twoDigits"] and seq < 10:
-                                seqStr = "0" + seqStr
-                            if docSettings["numericName"]:
-                                fname = seqStr
-                            else:
-                                fname = seqStr + ' ' + fname
+                            fname = str(seq)
 
                         # post the file
                         status = PostProcessSetup(fname, setup, setupFolder, docSettings, program)
