@@ -1732,18 +1732,25 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     except Exception:
                         orig_post_config = None
 
-                    # Obtain PostConfiguration object for apt_extractor_wrapper.cps
+                    # Ensure apt_extractor_wrapper.cps is available in Fusion's local Posts library folder
+                    local_posts_dir = os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts")
+                    if os.path.isdir(local_posts_dir):
+                        dest_wrapper = os.path.join(local_posts_dir, "apt_extractor_wrapper.cps")
+                        if not os.path.exists(dest_wrapper):
+                            try:
+                                shutil.copyfile(constAptExtractorScript, dest_wrapper)
+                            except Exception:
+                                pass
+
+                    # Query LocalLibraryLocation for on-disk PostConfiguration object
                     apt_post_obj = None
-                    if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
+                    if hasattr(cam, "postLibrary"):
                         try:
-                            with open(constAptExtractorScript, "r", encoding="utf-8") as f:
-                                apt_post_obj = adsk.cam.PostConfiguration.createFromContent(f.read())
-                        except Exception:
-                            apt_post_obj = None
-                    if not apt_post_obj and hasattr(cam, "postLibrary"):
-                        try:
-                            post_url = adsk.core.URL.create(pathlib.Path(constAptExtractorScript).as_uri())
-                            apt_post_obj = cam.postLibrary.postConfigurationAtURL(post_url)
+                            query = cam.postLibrary.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
+                            for p in query.execute():
+                                if "APT Extractor" in getattr(p, "description", "") or "apt_extractor_wrapper" in getattr(p, "name", ""):
+                                    apt_post_obj = p
+                                    break
                         except Exception:
                             apt_post_obj = None
 
@@ -1751,15 +1758,42 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                         try:
                             program.postConfiguration = apt_post_obj
                         except Exception:
-                            pass
+                            apt_post_obj = None
                     else:
                         try:
                             program.postConfiguration = constAptExtractorScript
                         except Exception:
                             pass
 
-                if not program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()):
-                    return "Fusion reported an error."
+                post_success = False
+                post_err = None
+                try:
+                    post_success = bool(program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()))
+                except Exception as p_exc:
+                    post_err = str(p_exc)
+                    post_success = False
+
+                # Fallback to direct cam.postProcess with file path if NCProgram posting failed
+                if not post_success and do_lathe_pipeline:
+                    if hasattr(cam, "postProcess") and hasattr(adsk.cam, "PostProcessInput"):
+                        try:
+                            units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
+                            post_input = adsk.cam.PostProcessInput.create(
+                                fname,
+                                constAptExtractorScript,
+                                setupFolder,
+                                units,
+                            )
+                            post_input.isOpenInEditor = False
+                            post_success = bool(cam.postProcess(setup, post_input))
+                            if post_success:
+                                post_err = None
+                        except Exception as p_exc2:
+                            post_err = str(p_exc2)
+                            post_success = False
+
+                if not post_success:
+                    return f"Fusion reported an error: {post_err or 'postProcess failed'}"
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
                     base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
