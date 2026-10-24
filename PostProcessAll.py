@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib
+import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
@@ -256,13 +256,211 @@ def AssignOutputFolder(parameters, folder):
     return None
 
 
-def GetSetups(cam, settings, setups):
-    if len(setups) == 0 or not settings["onlySelected"]:
-        setups = []
-        # move all setups into a list
-        for setup in cam.setups:
-            setups.append(setup)
-    return setups
+def _is_setup_cam_object(obj, cam=None):
+    if obj is None:
+        return False
+    if hasattr(adsk.cam, "Setup") and isinstance(obj, adsk.cam.Setup):
+        return True
+    if getattr(obj, "objectType", "") == "adsk::cam::Setup":
+        return True
+    if hasattr(obj, "operationType"):
+        return True
+    if cam and hasattr(cam, "setups"):
+        for s in cam.setups:
+            if s == obj or (getattr(s, "name", None) is not None and getattr(s, "name", None) == getattr(obj, "name", None)):
+                return True
+    return False
+
+
+def _is_folder_cam_object(obj):
+    if obj is None:
+        return False
+    if hasattr(adsk.cam, "CAMFolder") and isinstance(obj, adsk.cam.CAMFolder):
+        return True
+    if getattr(obj, "objectType", "") == "adsk::cam::CAMFolder":
+        return True
+    if hasattr(obj, "folders") and not hasattr(obj, "operationType"):
+        return True
+    return False
+
+
+def _extract_cam_collection(collection):
+    """Safely extract items from a Fusion CAM collection, list, tuple, or iterable."""
+    if collection is None:
+        return []
+    if isinstance(collection, (list, tuple)):
+        return list(collection)
+    cnt = getattr(collection, "count", None)
+    if isinstance(cnt, int):
+        return [collection.item(i) for i in range(cnt)]
+    if hasattr(collection, "__iter__"):
+        return list(collection)
+    return []
+
+
+def _resolve_setup_for_object(obj, cam=None):
+    """Find the owning adsk.cam.Setup for a Setup, Folder, or Operation."""
+    if obj is None:
+        return None
+    if _is_setup_cam_object(obj, cam):
+        if cam and hasattr(cam, "setups"):
+            for s in cam.setups:
+                if s == obj or getattr(s, "name", None) == getattr(obj, "name", None):
+                    return s
+        return obj
+
+    # Walk up parent chain
+    curr = getattr(obj, "parent", None)
+    while curr is not None:
+        if _is_setup_cam_object(curr, cam):
+            if cam and hasattr(cam, "setups"):
+                for s in cam.setups:
+                    if s == curr or getattr(s, "name", None) == getattr(curr, "name", None):
+                        return s
+            return curr
+        curr = getattr(curr, "parent", None)
+
+    # Search in cam.setups by checking operations
+    if cam and hasattr(cam, "setups"):
+        for s in cam.setups:
+            all_ops = getattr(s, "allOperations", [])
+            op_list = _extract_cam_collection(all_ops)
+            for op in op_list:
+                if op == obj:
+                    return s
+                if (getattr(op, "operationId", -1) != -1 and 
+                    getattr(op, "operationId", -1) == getattr(obj, "operationId", -2)):
+                    return s
+                if (getattr(op, "name", None) is not None and 
+                    getattr(op, "name", None) == getattr(obj, "name", None)):
+                    return s
+    return None
+
+
+def _lookup_setup_ops(setup, setup_operations_map):
+    """Retrieve operations list for setup from setup_operations_map regardless of wrapper identity."""
+    if setup in setup_operations_map:
+        return setup_operations_map[setup]
+    for s, ops in setup_operations_map.items():
+        if s == setup or (getattr(s, "name", None) is not None and getattr(s, "name", None) == getattr(setup, "name", None)):
+            return ops
+    return None
+
+
+def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
+    """
+    Look in the selected NCProgram's setup and operations and derive the setups and operations to process.
+    Returns:
+        target_setups: list of adsk.cam.Setup objects
+        setup_operations_map: dict mapping Setup -> list[Operation]
+    """
+    if program is None and cam is not None and hasattr(cam, "ncPrograms"):
+        program = GetNcProgram(cam, settings)
+
+    whole_setups = []
+    selected_ops_by_setup = collections.defaultdict(list)
+    nc_prog_setups = []
+
+    def add_setup_ref(s):
+        if s and not any(s == existing or getattr(s, "name", None) == getattr(existing, "name", None) for existing in nc_prog_setups):
+            nc_prog_setups.append(s)
+
+    # 1. Check if program has direct setups collection
+    if program is not None and hasattr(program, "setups"):
+        try:
+            items = _extract_cam_collection(program.setups)
+            for s in items:
+                resolved_s = _resolve_setup_for_object(s, cam)
+                if resolved_s:
+                    add_setup_ref(resolved_s)
+                    if not any(resolved_s == ws or getattr(resolved_s, "name", None) == getattr(ws, "name", None) for ws in whole_setups):
+                        whole_setups.append(resolved_s)
+        except Exception as exc:
+            _dbg_global(f"GetNcProgramSetupsAndOperations: error inspecting program.setups: {exc}")
+
+    # 2. Check program.operations collection
+    if program is not None and hasattr(program, "operations"):
+        try:
+            op_items = _extract_cam_collection(program.operations)
+            for item in op_items:
+                if _is_setup_cam_object(item, cam):
+                    resolved_s = _resolve_setup_for_object(item, cam)
+                    if resolved_s:
+                        add_setup_ref(resolved_s)
+                        if not any(resolved_s == ws or getattr(resolved_s, "name", None) == getattr(ws, "name", None) for ws in whole_setups):
+                            whole_setups.append(resolved_s)
+                elif _is_folder_cam_object(item):
+                    resolved_s = _resolve_setup_for_object(item, cam)
+                    if resolved_s:
+                        add_setup_ref(resolved_s)
+                        f_ops = getattr(item, "allOperations", getattr(item, "operations", []))
+                        for f_op in _extract_cam_collection(f_ops):
+                            selected_ops_by_setup[resolved_s].append(f_op)
+                else:
+                    # Individual Operation
+                    resolved_s = _resolve_setup_for_object(item, cam)
+                    if resolved_s:
+                        add_setup_ref(resolved_s)
+                        selected_ops_by_setup[resolved_s].append(item)
+        except Exception as exc:
+            _dbg_global(f"GetNcProgramSetupsAndOperations: error inspecting program.operations: {exc}")
+
+    # Fallback if NCProgram specifies no setups/operations
+    if not nc_prog_setups:
+        if cam and hasattr(cam, "setups"):
+            for s in cam.setups:
+                add_setup_ref(s)
+                if not any(s == ws or getattr(s, "name", None) == getattr(ws, "name", None) for ws in whole_setups):
+                    whole_setups.append(s)
+
+    # Filter by browser selection if onlySelected is enabled
+    if settings and settings.get("onlySelected") and setups and len(setups) > 0:
+        target_setups = [
+            s for s in nc_prog_setups
+            if any(s == b_s or getattr(s, "name", None) == getattr(b_s, "name", None) for b_s in setups)
+        ]
+    else:
+        target_setups = list(nc_prog_setups)
+
+    setup_operations_map = {}
+    for s in target_setups:
+        all_s_ops = getattr(s, "allOperations", [])
+        all_s_ops_list = _extract_cam_collection(all_s_ops)
+
+        is_whole = any(
+            s == ws or getattr(s, "name", None) == getattr(ws, "name", None)
+            for ws in whole_setups
+        )
+        if is_whole:
+            valid_ops = [
+                op for op in all_s_ops_list
+                if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)
+            ]
+        else:
+            chosen_ops = []
+            for mapped_s, ops in selected_ops_by_setup.items():
+                if mapped_s == s or getattr(mapped_s, "name", None) == getattr(s, "name", None):
+                    chosen_ops.extend(ops)
+
+            valid_ops = []
+            for op in all_s_ops_list:
+                is_match = any(
+                    op == c_op or
+                    (getattr(op, "operationId", -1) != -1 and getattr(op, "operationId", -1) == getattr(c_op, "operationId", -2)) or
+                    (getattr(op, "name", None) is not None and getattr(op, "name", None) == getattr(c_op, "name", None))
+                    for c_op in chosen_ops
+                )
+                if is_match and not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True):
+                    valid_ops.append(op)
+
+        setup_operations_map[s] = valid_ops
+
+    return target_setups, setup_operations_map
+
+
+def GetSetups(cam, settings, setups=None, program=None):
+    target_setups, _ = GetNcProgramSetupsAndOperations(cam, settings, setups, program)
+    return target_setups
 
 
 def GetSetupTypes(cam, selectedSetups, onlySelected):
@@ -280,11 +478,15 @@ def GetSetupTypes(cam, selectedSetups, onlySelected):
 
 
 def GetNcProgram(cam, settings):
+    if not cam or not hasattr(cam, "ncPrograms"):
+        return None
     target = None
-    for program in cam.ncPrograms:
-        if program.name == settings["ncProgram"]:
-            target = program
-            break
+    prog_name = settings.get("ncProgram") if settings else None
+    if prog_name:
+        for program in cam.ncPrograms:
+            if program.name == prog_name:
+                target = program
+                break
     if target is None and cam.ncPrograms.count > 0:
         target = cam.ncPrograms.item(0)
     return target
@@ -724,9 +926,9 @@ def PerformPostProcess(docSettings, setups):
         verifyResults.clear()
         _dbg_global(f"PerformPostProcess entered: incoming setups count={len(setups) if setups else 0}")
 
-        program = GetNcProgram(cam, docSettings);
+        program = GetNcProgram(cam, docSettings)
         parameters = program.parameters
-        setups = GetSetups(cam, docSettings, setups)
+        setups, setup_operations_map = GetNcProgramSetupsAndOperations(cam, docSettings, setups, program)
 
         # normalize output folder for this user
         # "\" is converted to "/"
@@ -800,58 +1002,55 @@ def PerformPostProcess(docSettings, setups):
                     pass
 
             try:
-                # We pass through all setups even if only some are selected
-                # so numbering scheme doesn't change.
-                for setup in cam.setups:
+                for setup in setups:
                     if progress.wasCancelled:
                         break
-                    if not setup.isSuppressed and setup.allOperations.count != 0:
-                        nameList = setup.name.split(':')    # folder separator
-                        setupFolder = outputFolder
-                        cnt = len(nameList) - 1
-                        i = 0
-                        while i < cnt:
-                            setupFolder += "/" + nameList[i].strip()
-                            i += 1
-                    
-                        # keep a separate sequence number for each folder
-                        if setupFolder in seqDict:
-                            seqDict[setupFolder] += 1
-                            # skip if we're not actually including this setup
-                            if setup not in setups:
-                                continue
-                        else:
-                            # first file for this folder
-                            seqDict[setupFolder] = 1
-                            # skip if we're not actually including this setup
-                            if setup not in setups:
-                                continue
+                    target_ops = _lookup_setup_ops(setup, setup_operations_map)
+                    if not target_ops or getattr(setup, "isSuppressed", False):
+                        continue
+                    if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
+                        continue
 
-                            if (docSettings["delFiles"]):
-                                # delete all the files in the folder
-                                try:
-                                    for entry in os.scandir(setupFolder):
-                                        if entry.is_file():
-                                            try:
-                                                os.remove(entry.path)
-                                            except:
-                                                pass #ignore errors
-                                except:
-                                    pass #ignore errors
+                    nameList = setup.name.split(':')    # folder separator
+                    setupFolder = outputFolder
+                    cnt = len(nameList) - 1
+                    i = 0
+                    while i < cnt:
+                        setupFolder += "/" + nameList[i].strip()
+                        i += 1
+                
+                    # keep a separate sequence number for each folder
+                    if setupFolder in seqDict:
+                        seqDict[setupFolder] += 1
+                    else:
+                        # first file for this folder
+                        seqDict[setupFolder] = 1
 
-                        fname = nameList[i].strip()
-                        if docSettings.get("numericName"):
-                            seq = seqDict[setupFolder]
-                            fname = str(seq)
+                        if (docSettings["delFiles"]):
+                            # delete all the files in the folder
+                            try:
+                                for entry in os.scandir(setupFolder):
+                                    if entry.is_file():
+                                        try:
+                                            os.remove(entry.path)
+                                        except:
+                                            pass #ignore errors
+                            except:
+                                pass #ignore errors
 
-                        # post the file
-                        status = PostProcessSetup(fname, setup, setupFolder, docSettings, program)
-                        if status == None:
-                            cntFiles += 1
-                        else:
-                            cntSkipped += 1
-                            lstSkipped += "\nFailed on setup " + setup.name + ": " + status
-                            
+                    fname = nameList[i].strip()
+                    if docSettings.get("numericName"):
+                        seq = seqDict[setupFolder]
+                        fname = str(seq)
+
+                    # post the file with only the operations selected in the NCProgram
+                    status = PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=target_ops)
+                    if status == None:
+                        cntFiles += 1
+                    else:
+                        cntSkipped += 1
+                        lstSkipped += "\nFailed on setup " + setup.name + ": " + status
+                        
                     cntSetups += 1
                     progress.message = progressMsg.format(cntFiles)
                     progress.progressValue = cntSetups
@@ -1345,7 +1544,7 @@ def _ExtractWorkpieceFromSetup(setup):
 
 
 
-def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None):
+def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None, target_operations=None):
     """
     Extract Compact-NCI intermediate file using universal_dumper.cps
     by querying PostLibrary and posting all valid operations of the setup.
@@ -1372,7 +1571,9 @@ def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None):
         nc_prog = cam.ncPrograms.add(nc_input)
         try:
             nc_prog.postConfiguration = dumper_post_obj
-            valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
+            ops_source = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
+            ops_list = _extract_cam_collection(ops_source)
+            valid_ops = [op for op in ops_list if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
             nc_prog.operations = valid_ops if valid_ops else [setup]
             params = nc_prog.parameters
             AssignOutputFolder(params, tmp_out_dir)
@@ -1745,7 +1946,7 @@ def _OpenFile(path):
         return str(exc)
 
 
-def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt):
+def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=None):
     """
     Unified 2-pass Context-Dump & Single-Pass Replay pipeline for Milling and Turning setups:
     Pass 1 (Context Extraction): Post each single-tool batch inside Fusion using universal_dumper.cps
@@ -1805,23 +2006,26 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         path = os.path.splitext(path)[0] + ext_fix
 
     # 2. Partition setup operations into single-tool batches (mandatory for Personal Edition compatibility)
+    cand_ops = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
+    cand_list = _extract_cam_collection(cand_ops)
+
+    active_ops = [
+        op for op in cand_list
+        if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)
+    ]
     batches = []
     i = 0
-    ops = setup.allOperations
-    while i < ops.count:
-        op = ops[i]
-        i += 1
-        if op.isSuppressed or not op.hasToolpath:
-            continue
+    while i < len(active_ops):
+        op = active_ops[i]
         curTool = op.tool.parameters.itemByName("tool_number").value.value
         opList = [op]
-        while i < ops.count:
-            next_op = ops[i]
-            if not next_op.isSuppressed and next_op.hasToolpath:
-                t_num = next_op.tool.parameters.itemByName("tool_number").value.value
-                if not docSettings.get("combineTool", True) or t_num != curTool:
-                    break
-                opList.append(next_op)
+        i += 1
+        while i < len(active_ops):
+            next_op = active_ops[i]
+            t_num = next_op.tool.parameters.itemByName("tool_number").value.value
+            if not docSettings.get("combineTool", True) or t_num != curTool:
+                break
+            opList.append(next_op)
             i += 1
         batches.append((curTool, opList))
 
@@ -2051,7 +2255,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 _PostProcessLathePipeline = _PostProcessUnifiedPipeline
 
 
-def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
+def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=None):
     ui = None
     retVal = "Fusion reported an exception"
 
@@ -2080,16 +2284,18 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
         
         # Make sure toolpaths are valid
-        if not cam.checkToolpath(setup):
-            genStat = cam.generateToolpath(setup)
-            while not genStat.isGenerationCompleted:
-                time.sleep(.1)
+        ops_to_check = target_operations if target_operations is not None else [setup]
+        for item in ops_to_check:
+            if not cam.checkToolpath(item):
+                genStat = cam.generateToolpath(item)
+                while not genStat.isGenerationCompleted:
+                    time.sleep(.1)
 
         _dbg = _dbg_global
-        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}")
+        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, target_ops_cnt={len(target_operations) if target_operations is not None else 'all'}")
 
         # Unified 2-pass dump & single-pass replay pipeline for all setups
-        return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
+        return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=target_operations)
 
     except Exception as exc:
         if ui:
