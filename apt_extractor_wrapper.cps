@@ -32,10 +32,24 @@ onClose = function() {
   }
 
   var targetCnc = getEnvironmentVariable("TARGET_INTERMEDIATE_CNC");
+  if (!targetCnc) {
+    try {
+      var outPath = getOutputPath();
+      if (outPath) {
+        targetCnc = outPath + ".intermediate.cnc";
+      }
+    } catch (ignored) {}
+  }
+
   if (targetCnc) {
     try {
       var intermediateSrc = getIntermediatePath();
       if (intermediateSrc && FileSystem.isFile(intermediateSrc)) {
+        if (FileSystem.isFile(targetCnc)) {
+          try {
+            FileSystem.remove(targetCnc);
+          } catch (ignored) {}
+        }
         FileSystem.copyFile(intermediateSrc, targetCnc);
       }
     } catch (e) {

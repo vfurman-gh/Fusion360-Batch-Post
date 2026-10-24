@@ -281,6 +281,35 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             report_md = os.path.splitext(cnc_output)[0] + "_report.md"
             self.assertTrue(os.path.isfile(report_md), "Report markdown was not generated")
 
+    def test_run_lathe_verifier_with_object_base_post_does_not_crash(self):
+        """Verify RunLatheVerifier safely handles base_post being a PostConfiguration object without stat TypeError."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cnc_output = os.path.join(tmp_dir, "test_obj_post.cnc")
+            sidecar_cnc = cnc_output + ".intermediate.cnc"
+            shutil.copyfile(self.fixture_cnc, sidecar_cnc)
+
+            with open(cnc_output, "w", encoding="utf-8") as f:
+                f.write('%\nO1001\nG20\nM30\n%\n')
+
+            class MockPostConfigurationObject:
+                pass
+
+            setup = DummySetup(name="Obj Post Setup", is_turning=True)
+            docSettings = {"verifyGcode": True, "fastZ": False}
+
+            # Passing MockPostConfigurationObject instance instead of string path
+            err = RunLatheVerifier(cnc_output, setup, docSettings, base_post=MockPostConfigurationObject())
+            # Should not raise TypeError: stat: path should be string...
+            # Since workpiece was not defined on DummySetup, it safely returns None or error, but does not crash
+            self.assertIsNone(err)
+
+    def test_find_system_apt_post(self):
+        """Verify _FindSystemAptPost locates apt.cps or falls back cleanly."""
+        from PostProcessAll import _FindSystemAptPost
+        apt_path = _FindSystemAptPost()
+        self.assertIsInstance(apt_path, str)
+        self.assertTrue(apt_path.endswith("apt.cps"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1067,41 +1067,79 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=Non
         pass
 
 
+_cached_system_apt_path = None
+
+
+def _FindSystemAptPost():
+    """Locate Autodesk's built-in apt.cps post processor dynamically on macOS/Windows."""
+    global _cached_system_apt_path
+    if _cached_system_apt_path and os.path.isfile(_cached_system_apt_path):
+        return _cached_system_apt_path
+
+    env_path = os.environ.get("SYSTEM_APT_CPS")
+    if env_path and os.path.isfile(env_path):
+        _cached_system_apt_path = env_path
+        return _cached_system_apt_path
+
+    webdeploy = os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production")
+    if os.path.isdir(webdeploy):
+        for root, dirs, files in os.walk(webdeploy):
+            if "apt.cps" in files and "CAM360/Data/Posts" in root:
+                p = os.path.join(root, "apt.cps")
+                _cached_system_apt_path = p
+                return p
+
+    _cached_system_apt_path = "apt.cps"
+    return "apt.cps"
+
+
 def _ExtractWorkpieceFromSetup(setup):
     """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
     try:
         if not hasattr(setup, "parameters"):
             return None
         params = setup.parameters
-        p_dia = params.itemByName("job_stockDiameter")
-        p_len = params.itemByName("job_stockLength")
-        if not p_dia or not p_len:
+
+        def _get_float_param(names, default=None):
+            for n in names:
+                try:
+                    p = params.itemByName(n)
+                    if p is not None:
+                        val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
+                        if isinstance(val, (int, float)):
+                            return float(val) * 10.0  # Fusion internal length unit (cm) to mm
+                        elif isinstance(val, str):
+                            s = val.strip().lower()
+                            if s.endswith("in"):
+                                return float(s[:-2].strip()) * 25.4
+                            elif s.endswith("mm"):
+                                return float(s[:-2].strip())
+                            return float(s) * 10.0
+                except Exception:
+                    pass
+            return default
+
+        d_outer_mm = _get_float_param(["job_stockDiameter", "stockDiameter", "job_stockDimensionsX", "job_stockDimensionsY"])
+        length_mm = _get_float_param(["job_stockLength", "stockLength", "job_stockDimensionsZ"])
+        if d_outer_mm is None or length_mm is None:
             return None
-        # Fusion API parameters for lengths are in internal units (centimeters)
-        d_outer_mm = float(p_dia.value.value) * 10.0
-        length_mm = float(p_len.value.value) * 10.0
 
-        p_inner = params.itemByName("job_stockDiameterInner")
-        d_inner_mm = float(p_inner.value.value) * 10.0 if p_inner else 0.0
-
-        p_front = params.itemByName("job_stockOffsetFront")
-        z_max_mm = float(p_front.value.value) * 10.0 if p_front else 0.0
+        d_inner_mm = _get_float_param(["job_stockDiameterInner", "stockDiameterInner"], default=0.0)
+        z_max_mm = _get_float_param(["job_stockOffsetFront", "stockOffsetFront", "job_stockOffsetZPositive"], default=0.0)
         z_min_mm = z_max_mm - length_mm
 
         fixtures = []
-        p_clamp = params.itemByName("job_stockClampingLength")
-        if p_clamp:
-            clamp_len_mm = float(p_clamp.value.value) * 10.0
-            if clamp_len_mm > 0.1:
-                from geometry import AxisymmetricChuckObstacle
-                fixtures.append(
-                    AxisymmetricChuckObstacle(
-                        z_min=z_min_mm - 50.0,
-                        z_max=z_min_mm + clamp_len_mm,
-                        outer_radius=(d_outer_mm * 0.5) + 30.0,
-                        clamping_radius=d_outer_mm * 0.5,
-                    )
+        clamp_len_mm = _get_float_param(["job_stockClampingLength", "stockClampingLength"], default=0.0)
+        if clamp_len_mm and clamp_len_mm > 0.1:
+            from geometry import AxisymmetricChuckObstacle
+            fixtures.append(
+                AxisymmetricChuckObstacle(
+                    z_min=z_min_mm - 50.0,
+                    z_max=z_min_mm + clamp_len_mm,
+                    outer_radius=(d_outer_mm * 0.5) + 30.0,
+                    clamping_radius=d_outer_mm * 0.5,
                 )
+            )
 
         from geometry import AxisymmetricStock2D, WorkpieceDefinition
         return WorkpieceDefinition(
@@ -1382,15 +1420,21 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         # Locate intermediate Compact-NCI (.cnc)
         intermediate_path = cncPath + ".intermediate.cnc"
         if not os.path.isfile(intermediate_path):
+            base_no_ext = os.path.splitext(cncPath)[0]
+            for cand in [base_no_ext + ".intermediate.cnc", base_no_ext + ".apt.intermediate.cnc"]:
+                if os.path.isfile(cand):
+                    intermediate_path = cand
+                    break
+
+        if not os.path.isfile(intermediate_path):
             inter_dir = "/Users/vadimf/Documents/NCs/intermediates"
             if os.path.isdir(inter_dir):
                 candidates = sorted(
                     glob.glob(os.path.join(inter_dir, "*.cnc")),
-
                     key=os.path.getmtime,
                     reverse=True,
                 )
-                if candidates:
+                if candidates and (time.time() - os.path.getmtime(candidates[0])) < 120:
                     intermediate_path = candidates[0]
 
         if not os.path.isfile(intermediate_path):
@@ -1403,7 +1447,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             return None
 
         # Base post processor configuration
-        if not base_post or not os.path.isfile(base_post):
+        if not base_post or not isinstance(base_post, str) or not os.path.isfile(base_post):
             base_post = os.path.join(constAddonDir, "centroid_turning.cps")
         if not os.path.isfile(base_post):
             return f"Base machine post processor not found: {base_post}"
@@ -1449,6 +1493,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             if not venvPy:
                 return "Lathe verifier dependencies (shapely) could not be loaded in Fusion process or isolated venv."
 
+            runner = os.path.join(constAddonDir, "run_pipeline.py")
             tools_tmp_path = None
             try:
                 cmd = [
@@ -1665,32 +1710,72 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
 
         # Do it all at once? (Always handle turning setups through unified verification pipeline)
         if do_lathe_pipeline or not docSettings["splitSetup"]:
-            orig_post = None
+            orig_post_config = None
             try:
                 program.operations = [setup]
                 if do_lathe_pipeline and os.path.isfile(constAptExtractorScript):
+                    intermediate_cnc = path + ".intermediate.cnc"
+                    if os.path.isfile(intermediate_cnc):
+                        try:
+                            os.remove(intermediate_cnc)
+                        except Exception:
+                            pass
+
+                    # Configure environment variables for apt_extractor_wrapper.cps
+                    sys_apt = _FindSystemAptPost()
+                    os.environ["SYSTEM_APT_CPS"] = sys_apt
+                    os.environ["TARGET_INTERMEDIATE_CNC"] = intermediate_cnc
+
+                    # Save original post configuration object for restoration in finally
                     try:
-                        orig_post = program.postConfiguration
-                        intermediate_cnc = path + ".intermediate.cnc"
-                        os.environ["SYSTEM_APT_CPS"] = "apt.cps"
-                        os.environ["TARGET_INTERMEDIATE_CNC"] = intermediate_cnc
-                        program.postConfiguration = constAptExtractorScript
+                        orig_post_config = program.postConfiguration
                     except Exception:
-                        orig_post = None
+                        orig_post_config = None
+
+                    # Obtain PostConfiguration object for apt_extractor_wrapper.cps
+                    apt_post_obj = None
+                    if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
+                        try:
+                            with open(constAptExtractorScript, "r", encoding="utf-8") as f:
+                                apt_post_obj = adsk.cam.PostConfiguration.createFromContent(f.read())
+                        except Exception:
+                            apt_post_obj = None
+                    if not apt_post_obj and hasattr(cam, "postLibrary"):
+                        try:
+                            post_url = adsk.core.URL.create(pathlib.Path(constAptExtractorScript).as_uri())
+                            apt_post_obj = cam.postLibrary.postConfigurationAtURL(post_url)
+                        except Exception:
+                            apt_post_obj = None
+
+                    if apt_post_obj is not None:
+                        try:
+                            program.postConfiguration = apt_post_obj
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            program.postConfiguration = constAptExtractorScript
+                        except Exception:
+                            pass
 
                 if not program.postProcess(adsk.cam.NCProgramPostProcessOptions.create()):
                     return "Fusion reported an error."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
-                    return RunLatheVerifier(path, setup, docSettings, base_post=orig_post)
+                    base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
+                    return RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
                 return None
             except Exception as exc:
+                try:
+                    adsk.core.Application.get().log(f"[PostProcessAll] PostProcessSetup error: {traceback.format_exc()}")
+                except Exception:
+                    pass
                 retVal += ": " + str(exc)
                 return retVal
             finally:
-                if orig_post:
+                if orig_post_config is not None:
                     try:
-                        program.postConfiguration = orig_post
+                        program.postConfiguration = orig_post_config
                     except Exception:
                         pass
 
