@@ -120,10 +120,16 @@ var baseOnClose = (typeof onClose === "function") ? onClose : null;
 
 onClose = function() {
   if (baseOnClose) {
-    baseOnClose();
+    try {
+      baseOnClose();
+    } catch (e) {}
   }
 
-  var targetCnc = getEnvironmentVariable("TARGET_INTERMEDIATE_CNC");
+  var targetCnc = "";
+  try {
+    targetCnc = getEnvironmentVariable("TARGET_INTERMEDIATE_CNC");
+  } catch (e) {}
+
   if (!targetCnc) {
     try {
       var outPath = getOutputPath();
