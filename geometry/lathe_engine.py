@@ -185,8 +185,10 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         chuck_polys = []
         for fixture in workpiece.fixtures:
             if isinstance(fixture, AxisymmetricChuckObstacle):
-                c_upper = box(fixture.z_min, fixture.clamping_radius, fixture.z_max, fixture.outer_radius)
-                chuck_polys.append(c_upper)
+                min_z, max_z = min(fixture.z_min, fixture.z_max), max(fixture.z_min, fixture.z_max)
+                min_r, max_r = min(fixture.clamping_radius, fixture.outer_radius), max(fixture.clamping_radius, fixture.outer_radius)
+                if min_z < max_z and min_r < max_r:
+                    chuck_polys.append(box(min_z, min_r, max_z, max_r))
 
         self.chuck_obstacle = unary_union(chuck_polys) if chuck_polys else Polygon()
 
@@ -377,8 +379,11 @@ class Lathe2DIPWVerifier(IVerificationEngine):
             sc_pad = swept_cutter.buffer(self.promote_margin_mm)
             sh_pad = swept_holder_radial.buffer(self.promote_margin_mm)
 
-            cutter_air = (not aabb_overlap(sc_pad.bounds, stock_bounds)) or sc_pad.intersection(self.ipw).is_empty
-            holder_air = (not aabb_overlap(sh_pad.bounds, stock_bounds)) or sh_pad.intersection(self.ipw).is_empty
+            c_hit = sc_pad.intersection(self.ipw) if aabb_overlap(sc_pad.bounds, stock_bounds) else Polygon()
+            cutter_air = (not aabb_overlap(sc_pad.bounds, stock_bounds)) or c_hit.is_empty or (c_hit.area < 1e-4)
+
+            h_hit = sh_pad.intersection(self.ipw) if aabb_overlap(sh_pad.bounds, stock_bounds) else Polygon()
+            holder_air = (not aabb_overlap(sh_pad.bounds, stock_bounds)) or h_hit.is_empty or (h_hit.area < 1e-4)
 
             if cutter_air and holder_air:
                 if v_key_str not in self.promoted_vectors:

@@ -137,6 +137,11 @@ def main():
                         is_boring=is_boring,
                     )
 
+                if t_info.get("hand", "R") == "L":
+                    from shapely.affinity import scale as shapely_scale
+                    cutter = shapely_scale(cutter, xfact=-1.0, yfact=1.0, origin=(0, 0))
+                    holder = shapely_scale(holder, xfact=-1.0, yfact=1.0, origin=(0, 0))
+
                 clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
                 geom = LatheToolGeometry(
                     insert_shape=shape,

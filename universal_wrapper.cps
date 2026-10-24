@@ -74,8 +74,8 @@ var baseOnRapid = onRapid;
 var promotedCount = 0;
 
 onLinear = function(_x, _y, _z, feed) {
-  // Guard 1: Never promote moves inside canned/drill cycles
-  if (cycleActive) {
+  // Guard 1: Never promote moves inside canned/drill cycles or synchronized threading
+  if (cycleActive || (typeof isSpeedFeedSynchronizationActive === "function" && isSpeedFeedSynchronizationActive())) {
     baseOnLinear(_x, _y, _z, feed);
     return;
   }

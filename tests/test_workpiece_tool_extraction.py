@@ -328,6 +328,30 @@ class TestWorkpieceAndToolExtraction(unittest.TestCase):
         self.assertGreater(report.total_volume_removed_mm3, 1000.0, "Expected significant material removal")
         self.assertGreaterEqual(len(report.promoted_vectors), 1, "Expected air move promotion")
 
+    def test_08_left_hand_tool_geometry_and_resolution(self):
+        """Prove left-hand tool reflects along Z and _ResolveBasePostPath safely returns vendor post."""
+        from PostProcessAll import _BuildToolAssembly, _ResolveBasePostPath
+
+        lh_info = {
+            "name": "LH Turning",
+            "tool_id": 2,
+            "hand": "L",
+            "insert_shape": "rhombic",
+            "is_boring": False,
+            "shank_width": 16.0,
+            "shank_length": 100.0,
+            "nose_radius": 0.4,
+            "edge_length": 9.525,
+            "lead_angle": 5.0,
+        }
+        lh_asm = _BuildToolAssembly(lh_info)
+        # Left-hand tool shank should extend into negative Z
+        self.assertLess(lh_asm.geometry.holder_polygon.bounds[0], -5.0, "LH holder shank must extend in -Z")
+
+        # Base post resolver should safely return existing centroid_turning.cps
+        base_post = _ResolveBasePostPath(None)
+        self.assertTrue(os.path.isfile(base_post), f"Resolved base post must exist: {base_post}")
+
 
 if __name__ == "__main__":
     unittest.main()

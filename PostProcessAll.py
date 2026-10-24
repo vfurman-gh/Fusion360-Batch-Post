@@ -1103,6 +1103,15 @@ def _FindSystemAptPost():
         _cached_system_apt_path = env_path
         return _cached_system_apt_path
 
+    try:
+        from pipeline import find_autodesk_apt_cps
+        fast_apt = find_autodesk_apt_cps()
+        if fast_apt and os.path.isfile(fast_apt):
+            _cached_system_apt_path = fast_apt
+            return fast_apt
+    except Exception:
+        pass
+
     webdeploy = os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production")
     if os.path.isdir(webdeploy):
         for root, dirs, files in os.walk(webdeploy):
@@ -1113,6 +1122,17 @@ def _FindSystemAptPost():
 
     _cached_system_apt_path = "apt.cps"
     return "apt.cps"
+
+
+def _ResolveBasePostPath(program=None):
+    """Resolve target machine post processor path from NCProgram or fallback to centroid_turning.cps."""
+    if program and hasattr(program, "postConfiguration") and program.postConfiguration:
+        for attr in ("postPath", "location", "name"):
+            val = getattr(program.postConfiguration, attr, None)
+            if val and isinstance(val, str) and os.path.isfile(val):
+                return val
+    default_p = os.path.join(constAddonDir, "centroid_turning.cps")
+    return default_p if os.path.isfile(default_p) else ""
 
 
 def _ExtractWorkpieceFromSetup(setup):
@@ -1358,6 +1378,11 @@ def _BuildToolAssembly(t_info):
             clearance_z=clr_z,
             is_boring=is_boring,
         )
+
+    if t_info.get("hand", "R") == "L":
+        from shapely.affinity import scale as shapely_scale
+        cutter = shapely_scale(cutter, xfact=-1.0, yfact=1.0, origin=(0, 0))
+        holder = shapely_scale(holder, xfact=-1.0, yfact=1.0, origin=(0, 0))
 
     clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
     geom = LatheToolGeometry(
@@ -1903,8 +1928,8 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     return "Fusion reported an error during post processing."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
                 if do_lathe_pipeline:
-                    base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
-                    _dbg(f"Calling RunLatheVerifier for {path}...")
+                    base_post_path = _ResolveBasePostPath(program)
+                    _dbg(f"Calling RunLatheVerifier for {path} with base_post={base_post_path}...")
                     res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
                     _dbg(f"RunLatheVerifier returned: {res}")
                     return res
@@ -2275,8 +2300,8 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         fileHead = None
 
         if do_lathe_pipeline:
-            base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
-            _dbg(f"splitSetup: Calling RunLatheVerifier for {path}...")
+            base_post_path = _ResolveBasePostPath(program)
+            _dbg(f"splitSetup: Calling RunLatheVerifier for {path} with base_post={base_post_path}...")
             res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
             _dbg(f"splitSetup: RunLatheVerifier returned: {res}")
             return res
