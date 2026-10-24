@@ -34,13 +34,13 @@ class APTParser:
     def __init__(self, default_rapid_feed_mmpm: float = 5000.0):
         self.default_rapid_feed_mmpm = default_rapid_feed_mmpm
 
-    def parse_file(self, filepath: str) -> List[MotionSegment]:
+    def parse_file(self, filepath: str, batch_idx: int = 0, start_segment_id: int = 0) -> List[MotionSegment]:
         """Parse an APT file on disk into a list of MotionSegments."""
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-        return self.parse_text(content)
+        return self.parse_text(content, batch_idx=batch_idx, start_segment_id=start_segment_id)
 
-    def parse_text(self, content: str) -> List[MotionSegment]:
+    def parse_text(self, content: str, batch_idx: int = 0, start_segment_id: int = 0) -> List[MotionSegment]:
         """Parse raw APT text into a list of MotionSegments."""
         segments: List[MotionSegment] = []
 
@@ -54,7 +54,7 @@ class APTParser:
         current_feedrate_mmpm = 250.0
         is_rapid = False
         in_cycle = False
-        segment_id = 0
+        segment_id = start_segment_id
         current_pos: Optional[Vector3D] = None
         pending_arc: Optional[Dict[str, Any]] = None
 
@@ -230,6 +230,8 @@ class APTParser:
                             "tool_id": current_tool_id,
                             "in_cycle": in_cycle,
                             "raw_apt": line,
+                            "batch_idx": batch_idx,
+                            "batch_sec_id": sec_id,
                         },
                     )
                     segments.append(seg)
@@ -262,17 +264,36 @@ class APTParser:
                         vector_key=VectorKey.from_floats(sec_id, current_pos, current_pos),
                         is_arc=False,
                         arc_center=None,
-                        metadata={"tool_id": current_tool_id},
+                        metadata={
+                            "tool_id": current_tool_id,
+                            "batch_idx": batch_idx,
+                            "batch_sec_id": sec_id,
+                        },
                     )
                     segments.append(seg)
                 continue
 
         return segments
 
+    def parse_apt_batches(self, filepaths: Sequence[str]) -> List[MotionSegment]:
+        """Parse multiple per-batch APT files into a continuous, ordered MotionSegment sequence."""
+        all_segments: List[MotionSegment] = []
+        cur_seg_id = 0
+        for b_idx, fp in enumerate(filepaths):
+            batch_segs = self.parse_file(fp, batch_idx=b_idx, start_segment_id=cur_seg_id)
+            all_segments.extend(batch_segs)
+            cur_seg_id = len(all_segments)
+        return all_segments
+
 
 def parse_apt_file(filepath: str) -> List[MotionSegment]:
     """Convenience helper to parse an APT file into MotionSegments."""
     return APTParser().parse_file(filepath)
+
+
+def parse_apt_batches(filepaths: Sequence[str]) -> List[MotionSegment]:
+    """Parse multiple per-batch APT files into a single unified MotionSegment sequence."""
+    return APTParser().parse_apt_batches(filepaths)
 
 
 def verify_apt_toolpath(

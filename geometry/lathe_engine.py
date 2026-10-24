@@ -155,6 +155,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         self.cutter_is_convex: bool = False
         self.holder_is_convex: bool = False
         self.holder_has_neg_y: bool = False
+        self.is_boring: bool = False
 
         self.collisions: List[CollisionRecord] = []
         self.promoted_vectors: Dict[str, PromotedVectorRule] = {}

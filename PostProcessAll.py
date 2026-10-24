@@ -1135,6 +1135,30 @@ def _ResolveBasePostPath(program=None):
     return default_p if os.path.isfile(default_p) else ""
 
 
+def _GetPostConfigObj(post_script_path):
+    """Obtain adsk.cam.PostConfiguration object for a .cps script."""
+    if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
+        try:
+            with open(post_script_path, "r", encoding="utf-8") as f:
+                return adsk.cam.PostConfiguration.createFromContent(f.read())
+        except Exception as exc:
+            _dbg_global(f"createFromContent({post_script_path}) failed: {exc}")
+    try:
+        camMgr = adsk.cam.CAMManager.get()
+        if camMgr and camMgr.libraryManager and camMgr.libraryManager.postLibrary:
+            postLib = camMgr.libraryManager.postLibrary
+            query = postLib.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
+            base_name = os.path.basename(post_script_path).lower()
+            for p in query.execute():
+                p_name = getattr(p, "name", "").lower()
+                p_desc = getattr(p, "description", "").lower()
+                if base_name in p_name or "apt extractor" in p_desc or "universal" in p_desc:
+                    return p
+    except Exception as exc2:
+        _dbg_global(f"postLibrary query failed: {exc2}")
+    return post_script_path
+
+
 def _ExtractWorkpieceFromSetup(setup):
     """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
     try:
@@ -1168,17 +1192,49 @@ def _ExtractWorkpieceFromSetup(setup):
 
         d_outer_mm = _get_float_param(["job_stockDiameter", "stockDiameter", "job_stockDimensionsX", "job_stockDimensionsY", "stock_diameter"])
         length_mm = _get_float_param(["job_stockLength", "stockLength", "job_stockDimensionsZ", "stock_length"])
+        z_max_mm = _get_float_param(["job_stockOffsetFront", "stockOffsetFront", "job_stockOffsetZPositive"], default=0.0)
+        if z_max_mm is None or math.isnan(z_max_mm):
+            z_max_mm = 0.0
+
+        if d_outer_mm is None or length_mm is None or d_outer_mm <= 0.0 or length_mm <= 0.0:
+            # Fallback: inspect stockSolids or models bounding boxes
+            try:
+                for col_name in ("stockSolids", "models"):
+                    col = getattr(setup, col_name, None)
+                    if col and hasattr(col, "count") and col.count > 0:
+                        for c_idx in range(col.count):
+                            item = col.item(c_idx)
+                            bb = getattr(item, "boundingBox", None)
+                            if bb:
+                                z_min_c = bb.minPoint.z * 10.0
+                                z_max_c = bb.maxPoint.z * 10.0
+                                r_c = max(
+                                    math.hypot(bb.minPoint.x, bb.minPoint.y),
+                                    math.hypot(bb.maxPoint.x, bb.maxPoint.y),
+                                    math.hypot(bb.minPoint.x, bb.maxPoint.y),
+                                    math.hypot(bb.maxPoint.x, bb.minPoint.y),
+                                ) * 10.0
+                                if col_name == "models":
+                                    r_c += 1.0  # radial stock margin
+                                    z_max_c += 0.5
+                                if d_outer_mm is None or (r_c * 2.0 > d_outer_mm):
+                                    d_outer_mm = r_c * 2.0
+                                if length_mm is None or (z_max_c - z_min_c > length_mm):
+                                    length_mm = z_max_c - z_min_c
+                                    z_max_mm = z_max_c
+                        if d_outer_mm is not None and length_mm is not None:
+                            break
+            except Exception as b_exc:
+                _dbg_global(f"Bounding box stock fallback threw: {b_exc}")
+
         if d_outer_mm is None or math.isnan(d_outer_mm) or d_outer_mm <= 0.0:
-            return None
+            d_outer_mm = 50.0  # Defensible default
         if length_mm is None or math.isnan(length_mm) or length_mm <= 0.0:
-            return None
+            length_mm = 100.0  # Defensible default
 
         d_inner_mm = _get_float_param(["job_stockDiameterInner", "stockDiameterInner"], default=0.0)
         if d_inner_mm is None or math.isnan(d_inner_mm) or d_inner_mm < 0.0:
             d_inner_mm = 0.0
-        z_max_mm = _get_float_param(["job_stockOffsetFront", "stockOffsetFront", "job_stockOffsetZPositive"], default=0.0)
-        if z_max_mm is None or math.isnan(z_max_mm):
-            z_max_mm = 0.0
         z_min_mm = z_max_mm - length_mm
 
 
@@ -1544,11 +1600,10 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
         tool_scale = 1.0
 
-        if not workpiece or not tools_data:
+        if not tools_data or not workpiece:
             from geometry import parse_legacy_stock, parse_legacy_tool_op
             for line in gcode_content.splitlines():
                 if not workpiece and line.startswith(";META_STOCK:"):
-
                     workpiece = parse_legacy_stock(line)
                     if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
                         workpiece = WorkpieceDefinition(
@@ -1576,7 +1631,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             if not tools_data and is_inch:
                 tool_scale = 25.4
 
-        _dbg(f"RunLatheVerifier: workpiece={workpiece}, tools count={len(tools_data) if tools_data else 0}")
+        _dbg(f"RunLatheVerifier: workpiece={workpiece}, tools count={len(tools_data) if tools_data else len(tools_by_op)}")
         if not workpiece:
             _dbg(f"RunLatheVerifier: workpiece extraction returned None! Skipping {cncPath}")
             return None
@@ -1851,6 +1906,398 @@ def _OpenFile(path):
         return str(exc)
 
 
+def _StitchGcodeFiles(batch_files, output_path, fname, docSettings):
+    """
+    Stitch multiple single-tool G-code files into a single unified NC program.
+    Extracts header from the first file, injects tool change blocks between tools,
+    updates sequence numbers (Nxx), and appends the final program tail.
+    """
+    if not batch_files:
+        return
+    if len(batch_files) == 1:
+        shutil.copyfile(batch_files[0], output_path)
+        return
+
+    regToolComment = re.compile(r"\(T[0-9]+\s|;T[0-9]+\s", re.IGNORECASE)
+    regBody = re.compile(
+        r"(?P<N>N[0-9]+ *)?(?P<line>(M(?P<M>[0-9]+) *)?(G(?P<G>[0-9]+) *)?(T(?P<T>[0-9]+))?.+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    endCodes = docSettings.get("endCodes", "M30:M2")
+    endGcodes = set(int(c) for c in re.findall(r"G([0-9]+)", endCodes))
+    endMcodes = set(int(c) for c in re.findall(r"M([0-9]+)", endCodes))
+
+    toolChange = docSettings.get("toolChange", "")
+    fToolChangeNum = False
+    if len(toolChange) != 0:
+        toolChange = toolChange.replace(":", "\n") + "\n"
+        match = regBody.match(toolChange).groupdict()
+        if match["N"] is not None:
+            fToolChangeNum = True
+            toolChange = match["line"].splitlines(True)
+
+    fileHead = io.StringIO()
+    tmpBody = tempfile.NamedTemporaryFile("w+", encoding="utf8", delete=False)
+    tmpBodyName = tmpBody.name
+
+    lineNum = 10
+    fFirst = True
+    tailGcode = ""
+
+    try:
+        for b_idx, b_path in enumerate(batch_files):
+            if not os.path.isfile(b_path):
+                continue
+            with open(b_path, "r", encoding="utf8", errors="replace") as fileOp:
+                fBlankOk = False
+                if not fFirst:
+                    tmpBody.write("\n")
+
+                line = fileOp.readline()
+                if not line:
+                    continue
+                if line[0] == "%":
+                    if fFirst:
+                        fileHead.write(line)
+                    line = fileOp.readline()
+
+                # Header comments
+                while line and (line[0] in ("(", ";", "O", "\n")):
+                    if line[0] == "\n":
+                        fBlankOk = True
+                    if regToolComment.match(line):
+                        if fFirst:
+                            fileHead.write(line)
+                        line = fileOp.readline()
+                        break
+                    if fFirst:
+                        fileHead.write(line)
+                    line = fileOp.readline()
+
+                # Find tool change or start of body
+                while line:
+                    m = regBody.match(line)
+                    if not m:
+                        line = fileOp.readline()
+                        continue
+                    mdict = m.groupdict()
+                    line_clean = mdict["line"]
+                    fNum = mdict["N"] is not None
+
+                    if mdict["T"] is not None:
+                        if not fFirst and len(toolChange) != 0:
+                            if fToolChangeNum:
+                                for code in toolChange:
+                                    tmpBody.write(f"N{lineNum} {code}")
+                                    lineNum += constLineNumInc
+                            else:
+                                tmpBody.write(toolChange)
+                        break
+
+                    if fFirst or line[0] in ("(", ";"):
+                        if fNum:
+                            tmpBody.write(f"N{lineNum} ")
+                            lineNum += constLineNumInc
+                        tmpBody.write(line_clean)
+                    line = fileOp.readline()
+
+                # Body lines
+                lineFull = line
+                while lineFull:
+                    m = regBody.match(lineFull)
+                    if not m:
+                        lineFull = fileOp.readline()
+                        continue
+                    mdict = m.groupdict()
+                    line_clean = mdict["line"]
+                    fNum = mdict["N"] is not None
+
+                    # Check end marker
+                    endM = mdict["M"]
+                    if endM is not None and int(endM) in endMcodes:
+                        break
+                    endG = mdict["G"]
+                    if endG is not None and int(endG) in endGcodes:
+                        break
+
+                    if fNum:
+                        tmpBody.write(f"N{lineNum} ")
+                        lineNum += constLineNumInc
+                    tmpBody.write(line_clean)
+
+                    lineFull = fileOp.readline()
+
+                # Capture tail from the last batch
+                if b_idx == len(batch_files) - 1 and lineFull:
+                    tailGcode = lineFull + fileOp.read()
+
+                fFirst = False
+
+        if len(tailGcode) != 0:
+            for code in tailGcode.splitlines(True):
+                m = regBody.match(code)
+                if m and m.groupdict()["N"] is not None:
+                    tmpBody.write(f"N{lineNum} {m.groupdict()['line']}")
+                    lineNum += constLineNumInc
+                else:
+                    tmpBody.write(code)
+
+        tmpBody.close()
+
+        with open(tmpBodyName, "r", encoding="utf8", errors="replace") as rb:
+            with open(output_path, "w", encoding="utf8") as outFile:
+                outFile.write(fileHead.getvalue())
+                shutil.copyfileobj(rb, outFile)
+    finally:
+        if os.path.exists(tmpBodyName):
+            try:
+                os.remove(tmpBodyName)
+            except Exception:
+                pass
+
+
+def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt):
+    """
+    Robust 4-pass turning pipeline for Fusion Personal Edition & multi-tool setups:
+    Pass 1: Extract separate intermediate APT toolpaths per single-tool batch.
+    Pass 2: Ingest all batch toolpaths into a continuous sequence and run unified 2D IPW verification.
+    Pass 3: Post each single-tool batch through universal_wrapper.cps with batch-specific promotion rules.
+    Pass 4: Assemble and stitch the promoted single-tool G-code outputs into the final NC program.
+    """
+    _dbg = _dbg_global
+    _dbg(f"_PostProcessLathePipeline entered for {fname}, path={path}")
+
+    # 1. Base post processor resolution
+    base_post_path = _ResolveBasePostPath(program)
+    if not base_post_path or not os.path.isfile(base_post_path):
+        base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
+    if not os.path.isfile(base_post_path):
+        return f"Base machine post processor not found: {base_post_path}"
+
+    # 2. Extract workpiece and tools from native Setup model
+    workpiece = _ExtractWorkpieceFromSetup(setup)
+    tools_data = _ExtractToolsFromSetup(setup)
+    if not tools_data:
+        return "No lathe operations with valid tools found in setup."
+    tools_by_op = {name: _BuildToolAssembly(t_info) for name, t_info in tools_data.items()}
+
+    # 3. Partition setup operations into single-tool batches
+    batches = []
+    i = 0
+    ops = setup.allOperations
+    while i < ops.count:
+        op = ops[i]
+        i += 1
+        if op.isSuppressed or not op.hasToolpath:
+            continue
+        curTool = op.tool.parameters.itemByName("tool_number").value.value
+        opList = [op]
+        while i < ops.count:
+            next_op = ops[i]
+            if not next_op.isSuppressed and next_op.hasToolpath:
+                t_num = next_op.tool.parameters.itemByName("tool_number").value.value
+                if not docSettings.get("combineTool", True) or t_num != curTool:
+                    break
+                opList.append(next_op)
+            i += 1
+        batches.append((curTool, opList))
+
+    _dbg(f"_PostProcessLathePipeline: partitioned into {len(batches)} batches: {[b[0] for b in batches]}")
+    if not batches:
+        return "No active operations to post process."
+
+    tmp_dir = tempfile.mkdtemp(prefix="lathe_pipe_")
+    try:
+        # -------------------------------------------------------------
+        # PASS 1: Extract separate intermediate APT files per batch
+        # -------------------------------------------------------------
+        apt_post_obj = _GetPostConfigObj(constAptExtractorScript)
+        batch_apt_files = []
+        opts = adsk.cam.NCProgramPostProcessOptions.create()
+        if hasattr(opts, "isFailOnToolNumberDuplication"):
+            opts.isFailOnToolNumberDuplication = False
+
+        for b_idx, (t_num, op_list) in enumerate(batches):
+            b_prefix = f"batch_{b_idx}"
+            b_apt = os.path.join(tmp_dir, f"{b_prefix}.apt")
+            b_inter = os.path.join(tmp_dir, f"{b_prefix}.intermediate.cnc")
+
+            os.environ["SYSTEM_APT_CPS"] = _FindSystemAptPost()
+            os.environ["TARGET_INTERMEDIATE_CNC"] = b_inter
+
+            program.postConfiguration = apt_post_obj
+            program.operations = op_list
+            AssignOutputFolder(program.parameters, tmp_dir)
+            program.parameters.itemByName("nc_program_filename").value.value = b_prefix
+            program.parameters.itemByName("nc_program_openInEditor").value.value = False
+
+            _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with apt_extractor_wrapper...")
+            post_ok = bool(program.postProcess(opts))
+            time.sleep(constPostLoopDelay)
+
+            if not os.path.isfile(b_apt):
+                # Search tmp_dir for emitted apt file
+                for f in os.listdir(tmp_dir):
+                    if f.startswith(b_prefix) and f.endswith(".apt"):
+                        b_apt = os.path.join(tmp_dir, f)
+                        break
+
+            if not os.path.isfile(b_apt):
+                _dbg(f"Pass 1: Failed to produce {b_apt}!")
+                return f"Failed to extract intermediate APT toolpath for batch {b_idx} (Tool {t_num})."
+
+            batch_apt_files.append(b_apt)
+
+        # -------------------------------------------------------------
+        # PASS 2: Unified Verification & Global Promotion (Single Run)
+        # -------------------------------------------------------------
+        from apt_parser import parse_apt_batches
+        from geometry import Lathe2DIPWVerifier, CollisionKind
+        from pipeline import PipelineOrchestrator
+
+        combined_segments = parse_apt_batches(batch_apt_files)
+        _dbg(f"Pass 2: Combined {len(combined_segments)} motion segments across {len(batches)} batches.")
+
+        verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
+        report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
+
+        base_no_ext = os.path.splitext(path)[0]
+        report_path = base_no_ext + "_report.md"
+        plot_path = base_no_ext + ".png"
+
+        # Generate verification plot (.png)
+        try:
+            from geometry.plotter import generate_verification_plot
+            is_inch = True
+            generate_verification_plot(
+                workpiece=workpiece,
+                final_ipw=getattr(verifier, "ipw", None),
+                chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
+                segments=combined_segments,
+                report=report,
+                tools_by_op=tools_by_op,
+                out_png_path=plot_path,
+                unit_is_inch=is_inch,
+            )
+            _dbg(f"Pass 2: Generated verification plot: {plot_path}")
+        except Exception as pl_exc:
+            _dbg(f"Pass 2: generate_verification_plot exception: {pl_exc}")
+
+        # Generate markdown report (_report.md)
+        summary_md = ""
+        try:
+            orchestrator = PipelineOrchestrator(wrapper_cps=constWrapperScript)
+            summary_md = orchestrator._format_summary_report(report, final_gcode="", base_post_path=base_post_path)
+            with open(report_path, "w", encoding="utf-8") as rf:
+                rf.write(summary_md)
+            _dbg(f"Pass 2: Generated markdown report: {report_path}")
+        except Exception as rep_exc:
+            _dbg(f"Pass 2: report generation exception: {rep_exc}")
+
+        # Check for fatal collisions
+        fatal_cols = [
+            c for c in report.collisions
+            if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
+        ]
+        if fatal_cols:
+            _dbg(f"Pass 2: {len(fatal_cols)} fatal collision(s) detected! Halting machine post pass.")
+            _RecordVerifyResult(
+                setup=setup,
+                cncPath=path,
+                reportText=summary_md,
+                reportPath=report_path,
+                pngPath=plot_path,
+                promoted=0,
+                spikes=len(report.mrr_spikes),
+                volume_mm3=report.total_volume_removed_mm3,
+                collisions=report.collisions,
+                error=f"{len(fatal_cols)} fatal collision(s) detected",
+            )
+            return f"{len(fatal_cols)} fatal collision(s) detected in setup {setup.name}! See {os.path.basename(report_path)} and {os.path.basename(plot_path)}."
+
+        # Partition promotion rules by batch
+        do_promote = bool(docSettings.get("fastZ", False))
+        batch_promoted = {k: {} for k in range(len(batches))}
+        promoted_total = 0
+        if do_promote:
+            for seg in combined_segments:
+                b_idx = seg.metadata.get("batch_idx", 0)
+                v_key_str = seg.vector_key.to_wrapper_str()
+                if v_key_str in report.promoted_vectors:
+                    rule = report.promoted_vectors[v_key_str]
+                    batch_promoted[b_idx][v_key_str] = {"minOccur": rule.min_occur}
+            promoted_total = len(report.promoted_vectors)
+
+        # -------------------------------------------------------------
+        # PASS 3: Per-Batch Promoted Post with Universal Wrapper
+        # -------------------------------------------------------------
+        wrapper_post_obj = _GetPostConfigObj(constWrapperScript)
+        batch_gcode_files = []
+
+        for b_idx, (t_num, op_list) in enumerate(batches):
+            promoted_json_p = os.path.join(tmp_dir, f"promoted_{b_idx}.json")
+            with open(promoted_json_p, "w", encoding="utf-8") as jf:
+                json.dump(batch_promoted[b_idx], jf, indent=2)
+
+            os.environ["BASE_POST"] = os.path.abspath(base_post_path)
+            os.environ["PROMOTED_MOVES_JSON"] = os.path.abspath(promoted_json_p)
+
+            out_prefix = f"gcode_{b_idx}"
+            program.postConfiguration = wrapper_post_obj
+            program.operations = op_list
+            AssignOutputFolder(program.parameters, tmp_dir)
+            program.parameters.itemByName("nc_program_filename").value.value = out_prefix
+            program.parameters.itemByName("nc_program_openInEditor").value.value = False
+
+            _dbg(f"Pass 3: Posting batch {b_idx} with universal_wrapper and {len(batch_promoted[b_idx])} promoted vectors...")
+            post_ok = bool(program.postProcess(opts))
+            time.sleep(constPostLoopDelay)
+
+            cand_gcode = os.path.join(tmp_dir, out_prefix + fileExt)
+            if not os.path.isfile(cand_gcode):
+                for f in os.listdir(tmp_dir):
+                    if f.startswith(out_prefix):
+                        cand_gcode = os.path.join(tmp_dir, f)
+                        break
+
+            if not os.path.isfile(cand_gcode):
+                return f"Universal wrapper failed to emit G-code for batch {b_idx} (Tool {t_num})."
+
+            batch_gcode_files.append(cand_gcode)
+
+        # -------------------------------------------------------------
+        # PASS 4: Stitch and Combine the Promoted G-Code Batches
+        # -------------------------------------------------------------
+        _dbg(f"Pass 4: Stitching {len(batch_gcode_files)} G-code files into {path}...")
+        _StitchGcodeFiles(batch_gcode_files, path, fname, docSettings)
+        _dbg(f"Pass 4: Successfully assembled {path}")
+
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath=path,
+            reportText=summary_md,
+            reportPath=report_path,
+            pngPath=plot_path,
+            promoted=promoted_total,
+            spikes=len(report.mrr_spikes),
+            volume_mm3=report.total_volume_removed_mm3,
+            collisions=report.collisions,
+            error=None,
+        )
+
+        return None
+
+    except Exception as exc:
+        _dbg(f"_PostProcessLathePipeline exception: {traceback.format_exc()}")
+        return f"Lathe pipeline error: {str(exc)}"
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
     ui = None
     fileHead = None
@@ -1900,6 +2347,9 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
         do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
         _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
+
+        if do_lathe_pipeline:
+            return _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
 
         # Do it all at once?
         if not docSettings["splitSetup"]:
