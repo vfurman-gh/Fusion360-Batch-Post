@@ -142,6 +142,7 @@ def generate_turning_holder(
     clearance_x: float = 0.008,
     clearance_z: float = 0.008,
     is_boring: bool = False,
+    **kwargs,
 ) -> Polygon:
     """
     Generate standard rectangular OD turning or ID boring toolholder keep-out polygon.

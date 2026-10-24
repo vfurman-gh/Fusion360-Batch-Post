@@ -106,13 +106,21 @@ def main():
                         blade_depth=t_info.get("blade_depth", 12.0),
                         corner_radius=nose_r,
                     )
-                    holder = generate_turning_holder(
-                        shank_width=shank_w,
-                        shank_length=shank_l,
-                        clearance_x=nose_r,
-                        clearance_z=nose_r,
-                        is_boring=is_boring,
-                    )
+                    try:
+                        holder = generate_turning_holder(
+                            shank_width=shank_w,
+                            shank_length=shank_l,
+                            clearance_x=nose_r,
+                            clearance_z=nose_r,
+                            is_boring=is_boring,
+                        )
+                    except TypeError:
+                        holder = generate_turning_holder(
+                            shank_width=shank_w,
+                            shank_length=shank_l,
+                            clearance_x=nose_r,
+                            clearance_z=nose_r,
+                        )
                 else:  # rhombic / general turning
                     cutter = generate_rhombic_insert(
                         edge_length=t_info.get("edge_length", 9.525),
@@ -121,13 +129,21 @@ def main():
                     )
                     clr_x = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
                     clr_z = max(1.25, nose_r * 3.0) if is_boring else max(0.4, nose_r * 1.5)
-                    holder = generate_turning_holder(
-                        shank_width=shank_w,
-                        shank_length=shank_l,
-                        clearance_x=clr_x,
-                        clearance_z=clr_z,
-                        is_boring=is_boring,
-                    )
+                    try:
+                        holder = generate_turning_holder(
+                            shank_width=shank_w,
+                            shank_length=shank_l,
+                            clearance_x=clr_x,
+                            clearance_z=clr_z,
+                            is_boring=is_boring,
+                        )
+                    except TypeError:
+                        holder = generate_turning_holder(
+                            shank_width=shank_w,
+                            shank_length=shank_l,
+                            clearance_x=clr_x,
+                            clearance_z=clr_z,
+                        )
 
 
                 clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
