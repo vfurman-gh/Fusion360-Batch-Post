@@ -60,8 +60,8 @@ constHomeGcodeSet = {28, 30}
 constLineNumInc = 5
 constNcProgramName = "PostProcessAll NC Program"
 constAddonDir = os.path.dirname(os.path.abspath(__file__))
-constWrapperScript = os.path.join(constAddonDir, "universal_wrapper.cps")
-constAptExtractorScript = os.path.join(constAddonDir, "apt_extractor_wrapper.cps")
+constDumperScript = os.path.join(constAddonDir, "universal_dumper.cps")
+constReplayerScript = os.path.join(constAddonDir, "universal_replayer.cps")
 constPackagesDir = os.path.join(constAddonDir, "packages")
 
 def _dbg_global(msg):
@@ -301,10 +301,16 @@ def GetSetupTypes(cam, selectedSetups, onlySelected):
 
 
 def GetNcProgram(cam, settings):
+    target = None
     for program in cam.ncPrograms:
         if program.name == settings["ncProgram"]:
-            return program
-    return cam.ncPrograms.item(0)
+            target = program
+            break
+    if target is None and cam.ncPrograms.count > 0:
+        target = cam.ncPrograms.item(0)
+    if target is not None:
+        _HealProgramPostConfigIfNeeded(target)
+    return target
 
 
 def RenameSetups(settings, setups, find, replace, isRegex):
@@ -381,6 +387,8 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 if not haveProgram:
                     program = programs.item(0)              
             docSettings["ncProgram"] = program.name
+            for p_item in programs:
+                _HealProgramPostConfigIfNeeded(p_item)
 
             # Connect to the execute event.
             onExecute = CommandExecuteHandler(docSettings, selectedSetups)
@@ -964,72 +972,90 @@ def PerformPostProcess(docSettings, setups):
             cntSetups = 0
             seqDict = dict()
 
-            # We pass through all setups even if only some are selected
-            # so numbering scheme doesn't change.
-            for setup in cam.setups:
-                if progress.wasCancelled:
-                    break
-                if not setup.isSuppressed and setup.allOperations.count != 0:
-                    nameList = setup.name.split(':')    # folder separator
-                    setupFolder = outputFolder
-                    cnt = len(nameList) - 1
-                    i = 0
-                    while i < cnt:
-                        setupFolder += "/" + nameList[i].strip()
-                        i += 1
-                
-                    # keep a separate sequence number for each folder
-                    if setupFolder in seqDict:
-                        seqDict[setupFolder] += 1
-                        # skip if we're not actually including this setup
-                        if setup not in setups:
-                            continue
-                    else:
-                        # first file for this folder
-                        seqDict[setupFolder] = 1
-                        # skip if we're not actually including this setup
-                        if setup not in setups:
-                            continue
+            # Snapshot original NCProgram parameters so the user's NCProgram is never left mutated
+            orig_prog_params = {}
+            for p_key in ("nc_program_name", "nc_program_filename", "nc_program_openInEditor"):
+                try:
+                    p_item = parameters.itemByName(p_key)
+                    if p_item is not None:
+                        orig_prog_params[p_key] = p_item.value.value
+                except Exception:
+                    pass
 
-                        if (docSettings["delFiles"]):
-                            # delete all the files in the folder
-                            try:
-                                for entry in os.scandir(setupFolder):
-                                    if entry.is_file():
-                                        try:
-                                            os.remove(entry.path)
-                                        except:
-                                            pass #ignore errors
-                            except:
-                                pass #ignore errors
-
-                    # prepend sequence number if enabled
-                    fname = nameList[i].strip()
-                    if docSettings["sequence"] or docSettings["numericName"]:
-                        seq = seqDict[setupFolder]
-                        seqStr = str(seq)
-                        if docSettings["twoDigits"] and seq < 10:
-                            seqStr = "0" + seqStr
-                        if docSettings["numericName"]:
-                            fname = seqStr
+            try:
+                # We pass through all setups even if only some are selected
+                # so numbering scheme doesn't change.
+                for setup in cam.setups:
+                    if progress.wasCancelled:
+                        break
+                    if not setup.isSuppressed and setup.allOperations.count != 0:
+                        nameList = setup.name.split(':')    # folder separator
+                        setupFolder = outputFolder
+                        cnt = len(nameList) - 1
+                        i = 0
+                        while i < cnt:
+                            setupFolder += "/" + nameList[i].strip()
+                            i += 1
+                    
+                        # keep a separate sequence number for each folder
+                        if setupFolder in seqDict:
+                            seqDict[setupFolder] += 1
+                            # skip if we're not actually including this setup
+                            if setup not in setups:
+                                continue
                         else:
-                            fname = seqStr + ' ' + fname
+                            # first file for this folder
+                            seqDict[setupFolder] = 1
+                            # skip if we're not actually including this setup
+                            if setup not in setups:
+                                continue
 
-                    # post the file
-                    status = PostProcessSetup(fname, setup, setupFolder, docSettings, program)
-                    if status == None:
-                        cntFiles += 1
-                    else:
-                        cntSkipped += 1
-                        lstSkipped += "\nFailed on setup " + setup.name + ": " + status
-                        
-                cntSetups += 1
-                progress.message = progressMsg.format(cntFiles)
-                progress.progressValue = cntSetups
+                            if (docSettings["delFiles"]):
+                                # delete all the files in the folder
+                                try:
+                                    for entry in os.scandir(setupFolder):
+                                        if entry.is_file():
+                                            try:
+                                                os.remove(entry.path)
+                                            except:
+                                                pass #ignore errors
+                                except:
+                                    pass #ignore errors
 
-            progress.hide()
-            # restore program output folder
-            AssignOutputFolder(parameters, outputFolder)
+                        # prepend sequence number if enabled
+                        fname = nameList[i].strip()
+                        if docSettings["sequence"] or docSettings["numericName"]:
+                            seq = seqDict[setupFolder]
+                            seqStr = str(seq)
+                            if docSettings["twoDigits"] and seq < 10:
+                                seqStr = "0" + seqStr
+                            if docSettings["numericName"]:
+                                fname = seqStr
+                            else:
+                                fname = seqStr + ' ' + fname
+
+                        # post the file
+                        status = PostProcessSetup(fname, setup, setupFolder, docSettings, program)
+                        if status == None:
+                            cntFiles += 1
+                        else:
+                            cntSkipped += 1
+                            lstSkipped += "\nFailed on setup " + setup.name + ": " + status
+                            
+                    cntSetups += 1
+                    progress.message = progressMsg.format(cntFiles)
+                    progress.progressValue = cntSetups
+            finally:
+                progress.hide()
+                # restore program output folder and original NCProgram name/filename parameters
+                AssignOutputFolder(parameters, outputFolder)
+                for p_key, p_val in orig_prog_params.items():
+                    try:
+                        p_item = parameters.itemByName(p_key)
+                        if p_item is not None:
+                            p_item.value.value = p_val
+                    except Exception:
+                        pass
 
         # done with setups, report results
         if cntSkipped != 0:
@@ -1089,54 +1115,260 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=Non
         pass
 
 
-_cached_system_apt_path = None
+_INTERNAL_HELPER_POSTS = (
+    "universal_dumper",
+    "universal_replayer",
+    "apt_extractor_wrapper",
+    "universal_wrapper",
+)
 
 
-def _FindSystemAptPost():
-    """Locate Autodesk's built-in apt.cps post processor dynamically on macOS/Windows."""
-    global _cached_system_apt_path
-    if _cached_system_apt_path and os.path.isfile(_cached_system_apt_path):
-        return _cached_system_apt_path
-
-    env_path = os.environ.get("SYSTEM_APT_CPS")
-    if env_path and os.path.isfile(env_path):
-        _cached_system_apt_path = env_path
-        return _cached_system_apt_path
-
+def _IsInternalHelperPost(post_cfg) -> bool:
+    """Return True if post_cfg refers to one of our internal wrapper/dumper/replayer .cps scripts."""
+    if not post_cfg:
+        return False
+    parts = []
+    for attr in ("description", "name", "postPath", "location", "extension"):
+        val = getattr(post_cfg, attr, None)
+        if val and isinstance(val, str):
+            parts.append(val.lower())
     try:
-        from pipeline import find_autodesk_apt_cps
-        fast_apt = find_autodesk_apt_cps()
-        if fast_apt and os.path.isfile(fast_apt):
-            _cached_system_apt_path = fast_apt
-            return fast_apt
+        if hasattr(post_cfg, "url") and post_cfg.url:
+            u_str = post_cfg.url.toString() if hasattr(post_cfg.url, "toString") else str(post_cfg.url)
+            parts.append(u_str.lower())
     except Exception:
         pass
+    joined = " | ".join(parts)
+    if any(tag in joined for tag in _INTERNAL_HELPER_POSTS):
+        return True
+    if "context dumper" in joined or getattr(post_cfg, "extension", "").lower().lstrip(".") == "json":
+        return True
+    return False
 
-    webdeploy = os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production")
-    if os.path.isdir(webdeploy):
-        for root, dirs, files in os.walk(webdeploy):
-            if "apt.cps" in files and "CAM360/Data/Posts" in root:
-                p = os.path.join(root, "apt.cps")
-                _cached_system_apt_path = p
-                return p
 
-    _cached_system_apt_path = "apt.cps"
-    return "apt.cps"
+def _HealProgramPostConfigIfNeeded(program):
+    """If an NCProgram (e.g. Rapid_Restore) was accidentally left pointing to universal_dumper.cps, restore it to centroid_turning.cps."""
+    if not program:
+        return
+    try:
+        post_cfg = getattr(program, "postConfiguration", None)
+        is_helper = _IsInternalHelperPost(post_cfg)
+        ext_param = None
+        try:
+            ext_param = program.parameters.itemByName("nc_program_nc_extension")
+        except Exception:
+            pass
+        cur_ext = ext_param.value.value if ext_param else ""
+
+        if is_helper:
+            default_p = os.path.join(constAddonDir, "centroid_turning.cps")
+            if os.path.isfile(default_p):
+                healed_cfg = _GetPostConfigObj(default_p)
+                if healed_cfg:
+                    program.postConfiguration = healed_cfg
+                    _dbg_global(f"Auto-healed NCProgram '{program.name}' postConfiguration back to centroid_turning.cps")
+            if ext_param:
+                ext_param.value.value = ".cnc"
+        elif ext_param and cur_ext.lower().lstrip(".") == "json":
+            cfg_ext = getattr(post_cfg, "extension", "") if post_cfg else ""
+            if cfg_ext and cfg_ext.lower().lstrip(".") != "json":
+                ext_param.value.value = "." + cfg_ext.lstrip(".")
+            else:
+                ext_param.value.value = ".cnc"
+
+        # Also heal nc_program_name / nc_program_filename if they were overwritten by a setup name
+        prog_name = getattr(program, "name", "")
+        if prog_name:
+            try:
+                app = adsk.core.Application.get()
+                doc = app.activeDocument if app else None
+                cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId)) if doc else None
+                setup_names = {s.name.split(":")[-1].strip() for s in cam.setups} if cam else set()
+            except Exception:
+                setup_names = set()
+            for p_key in ("nc_program_name", "nc_program_filename"):
+                try:
+                    p_item = program.parameters.itemByName(p_key)
+                    if p_item and p_item.value.value in setup_names and prog_name not in setup_names:
+                        p_item.value.value = prog_name
+                except Exception:
+                    pass
+    except Exception as exc:
+        _dbg_global(f"_HealProgramPostConfigIfNeeded error: {exc}")
 
 
 def _ResolveBasePostPath(program=None):
     """Resolve target machine post processor path from NCProgram or fallback to centroid_turning.cps."""
-    if program and hasattr(program, "postConfiguration") and program.postConfiguration:
-        for attr in ("postPath", "location", "name"):
-            val = getattr(program.postConfiguration, attr, None)
-            if val and isinstance(val, str) and os.path.isfile(val):
-                return val
+    _HealProgramPostConfigIfNeeded(program)
     default_p = os.path.join(constAddonDir, "centroid_turning.cps")
+
+    if program and hasattr(program, "postConfiguration") and program.postConfiguration:
+        post_cfg = program.postConfiguration
+        if not _IsInternalHelperPost(post_cfg):
+            candidates = []
+            for attr in ("postPath", "location", "name"):
+                val = getattr(post_cfg, attr, None)
+                if val and isinstance(val, str):
+                    if os.path.isfile(val):
+                        return os.path.abspath(val)
+                    candidates.append(val)
+            try:
+                if hasattr(post_cfg, "url") and post_cfg.url:
+                    u_str = post_cfg.url.toString() if hasattr(post_cfg.url, "toString") else str(post_cfg.url)
+                    if u_str:
+                        if u_str.startswith("file://"):
+                            import urllib.parse
+                            f_path = urllib.parse.unquote(u_str[len("file://"):])
+                            if os.path.isfile(f_path):
+                                return os.path.abspath(f_path)
+                        candidates.append(os.path.basename(u_str))
+            except Exception:
+                pass
+
+            search_dirs = [
+                os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts"),
+                constAddonDir,
+            ]
+            appdata = os.environ.get("APPDATA", "")
+            if appdata:
+                search_dirs.insert(0, os.path.join(appdata, "Autodesk", "Fusion 360 CAM", "Posts"))
+            try:
+                from pipeline import _find_post_exe
+                post_exe = _find_post_exe()
+                if post_exe:
+                    sys_posts = os.path.join(os.path.dirname(post_exe), "Posts")
+                    if os.path.isdir(sys_posts):
+                        search_dirs.append(sys_posts)
+            except Exception:
+                pass
+
+            for cand in candidates:
+                bname = os.path.basename(cand)
+                if not bname.lower().endswith(".cps"):
+                    bname_cps = bname + ".cps"
+                else:
+                    bname_cps = bname
+                for sdir in search_dirs:
+                    if os.path.isdir(sdir):
+                        p_try = os.path.join(sdir, bname_cps)
+                        if os.path.isfile(p_try):
+                            return os.path.abspath(p_try)
+
     return default_p if os.path.isfile(default_p) else ""
 
 
+def _ExtractPostProperties(program=None) -> dict:
+    """Extract custom post processor properties configured on the user's NCProgram."""
+    props = {}
+    if not program:
+        return props
+    try:
+        post_params = getattr(program, "postParameters", None)
+        if not post_params:
+            return props
+        cnt = getattr(post_params, "count", 0)
+        for idx in range(cnt):
+            try:
+                param = post_params.item(idx)
+                p_name = getattr(param, "name", None)
+                if not p_name:
+                    continue
+                val_obj = getattr(param, "value", None)
+                val = getattr(val_obj, "value", None) if val_obj is not None else None
+                if isinstance(val, (bool, int, float, str)):
+                    props[p_name] = val
+            except Exception:
+                pass
+    except Exception as exc:
+        _dbg_global(f"_ExtractPostProperties warning: {exc}")
+    return props
+
+
+def _EnsureLocalModulesLoaded():
+    """Ensure Add-In directory and packages are on sys.path and reload local modules to avoid stale sys.modules in Fusion 360."""
+    import sys
+    import importlib
+    if constAddonDir not in sys.path:
+        sys.path.insert(0, constAddonDir)
+    if os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
+        sys.path.insert(0, constPackagesDir)
+
+    # Only reload geometry.models if its schema is outdated (preserving class identities for isinstance checks)
+    if "geometry.models" in sys.modules:
+        gm = sys.modules["geometry.models"]
+        ltg = getattr(gm, "LatheToolGeometry", None)
+        if not ltg or "is_boring" not in getattr(ltg, "__dataclass_fields__", {}):
+            try:
+                importlib.reload(gm)
+            except Exception as exc:
+                _dbg_global(f"Reload of geometry.models failed: {exc}")
+
+    local_mod_names = (
+        "geometry.tool_generator",
+        "geometry.stock_generator",
+        "geometry.legacy_adapter",
+        "geometry.lathe_engine",
+        "geometry.plotter",
+        "geometry",
+        "context_parser",
+        "pipeline",
+    )
+    for mod_name in local_mod_names:
+        if mod_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[mod_name])
+            except Exception as exc:
+                _dbg_global(f"Reload of {mod_name} failed: {exc}")
+
+
+def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None):
+    """Write sidecar config for universal_dumper.cps when spawned by Fusion 360's C++ host process."""
+    cfg = {}
+    if base_post_path and os.path.isfile(base_post_path):
+        cfg["basePost"] = os.path.abspath(base_post_path)
+    if target_cnc_path:
+        cfg["targetIntermediateCnc"] = os.path.abspath(target_cnc_path)
+    if post_properties and isinstance(post_properties, dict):
+        cfg["postProperties"] = post_properties
+    for cfg_dir in (tempfile.gettempdir(), "/tmp"):
+        try:
+            if os.path.isdir(cfg_dir):
+                cfg_path = os.path.join(cfg_dir, "universal_dumper_config.json")
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f)
+        except Exception:
+            pass
+
+
+def _ClearDumperConfig():
+    """Remove temporary sidecar config for universal_dumper.cps."""
+    for cfg_dir in (tempfile.gettempdir(), "/tmp"):
+        try:
+            cfg_path = os.path.join(cfg_dir, "universal_dumper_config.json")
+            if os.path.isfile(cfg_path):
+                os.remove(cfg_path)
+        except Exception:
+            pass
+
+
 def _GetPostConfigObj(post_script_path):
-    """Obtain adsk.cam.PostConfiguration object for a .cps script."""
+    """Obtain adsk.cam.PostConfiguration object for a .cps script, syncing to Local Post Library if needed."""
+    if os.path.isfile(post_script_path):
+        local_posts_candidates = [
+            os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts"),
+        ]
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            local_posts_candidates.append(os.path.join(appdata, "Autodesk", "Fusion 360 CAM", "Posts"))
+        for posts_dir in local_posts_candidates:
+            try:
+                if os.path.isdir(posts_dir):
+                    dst_path = os.path.join(posts_dir, os.path.basename(post_script_path))
+                    if not os.path.isfile(dst_path) or os.path.getmtime(post_script_path) > os.path.getmtime(dst_path):
+                        shutil.copy2(post_script_path, dst_path)
+            except Exception as sync_exc:
+                _dbg_global(f"Sync of {post_script_path} to {posts_dir} failed: {sync_exc}")
+
     if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
         try:
             with open(post_script_path, "r", encoding="utf-8") as f:
@@ -1149,10 +1381,23 @@ def _GetPostConfigObj(post_script_path):
             postLib = camMgr.libraryManager.postLibrary
             query = postLib.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
             base_name = os.path.basename(post_script_path).lower()
+            base_stem = os.path.splitext(base_name)[0]
             for p in query.execute():
                 p_name = getattr(p, "name", "").lower()
                 p_desc = getattr(p, "description", "").lower()
-                if base_name in p_name or "apt extractor" in p_desc or "universal" in p_desc:
+                p_url = ""
+                try:
+                    p_url = p.url.toString().lower() if hasattr(p, "url") and hasattr(p.url, "toString") else str(getattr(p, "url", "")).lower()
+                except Exception:
+                    pass
+                if (
+                    base_name == p_name
+                    or base_stem == p_name
+                    or base_name in p_name
+                    or base_name in p_url
+                    or (base_stem == "universal_dumper" and "universal context & event dumper" in p_desc)
+                    or (base_stem == "universal_replayer" and "universal context replayer" in p_desc)
+                ):
                     return p
     except Exception as exc2:
         _dbg_global(f"postLibrary query failed: {exc2}")
@@ -1373,6 +1618,17 @@ def _ExtractToolsFromSetup(setup):
 
 def _BuildToolAssembly(t_info):
     """Reconstruct pure-Python ToolAssembly with exact 2D Shapely geometry."""
+    import sys
+    import importlib
+    if "geometry.tool_generator" in sys.modules:
+        try:
+            tg_mod = sys.modules["geometry.tool_generator"]
+            gth = getattr(tg_mod, "generate_turning_holder", None)
+            if gth and "is_boring" not in getattr(getattr(gth, "__code__", None), "co_varnames", ()):
+                _EnsureLocalModulesLoaded()
+        except Exception:
+            pass
+
     from shapely.geometry import Polygon
     from geometry.tool_generator import (
         generate_rhombic_insert,
@@ -1453,41 +1709,21 @@ def _BuildToolAssembly(t_info):
     return ToolAssembly(tool_id=tool_id, name=op_name, geometry=geom)
 
 
-def _ExtractIntermediateWithApt(setup, target_cnc_path):
+def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None):
     """
-    Extract Compact-NCI intermediate file using apt_extractor_wrapper.cps
+    Extract Compact-NCI intermediate file using universal_dumper.cps
     by querying PostLibrary and posting all valid operations of the setup.
     """
     try:
-        camMgr = adsk.cam.CAMManager.get()
-        libMgr = camMgr.libraryManager if camMgr else None
-        postLib = libMgr.postLibrary if libMgr else None
-        apt_post_obj = None
-        if postLib:
-            try:
-                query = postLib.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
-                for p in query.execute():
-                    if "APT Extractor" in getattr(p, "description", "") or "apt_extractor_wrapper" in getattr(p, "name", ""):
-                        apt_post_obj = p
-                        break
-            except Exception as q_exc:
-                _dbg_global(f"LocalLibrary query threw: {q_exc}")
-
-        if apt_post_obj is None and hasattr(adsk.cam.PostConfiguration, "createFromContent"):
-            try:
-                with open(constAptExtractorScript, "r", encoding="utf-8") as f:
-                    apt_post_obj = adsk.cam.PostConfiguration.createFromContent(f.read())
-            except Exception as cfc_exc:
-                _dbg_global(f"createFromContent threw: {cfc_exc}")
-
-        if not apt_post_obj:
-            _dbg_global("Could not obtain apt_post_obj")
+        dumper_post_obj = _GetPostConfigObj(constDumperScript)
+        if not dumper_post_obj:
+            _dbg_global("Could not obtain dumper_post_obj")
             return None
 
-        # Setup environment variables for capture
-        sys_apt = _FindSystemAptPost()
-        os.environ["SYSTEM_APT_CPS"] = sys_apt
+        if base_post_path and os.path.isfile(base_post_path):
+            os.environ["BASE_POST"] = os.path.abspath(base_post_path)
         os.environ["TARGET_INTERMEDIATE_CNC"] = target_cnc_path
+        _WriteDumperConfig(base_post_path=base_post_path, target_cnc_path=target_cnc_path)
 
         app = adsk.core.Application.get()
         doc = app.activeDocument
@@ -1495,31 +1731,38 @@ def _ExtractIntermediateWithApt(setup, target_cnc_path):
         if not cam or not hasattr(cam, "ncPrograms"):
             return None
 
+        tmp_out_dir = tempfile.gettempdir().replace("\\", "/")
         nc_input = cam.ncPrograms.createInput()
         nc_prog = cam.ncPrograms.add(nc_input)
         try:
-            nc_prog.postConfiguration = apt_post_obj
+            nc_prog.postConfiguration = dumper_post_obj
             valid_ops = [op for op in setup.allOperations if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
             nc_prog.operations = valid_ops if valid_ops else [setup]
             params = nc_prog.parameters
-            AssignOutputFolder(params, tempfile.gettempdir().replace("\\", "/"))
-            params.itemByName("nc_program_filename").value.value = "apt_extract_tmp"
+            AssignOutputFolder(params, tmp_out_dir)
+            params.itemByName("nc_program_filename").value.value = "dumper_extract_tmp"
             params.itemByName("nc_program_openInEditor").value.value = False
             opts = adsk.cam.NCProgramPostProcessOptions.create()
             if hasattr(opts, "isFailOnToolNumberDuplication"):
                 opts.isFailOnToolNumberDuplication = False
             nc_prog.postProcess(opts)
         finally:
+            _ClearDumperConfig()
             try:
                 nc_prog.deleteMe()
             except Exception:
                 pass
 
+        if not os.path.isfile(target_cnc_path):
+            fallback_cnc = os.path.join(tmp_out_dir, "dumper_extract_tmp.json.intermediate.cnc")
+            if os.path.isfile(fallback_cnc):
+                shutil.copy2(fallback_cnc, target_cnc_path)
+
         if os.path.isfile(target_cnc_path):
-            _dbg_global(f"_ExtractIntermediateWithApt successfully created {target_cnc_path}")
+            _dbg_global(f"_ExtractIntermediateWithDumper successfully created {target_cnc_path}")
             return target_cnc_path
     except Exception as exc:
-        _dbg_global(f"_ExtractIntermediateWithApt threw: {exc}")
+        _dbg_global(f"_ExtractIntermediateWithDumper threw: {exc}")
     return None
 
 
@@ -1527,9 +1770,9 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     """
     Execute 6-stage toolpath verification and rapid-promotion pipeline:
     1. Ingest WorkpieceDefinition and ToolAssembly models analytically from Setup.
-    2. Extract ISO 4343 APT toolpath and Compact-NCI (.cnc) via apt_extractor_wrapper.cps.
+    2. Extract full post context (.json) and Compact-NCI (.cnc) via universal_dumper.cps.
     3. Simulate 2D IPW stock removal and verify collisions via Lathe2DIPWVerifier.
-    4. If fastZ is enabled, restore native G0 rapid moves via universal_wrapper.cps.
+    4. If fastZ is enabled, restore native G0 rapid moves via universal_replayer.cps.
     5. Compile markdown verification report and generate high-res verification plot (.png).
     """
     _dbg = _dbg_global
@@ -1557,23 +1800,12 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         reportPath = basePath + "_report.md"
         plotPath = basePath + ".png"
 
-        # Ensure add-on root and packages are in sys.path
-        import sys
-        if constAddonDir not in sys.path:
-            sys.path.insert(0, constAddonDir)
-        if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
-            sys.path.insert(0, constPackagesDir)
+        # Ensure add-on root and packages are in sys.path and reload local modules
+        _EnsureLocalModulesLoaded()
 
         can_import_in_process = False
         try:
-            import importlib
             import shapely
-            import pipeline
-            importlib.reload(pipeline)
-            import geometry.lathe_engine
-            importlib.reload(geometry.lathe_engine)
-
-
             from geometry import (
                 Lathe2DIPWVerifier,
                 ToolAssembly,
@@ -1585,7 +1817,6 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             can_import_in_process = True
         except (ImportError, OSError):
             can_import_in_process = False
-
 
         # Ingest workpiece and tools directly from native Fusion Setup API
         workpiece = _ExtractWorkpieceFromSetup(setup)
@@ -1636,14 +1867,18 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             _dbg(f"RunLatheVerifier: workpiece extraction returned None! Skipping {cncPath}")
             return None
 
+        # Base post processor configuration
+        if not base_post or not isinstance(base_post, str) or not os.path.isfile(base_post):
+            base_post = os.path.join(constAddonDir, "centroid_turning.cps")
+        if not os.path.isfile(base_post):
+            return f"Base machine post processor not found: {base_post}"
+
         # Locate intermediate Compact-NCI (.cnc)
         intermediate_path = cncPath + ".intermediate.cnc"
         if not os.path.isfile(intermediate_path):
             cand_list = [
                 base_no_ext + ".intermediate.cnc",
-                base_no_ext + ".apt.intermediate.cnc",
                 os.path.join(tempfile.gettempdir(), os.path.basename(base_no_ext) + ".intermediate.cnc"),
-                os.path.join(tempfile.gettempdir(), os.path.basename(base_no_ext) + ".apt.intermediate.cnc"),
             ]
             for cand in cand_list:
                 if os.path.isfile(cand):
@@ -1651,7 +1886,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                     break
 
         if not os.path.isfile(intermediate_path) and setup:
-            extracted = _ExtractIntermediateWithApt(setup, base_no_ext + ".intermediate.cnc")
+            extracted = _ExtractIntermediateWithDumper(setup, base_no_ext + ".intermediate.cnc", base_post_path=base_post)
             if extracted and os.path.isfile(extracted):
                 intermediate_path = extracted
 
@@ -1660,56 +1895,27 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             _dbg(f"RunLatheVerifier: Intermediate toolpath not found for {cncPath}! Skipping verification.")
             return None
 
-
-        # Base post processor configuration
-        if not base_post or not isinstance(base_post, str) or not os.path.isfile(base_post):
-            base_post = os.path.join(constAddonDir, "centroid_turning.cps")
-        if not os.path.isfile(base_post):
-            return f"Base machine post processor not found: {base_post}"
-
         if can_import_in_process:
             if tools_data:
                 tools_by_op = {name: _BuildToolAssembly(t_info) for name, t_info in tools_data.items()}
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
             orchestrator = PipelineOrchestrator(
-                wrapper_cps=os.path.join(constAddonDir, "universal_wrapper.cps")
+                dumper_cps=constDumperScript,
+                replayer_cps=constReplayerScript,
             )
 
             # Run 6-stage end-to-end pipeline in-process
-            try:
-                report, final_gcode = orchestrator.run(
-                    intermediate_cnc_path=intermediate_path,
-                    base_post_path=base_post,
-                    workpiece=workpiece,
-                    tools_by_op=tools_by_op,
-                    verifier=verifier,
-                    final_cnc_path=cncPath,
-                    report_output_path=reportPath,
-                    plot_output_path=plotPath,
-                )
-            except TypeError:
-                report, final_gcode = orchestrator.run(
-                    intermediate_cnc_path=intermediate_path,
-                    base_post_path=base_post,
-                    workpiece=workpiece,
-                    tools_by_op=tools_by_op,
-                    verifier=verifier,
-                    final_cnc_path=cncPath,
-                    report_output_path=reportPath,
-                )
-                try:
-                    from geometry.plotter import generate_verification_plot
-                    generate_verification_plot(
-                        stock=workpiece.stock,
-                        fixtures=workpiece.fixtures,
-                        tools_by_op=tools_by_op,
-                        motion_segments=report.evaluated_moves,
-                        collisions=report.collisions,
-                        output_path=plotPath,
-                    )
-                except Exception:
-                    pass
-
+            report, final_gcode = orchestrator.run(
+                intermediate_cnc_path=intermediate_path,
+                base_post_path=base_post,
+                workpiece=workpiece,
+                tools_by_op=tools_by_op,
+                verifier=verifier,
+                final_cnc_path=cncPath,
+                report_output_path=reportPath,
+                plot_output_path=plotPath,
+                promote=promote,
+            )
 
             fatal_cols = [
                 c for c in report.collisions
@@ -1906,174 +2112,39 @@ def _OpenFile(path):
         return str(exc)
 
 
-def _StitchGcodeFiles(batch_files, output_path, fname, docSettings):
-    """
-    Stitch multiple single-tool G-code files into a single unified NC program.
-    Extracts header from the first file, injects tool change blocks between tools,
-    updates sequence numbers (Nxx), and appends the final program tail.
-    """
-    if not batch_files:
-        return
-    if len(batch_files) == 1:
-        shutil.copyfile(batch_files[0], output_path)
-        return
-
-    regToolComment = re.compile(r"\(T[0-9]+\s|;T[0-9]+\s", re.IGNORECASE)
-    regBody = re.compile(
-        r"(?P<N>N[0-9]+ *)?(?P<line>(M(?P<M>[0-9]+) *)?(G(?P<G>[0-9]+) *)?(T(?P<T>[0-9]+))?.+)",
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    endCodes = docSettings.get("endCodes", "M30:M2")
-    endGcodes = set(int(c) for c in re.findall(r"G([0-9]+)", endCodes))
-    endMcodes = set(int(c) for c in re.findall(r"M([0-9]+)", endCodes))
-
-    toolChange = docSettings.get("toolChange", "")
-    fToolChangeNum = False
-    if len(toolChange) != 0:
-        toolChange = toolChange.replace(":", "\n") + "\n"
-        match = regBody.match(toolChange).groupdict()
-        if match["N"] is not None:
-            fToolChangeNum = True
-            toolChange = match["line"].splitlines(True)
-
-    fileHead = io.StringIO()
-    tmpBody = tempfile.NamedTemporaryFile("w+", encoding="utf8", delete=False)
-    tmpBodyName = tmpBody.name
-
-    lineNum = 10
-    fFirst = True
-    tailGcode = ""
-
-    try:
-        for b_idx, b_path in enumerate(batch_files):
-            if not os.path.isfile(b_path):
-                continue
-            with open(b_path, "r", encoding="utf8", errors="replace") as fileOp:
-                fBlankOk = False
-                if not fFirst:
-                    tmpBody.write("\n")
-
-                line = fileOp.readline()
-                if not line:
-                    continue
-                if line[0] == "%":
-                    if fFirst:
-                        fileHead.write(line)
-                    line = fileOp.readline()
-
-                # Header comments
-                while line and (line[0] in ("(", ";", "O", "\n")):
-                    if line[0] == "\n":
-                        fBlankOk = True
-                    if regToolComment.match(line):
-                        if fFirst:
-                            fileHead.write(line)
-                        line = fileOp.readline()
-                        break
-                    if fFirst:
-                        fileHead.write(line)
-                    line = fileOp.readline()
-
-                # Find tool change or start of body
-                while line:
-                    m = regBody.match(line)
-                    if not m:
-                        line = fileOp.readline()
-                        continue
-                    mdict = m.groupdict()
-                    line_clean = mdict["line"]
-                    fNum = mdict["N"] is not None
-
-                    if mdict["T"] is not None:
-                        if not fFirst and len(toolChange) != 0:
-                            if fToolChangeNum:
-                                for code in toolChange:
-                                    tmpBody.write(f"N{lineNum} {code}")
-                                    lineNum += constLineNumInc
-                            else:
-                                tmpBody.write(toolChange)
-                        break
-
-                    if fFirst or line[0] in ("(", ";"):
-                        if fNum:
-                            tmpBody.write(f"N{lineNum} ")
-                            lineNum += constLineNumInc
-                        tmpBody.write(line_clean)
-                    line = fileOp.readline()
-
-                # Body lines
-                lineFull = line
-                while lineFull:
-                    m = regBody.match(lineFull)
-                    if not m:
-                        lineFull = fileOp.readline()
-                        continue
-                    mdict = m.groupdict()
-                    line_clean = mdict["line"]
-                    fNum = mdict["N"] is not None
-
-                    # Check end marker
-                    endM = mdict["M"]
-                    if endM is not None and int(endM) in endMcodes:
-                        break
-                    endG = mdict["G"]
-                    if endG is not None and int(endG) in endGcodes:
-                        break
-
-                    if fNum:
-                        tmpBody.write(f"N{lineNum} ")
-                        lineNum += constLineNumInc
-                    tmpBody.write(line_clean)
-
-                    lineFull = fileOp.readline()
-
-                # Capture tail from the last batch
-                if b_idx == len(batch_files) - 1 and lineFull:
-                    tailGcode = lineFull + fileOp.read()
-
-                fFirst = False
-
-        if len(tailGcode) != 0:
-            for code in tailGcode.splitlines(True):
-                m = regBody.match(code)
-                if m and m.groupdict()["N"] is not None:
-                    tmpBody.write(f"N{lineNum} {m.groupdict()['line']}")
-                    lineNum += constLineNumInc
-                else:
-                    tmpBody.write(code)
-
-        tmpBody.close()
-
-        with open(tmpBodyName, "r", encoding="utf8", errors="replace") as rb:
-            with open(output_path, "w", encoding="utf8") as outFile:
-                outFile.write(fileHead.getvalue())
-                shutil.copyfileobj(rb, outFile)
-    finally:
-        if os.path.exists(tmpBodyName):
-            try:
-                os.remove(tmpBodyName)
-            except Exception:
-                pass
-
-
 def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt):
     """
-    Robust 4-pass turning pipeline for Fusion Personal Edition & multi-tool setups:
-    Pass 1: Extract separate intermediate APT toolpaths per single-tool batch.
-    Pass 2: Ingest all batch toolpaths into a continuous sequence and run unified 2D IPW verification.
-    Pass 3: Post each single-tool batch through universal_wrapper.cps with batch-specific promotion rules.
-    Pass 4: Assemble and stitch the promoted single-tool G-code outputs into the final NC program.
+    2-pass Context-Dump & Single-Pass Replay turning pipeline for Fusion Personal Edition & multi-tool setups:
+    Pass 1 (Context Extraction): Post each single-tool batch inside Fusion using universal_dumper.cps
+            (inheriting vendor BASE_POST settings) to emit batch_i.json and capture a bootstrap .cnc.
+    Pass 2 (Merge, Unified Verification & Single-Pass Replay):
+            - Merge all batch_i.json files into a unified multi-section context dump.
+            - Extract continuous MotionSegments across all tools and run a single Lathe2DIPWVerifier pass.
+            - Generate verification plot (.png) and markdown report (_report.md); halt on fatal collisions.
+            - Stamp promoted rapid flags onto the merged context and invoke universal_replayer.cps once
+              with the unmodified vendor post to emit the final combined G-code program.
     """
     _dbg = _dbg_global
     _dbg(f"_PostProcessLathePipeline entered for {fname}, path={path}")
 
-    # 1. Base post processor resolution
+    # 0. Ensure Add-In modules are on sys.path and reloaded in Fusion's persistent interpreter
+    _EnsureLocalModulesLoaded()
+
+    # 1. Base post processor & custom post properties resolution (from user's NCProgram)
     base_post_path = _ResolveBasePostPath(program)
     if not base_post_path or not os.path.isfile(base_post_path):
         base_post_path = os.path.join(constAddonDir, "centroid_turning.cps")
     if not os.path.isfile(base_post_path):
         return f"Base machine post processor not found: {base_post_path}"
+    post_props = _ExtractPostProperties(program)
+    _dbg(f"_PostProcessLathePipeline: base_post_path={base_post_path}, post_props={post_props}")
+
+    # Ensure output path never uses .json extension
+    if path.lower().endswith(".json"):
+        ext_fix = fileExt if (fileExt and fileExt.lower().lstrip(".") != "json") else ".cnc"
+        if not ext_fix.startswith("."):
+            ext_fix = "." + ext_fix
+        path = os.path.splitext(path)[0] + ext_fix
 
     # 2. Extract workpiece and tools from native Setup model
     workpiece = _ExtractWorkpieceFromSetup(setup)
@@ -2108,55 +2179,101 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         return "No active operations to post process."
 
     tmp_dir = tempfile.mkdtemp(prefix="lathe_pipe_")
+    tmp_prog = None
     try:
         # -------------------------------------------------------------
-        # PASS 1: Extract separate intermediate APT files per batch
+        # PASS 1: Extract full post context (.json) per single-tool batch
+        # Use a temporary NCProgram so the user's NCProgram (Rapid_Restore)
+        # retains its selected vendor post processor and custom postParameters.
         # -------------------------------------------------------------
-        apt_post_obj = _GetPostConfigObj(constAptExtractorScript)
-        batch_apt_files = []
+        app = adsk.core.Application.get()
+        cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType(constCAMProductId))
+        nc_input = cam.ncPrograms.createInput()
+        nc_input.displayName = "_Tmp_Lathe_Context_Dumper"
+        tmp_prog = cam.ncPrograms.add(nc_input)
+        try:
+            tmp_prog.parameters.itemByName("nc_program_createInBrowser").value.value = False
+        except Exception:
+            pass
+
+        dumper_post_obj = _GetPostConfigObj(constDumperScript)
+        batch_json_files = []
+        bootstrap_cnc = os.path.join(tmp_dir, "bootstrap.intermediate.cnc")
         opts = adsk.cam.NCProgramPostProcessOptions.create()
         if hasattr(opts, "isFailOnToolNumberDuplication"):
             opts.isFailOnToolNumberDuplication = False
 
         for b_idx, (t_num, op_list) in enumerate(batches):
             b_prefix = f"batch_{b_idx}"
-            b_apt = os.path.join(tmp_dir, f"{b_prefix}.apt")
-            b_inter = os.path.join(tmp_dir, f"{b_prefix}.intermediate.cnc")
+            b_json = os.path.join(tmp_dir, f"{b_prefix}.json")
 
-            os.environ["SYSTEM_APT_CPS"] = _FindSystemAptPost()
-            os.environ["TARGET_INTERMEDIATE_CNC"] = b_inter
+            os.environ["BASE_POST"] = os.path.abspath(base_post_path)
+            if b_idx == 0:
+                os.environ["TARGET_INTERMEDIATE_CNC"] = bootstrap_cnc
+                _WriteDumperConfig(
+                    base_post_path=base_post_path,
+                    target_cnc_path=bootstrap_cnc,
+                    post_properties=post_props,
+                )
+            else:
+                os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
+                _WriteDumperConfig(
+                    base_post_path=base_post_path,
+                    target_cnc_path=None,
+                    post_properties=post_props,
+                )
 
-            program.postConfiguration = apt_post_obj
-            program.operations = op_list
-            AssignOutputFolder(program.parameters, tmp_dir)
-            program.parameters.itemByName("nc_program_filename").value.value = b_prefix
-            program.parameters.itemByName("nc_program_openInEditor").value.value = False
+            tmp_prog.postConfiguration = dumper_post_obj
+            tmp_prog.operations = op_list
+            AssignOutputFolder(tmp_prog.parameters, tmp_dir)
+            tmp_prog.parameters.itemByName("nc_program_filename").value.value = b_prefix
+            tmp_prog.parameters.itemByName("nc_program_openInEditor").value.value = False
 
-            _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with apt_extractor_wrapper...")
-            post_ok = bool(program.postProcess(opts))
+            _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps...")
+            post_ok = bool(tmp_prog.postProcess(opts))
             time.sleep(constPostLoopDelay)
 
-            if not os.path.isfile(b_apt):
-                # Search tmp_dir for emitted apt file
+            if not os.path.isfile(b_json):
                 for f in os.listdir(tmp_dir):
-                    if f.startswith(b_prefix) and f.endswith(".apt"):
-                        b_apt = os.path.join(tmp_dir, f)
+                    if f.startswith(b_prefix) and f.endswith(".json"):
+                        b_json = os.path.join(tmp_dir, f)
                         break
 
-            if not os.path.isfile(b_apt):
-                _dbg(f"Pass 1: Failed to produce {b_apt}!")
-                return f"Failed to extract intermediate APT toolpath for batch {b_idx} (Tool {t_num})."
+            if not os.path.isfile(b_json):
+                _dbg(f"Pass 1: Failed to produce {b_json}!")
+                return f"Failed to dump post context for batch {b_idx} (Tool {t_num})."
 
-            batch_apt_files.append(b_apt)
+            if b_idx == 0 and not os.path.isfile(bootstrap_cnc):
+                fallback_inter = b_json + ".intermediate.cnc"
+                if os.path.isfile(fallback_inter):
+                    shutil.copy2(fallback_inter, bootstrap_cnc)
+
+            batch_json_files.append(b_json)
 
         # -------------------------------------------------------------
-        # PASS 2: Unified Verification & Global Promotion (Single Run)
+        # PASS 2: Merge Contexts, Unified Verification & Single-Pass Replay
         # -------------------------------------------------------------
-        from apt_parser import parse_apt_batches
+        from context_parser import (
+            merge_context_dumps,
+            parse_context_dump,
+            apply_promotions_to_context,
+            extract_workpiece_from_context,
+            extract_tools_from_context,
+        )
         from geometry import Lathe2DIPWVerifier, CollisionKind
         from pipeline import PipelineOrchestrator
 
-        combined_segments = parse_apt_batches(batch_apt_files)
+        combined_ctx = merge_context_dumps(batch_json_files)
+        # Override programName with the target setup filename and forward custom post properties
+        combined_ctx["programName"] = str(fname)
+        if post_props:
+            combined_ctx["postProperties"] = post_props
+
+        # Refine workpiece (WCS frame) and tools (exact kernel SVG cutter/holder profiles) from context dump
+        workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=workpiece)
+        tools_by_op = extract_tools_from_context(combined_ctx, fallback_tools=tools_by_op)
+
+        combined_segments = parse_context_dump(combined_ctx)
         _dbg(f"Pass 2: Combined {len(combined_segments)} motion segments across {len(batches)} batches.")
 
         verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
@@ -2169,7 +2286,7 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         # Generate verification plot (.png)
         try:
             from geometry.plotter import generate_verification_plot
-            is_inch = True
+            is_inch = (combined_ctx.get("unit", 1) == 0)
             generate_verification_plot(
                 workpiece=workpiece,
                 final_ipw=getattr(verifier, "ipw", None),
@@ -2184,24 +2301,21 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         except Exception as pl_exc:
             _dbg(f"Pass 2: generate_verification_plot exception: {pl_exc}")
 
-        # Generate markdown report (_report.md)
-        summary_md = ""
-        try:
-            orchestrator = PipelineOrchestrator(wrapper_cps=constWrapperScript)
-            summary_md = orchestrator._format_summary_report(report, final_gcode="", base_post_path=base_post_path)
-            with open(report_path, "w", encoding="utf-8") as rf:
-                rf.write(summary_md)
-            _dbg(f"Pass 2: Generated markdown report: {report_path}")
-        except Exception as rep_exc:
-            _dbg(f"Pass 2: report generation exception: {rep_exc}")
+        orchestrator = PipelineOrchestrator(
+            dumper_cps=constDumperScript,
+            replayer_cps=constReplayerScript,
+        )
 
-        # Check for fatal collisions
+        # Check for fatal collisions before replaying vendor post
         fatal_cols = [
             c for c in report.collisions
             if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
         ]
         if fatal_cols:
-            _dbg(f"Pass 2: {len(fatal_cols)} fatal collision(s) detected! Halting machine post pass.")
+            _dbg(f"Pass 2: {len(fatal_cols)} fatal collision(s) detected! Halting machine post replay.")
+            summary_md = orchestrator._format_summary_report(report, final_gcode="", base_post_path=base_post_path)
+            with open(report_path, "w", encoding="utf-8") as rf:
+                rf.write(summary_md)
             _RecordVerifyResult(
                 setup=setup,
                 cncPath=path,
@@ -2216,62 +2330,29 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             )
             return f"{len(fatal_cols)} fatal collision(s) detected in setup {setup.name}! See {os.path.basename(report_path)} and {os.path.basename(plot_path)}."
 
-        # Partition promotion rules by batch
+        # Stamp promoted rapid flags directly onto the merged context
         do_promote = bool(docSettings.get("fastZ", False))
-        batch_promoted = {k: {} for k in range(len(batches))}
         promoted_total = 0
-        if do_promote:
-            for seg in combined_segments:
-                b_idx = seg.metadata.get("batch_idx", 0)
-                v_key_str = seg.vector_key.to_wrapper_str()
-                if v_key_str in report.promoted_vectors:
-                    rule = report.promoted_vectors[v_key_str]
-                    batch_promoted[b_idx][v_key_str] = {"minOccur": rule.min_occur}
-            promoted_total = len(report.promoted_vectors)
+        if do_promote and report.promoted_vectors:
+            promoted_total = apply_promotions_to_context(
+                combined_ctx, report.promoted_vectors
+            )
 
-        # -------------------------------------------------------------
-        # PASS 3: Per-Batch Promoted Post with Universal Wrapper
-        # -------------------------------------------------------------
-        wrapper_post_obj = _GetPostConfigObj(constWrapperScript)
-        batch_gcode_files = []
+        # Single-pass replay of the unmodified vendor post across all merged sections
+        _dbg(f"Pass 2: Replaying merged context ({len(combined_ctx.get('sections', []))} sections, {promoted_total} promoted moves) with universal_replayer.cps...")
+        final_gcode = orchestrator.replay_combined_context(
+            combined_context=combined_ctx,
+            base_post_path=base_post_path,
+            bootstrap_cnc_path=bootstrap_cnc,
+            final_cnc_path=path,
+        )
+        _dbg(f"Pass 2: Successfully emitted combined NC program at {path}")
 
-        for b_idx, (t_num, op_list) in enumerate(batches):
-            promoted_json_p = os.path.join(tmp_dir, f"promoted_{b_idx}.json")
-            with open(promoted_json_p, "w", encoding="utf-8") as jf:
-                json.dump(batch_promoted[b_idx], jf, indent=2)
-
-            os.environ["BASE_POST"] = os.path.abspath(base_post_path)
-            os.environ["PROMOTED_MOVES_JSON"] = os.path.abspath(promoted_json_p)
-
-            out_prefix = f"gcode_{b_idx}"
-            program.postConfiguration = wrapper_post_obj
-            program.operations = op_list
-            AssignOutputFolder(program.parameters, tmp_dir)
-            program.parameters.itemByName("nc_program_filename").value.value = out_prefix
-            program.parameters.itemByName("nc_program_openInEditor").value.value = False
-
-            _dbg(f"Pass 3: Posting batch {b_idx} with universal_wrapper and {len(batch_promoted[b_idx])} promoted vectors...")
-            post_ok = bool(program.postProcess(opts))
-            time.sleep(constPostLoopDelay)
-
-            cand_gcode = os.path.join(tmp_dir, out_prefix + fileExt)
-            if not os.path.isfile(cand_gcode):
-                for f in os.listdir(tmp_dir):
-                    if f.startswith(out_prefix):
-                        cand_gcode = os.path.join(tmp_dir, f)
-                        break
-
-            if not os.path.isfile(cand_gcode):
-                return f"Universal wrapper failed to emit G-code for batch {b_idx} (Tool {t_num})."
-
-            batch_gcode_files.append(cand_gcode)
-
-        # -------------------------------------------------------------
-        # PASS 4: Stitch and Combine the Promoted G-Code Batches
-        # -------------------------------------------------------------
-        _dbg(f"Pass 4: Stitching {len(batch_gcode_files)} G-code files into {path}...")
-        _StitchGcodeFiles(batch_gcode_files, path, fname, docSettings)
-        _dbg(f"Pass 4: Successfully assembled {path}")
+        summary_md = orchestrator._format_summary_report(
+            report, final_gcode=final_gcode, base_post_path=base_post_path, restored_count=promoted_total
+        )
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write(summary_md)
 
         _RecordVerifyResult(
             setup=setup,
@@ -2292,6 +2373,12 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         _dbg(f"_PostProcessLathePipeline exception: {traceback.format_exc()}")
         return f"Lathe pipeline error: {str(exc)}"
     finally:
+        _ClearDumperConfig()
+        if tmp_prog is not None:
+            try:
+                tmp_prog.deleteMe()
+            except Exception:
+                pass
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
@@ -2310,16 +2397,25 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         ui  = app.userInterface
         doc = app.activeDocument
         cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
+        _HealProgramPostConfigIfNeeded(program)
         parameters = program.parameters
 
         # Verify file name is valid by creating it now
         fileExt = parameters.itemByName("nc_program_nc_extension").value.value
+        if fileExt and fileExt.lower().lstrip(".") == "json":
+            fileExt = ".cnc"
+            try:
+                parameters.itemByName("nc_program_nc_extension").value.value = ".cnc"
+            except Exception:
+                pass
         path = setupFolder + "/" + fname + fileExt
+        is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
+        do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf8"):
                 pass
-            if docSettings["splitSetup"]:
+            if docSettings["splitSetup"] or do_lathe_pipeline:
                 os.remove(path)
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
@@ -2330,6 +2426,13 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
             while not genStat.isGenerationCompleted:
                 time.sleep(.1)
 
+        _dbg = _dbg_global
+        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, splitSetup={docSettings.get('splitSetup')}")
+        _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
+
+        if do_lathe_pipeline:
+            return _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
+
         # Post directly to setupFolder/fname so Fusion's toast notification links to the real output file
         opName = fname
         opFolder = setupFolder
@@ -2339,17 +2442,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         AssignOutputFolder(parameters, opFolder)
         parameters.itemByName("nc_program_filename").value.value = opName
         parameters.itemByName("nc_program_name").value.value = fname
-
-        _dbg = _dbg_global
-        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, splitSetup={docSettings.get('splitSetup')}")
-
-        # Check if lathe verification pipeline should handle this setup
-        is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
-        do_lathe_pipeline = is_turning and (docSettings.get("verifyGcode", True) or docSettings.get("fastZ", False))
-        _dbg(f"is_turning={is_turning}, do_lathe_pipeline={do_lathe_pipeline}")
-
-        if do_lathe_pipeline:
-            return _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, path, fileExt)
 
         # Do it all at once?
         if not docSettings["splitSetup"]:
@@ -2377,12 +2469,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
                     _dbg(f"Posting failed on setup {setup.name}")
                     return "Fusion reported an error during post processing."
                 time.sleep(constPostLoopDelay) # files missing sometimes unless we slow down (??)
-                if do_lathe_pipeline:
-                    base_post_path = _ResolveBasePostPath(program)
-                    _dbg(f"Calling RunLatheVerifier for {path} with base_post={base_post_path}...")
-                    res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
-                    _dbg(f"RunLatheVerifier returned: {res}")
-                    return res
                 return None
             except Exception as exc:
                 try:
@@ -2749,12 +2835,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program):
         fileHead.close()
         fileHead = None
 
-        if do_lathe_pipeline:
-            base_post_path = _ResolveBasePostPath(program)
-            _dbg(f"splitSetup: Calling RunLatheVerifier for {path} with base_post={base_post_path}...")
-            res = RunLatheVerifier(path, setup, docSettings, base_post=base_post_path)
-            _dbg(f"splitSetup: RunLatheVerifier returned: {res}")
-            return res
         return None
 
     except:

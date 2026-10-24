@@ -115,7 +115,6 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
 
             self.assertIn("N32 G0 X0.47", final_gcode)
             self.assertIn("N34 G1 X0.49 Z-0.07 F0.002", final_gcode)
-            self.assertIn(";UNIVERSAL WRAPPER RESTORED", final_gcode)
 
             # Verify report markdown exists
             report_md_path = os.path.splitext(cnc_output)[0] + "_report.md"
@@ -303,12 +302,40 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             # Since workpiece was not defined on DummySetup, it safely returns None or error, but does not crash
             self.assertIsNone(err)
 
-    def test_find_system_apt_post(self):
-        """Verify _FindSystemAptPost locates apt.cps or falls back cleanly."""
-        from PostProcessAll import _FindSystemAptPost
-        apt_path = _FindSystemAptPost()
-        self.assertIsInstance(apt_path, str)
-        self.assertTrue(apt_path.endswith("apt.cps"))
+    def test_dumper_and_replayer_scripts_exist(self):
+        """Verify constDumperScript and constReplayerScript point to existing .cps scripts."""
+        from PostProcessAll import constDumperScript, constReplayerScript
+        self.assertTrue(os.path.isfile(constDumperScript))
+        self.assertTrue(os.path.isfile(constReplayerScript))
+        self.assertTrue(constDumperScript.endswith("universal_dumper.cps"))
+        self.assertTrue(constReplayerScript.endswith("universal_replayer.cps"))
+
+    def test_stale_sys_modules_auto_reloaded_in_build_tool_assembly(self):
+        """Simulate Fusion 360 persistent Python interpreter holding a stale generate_turning_holder without is_boring."""
+        from PostProcessAll import _BuildToolAssembly
+        import geometry.tool_generator as tg
+
+        # Replace generate_turning_holder with a legacy signature lacking 'is_boring'
+        def legacy_generate_turning_holder(shank_width, shank_length, clearance_x=0.008, clearance_z=0.008):
+            raise AssertionError("Stale legacy_generate_turning_holder should have been reloaded!")
+
+        tg.generate_turning_holder = legacy_generate_turning_holder
+
+        t_info = {
+            "tool_id": 6,
+            "name": "Profile Roughing8",
+            "insert_shape": "rhombic",
+            "is_boring": True,
+            "hand": "R",
+            "edge_length": 9.525,
+            "nose_radius": 0.4,
+            "lead_angle": 5.0,
+            "shank_width": 16.0,
+            "shank_length": 100.0,
+        }
+        asm = _BuildToolAssembly(t_info)
+        self.assertEqual(asm.tool_id, 6)
+        self.assertTrue(asm.geometry.is_boring)
 
 
 if __name__ == "__main__":

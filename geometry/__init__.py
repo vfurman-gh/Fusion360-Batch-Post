@@ -35,6 +35,11 @@ except (ImportError, OSError):
     Lathe2DIPWVerifier = None
 
 try:
+    from .mill_engine import MillClearanceVerifier
+except (ImportError, OSError):
+    MillClearanceVerifier = None
+
+try:
     from .tool_generator import (
         generate_rhombic_insert,
         generate_grooving_insert,
@@ -96,6 +101,7 @@ __all__ = [
     "VerificationReport",
     "IVerificationEngine",
     "Lathe2DIPWVerifier",
+    "MillClearanceVerifier",
     "generate_rhombic_insert",
     "generate_grooving_insert",
     "generate_drill_cutter",

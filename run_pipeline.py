@@ -32,7 +32,8 @@ def main():
     parser.add_argument("--final-cnc", required=True, help="Path to final output machine G-code (.cnc)")
     parser.add_argument("--report", required=True, help="Path to verification markdown report (.md)")
     parser.add_argument("--plot", help="Path to verification plot image (.png)")
-    parser.add_argument("--wrapper", default=os.path.join(_SCRIPT_DIR, "universal_wrapper.cps"), help="Path to universal_wrapper.cps")
+    parser.add_argument("--dumper", default=os.path.join(_SCRIPT_DIR, "universal_dumper.cps"), help="Path to universal_dumper.cps")
+    parser.add_argument("--replayer", default=os.path.join(_SCRIPT_DIR, "universal_replayer.cps"), help="Path to universal_replayer.cps")
     parser.add_argument("--meta-gcode", help="Path to G-code file containing metadata comments")
     parser.add_argument("--stock-json", help="JSON string for WorkpieceDefinition")
     parser.add_argument("--fixtures-json", help="JSON string for fixtures / chuck obstacles")
@@ -179,7 +180,6 @@ def main():
 
     for line in gcode_content.splitlines():
         if not workpiece and line.startswith(";META_STOCK:"):
-
             workpiece = parse_legacy_stock(line)
             if is_inch and workpiece.stock and isinstance(workpiece.stock, AxisymmetricStock2D):
                 workpiece = WorkpieceDefinition(
@@ -209,44 +209,23 @@ def main():
         print("ERROR: Workpiece stock definition could not be determined", file=sys.stderr)
         sys.exit(1)
 
-
     verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
-    orchestrator = PipelineOrchestrator(wrapper_cps=args.wrapper)
+    orchestrator = PipelineOrchestrator(
+        dumper_cps=args.dumper,
+        replayer_cps=args.replayer,
+    )
 
-    try:
-        report, final_gcode = orchestrator.run(
-            intermediate_cnc_path=args.intermediate,
-            base_post_path=args.base_post,
-            workpiece=workpiece,
-            tools_by_op=tools_by_op,
-            verifier=verifier,
-            final_cnc_path=args.final_cnc,
-            report_output_path=args.report,
-            plot_output_path=args.plot,
-        )
-    except TypeError:
-        report, final_gcode = orchestrator.run(
-            intermediate_cnc_path=args.intermediate,
-            base_post_path=args.base_post,
-            workpiece=workpiece,
-            tools_by_op=tools_by_op,
-            verifier=verifier,
-            final_cnc_path=args.final_cnc,
-            report_output_path=args.report,
-        )
-        if args.plot:
-            try:
-                from geometry.plotter import generate_verification_plot
-                generate_verification_plot(
-                    stock=workpiece.stock,
-                    fixtures=workpiece.fixtures,
-                    tools_by_op=tools_by_op,
-                    motion_segments=report.evaluated_moves,
-                    collisions=report.collisions,
-                    output_path=args.plot,
-                )
-            except Exception:
-                pass
+    report, final_gcode = orchestrator.run(
+        intermediate_cnc_path=args.intermediate,
+        base_post_path=args.base_post,
+        workpiece=workpiece,
+        tools_by_op=tools_by_op,
+        verifier=verifier,
+        final_cnc_path=args.final_cnc,
+        report_output_path=args.report,
+        plot_output_path=args.plot,
+        promote=not args.no_promote,
+    )
 
 
     result_summary = {

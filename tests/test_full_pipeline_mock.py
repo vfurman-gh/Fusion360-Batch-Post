@@ -135,7 +135,7 @@ class TestFullPipelineMock(unittest.TestCase):
 
             # 2. Assertions on Final G-Code
             self.assertTrue(os.path.isfile(out_cnc))
-            self.assertIn("N32 G0 X0.47", gcode, "Expected promoted G0 move in block N32")
+            self.assertIn("N32 G0 X0.47 ;RAPID RESTORED", gcode, "Expected promoted G0 move with inline comment in block N32")
             self.assertIn("N33 G1 Z-0.06 F0.002", gcode, "Expected restored modal G1 on block N33")
             self.assertIn(";UNIVERSAL WRAPPER RESTORED", gcode)
 
@@ -146,7 +146,7 @@ class TestFullPipelineMock(unittest.TestCase):
 
             self.assertIn("# Toolpath Verification & Rapid-Promotion Report", report_content)
             self.assertIn("Zero collisions detected", report_content)
-            self.assertIn("`0:133870,0,2540->59690,0,2540`", report_content)
+            self.assertNotIn("Rapid-Promotion Authorization Rules", report_content)
 
 
 if __name__ == "__main__":

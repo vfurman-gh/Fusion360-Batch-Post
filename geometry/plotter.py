@@ -131,7 +131,10 @@ def generate_verification_plot(
 
     for col in report.collisions:
         color, marker, desc = COLLISION_STYLES.get(col.kind, ("#d62728", "X", col.kind.name))
-        ax_geo.plot(col.contact_point.z * scale, col.contact_point.x * scale, marker, color=color, markersize=10, markeredgewidth=2.2, label=f"Collision: {desc}", zorder=8)
+        col_lbl_key = f"Collision: {desc}"
+        col_lbl = col_lbl_key if col_lbl_key not in seen_labels else None
+        seen_labels.add(col_lbl_key)
+        ax_geo.plot(col.contact_point.z * scale, col.contact_point.x * scale, marker, color=color, markersize=10, markeredgewidth=2.2, label=col_lbl, zorder=8)
 
     ax_geo.axhline(0, color="black", linestyle="-.", linewidth=0.8, label="Spindle Centerline (R=0)")
     ax_geo.set_aspect("equal", adjustable="datalim")

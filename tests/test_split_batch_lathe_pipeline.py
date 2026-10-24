@@ -1,179 +1,155 @@
 """
-Unit tests for the redesigned split-batch lathe pipeline:
-1. Multi-batch intermediate APT parsing via parse_apt_batches.
-2. Global promotion evaluation with per-batch partitioning.
-3. Correct vector key mapping for universal_wrapper.cps.
-4. Deterministic G-code program stitching via _StitchGcodeFiles.
+Unit tests for the split-batch lathe pipeline (Context-Dump + Merge + Unified Verification + Replay):
+1. Multi-batch context merging and re-indexing via merge_context_dumps.
+2. Continuous MotionSegment parsing across batches via parse_context_dump.
+3. Global promotion evaluation and direct event annotation via apply_promotions_to_context.
+4. Single-pass replay of a multi-tool merged context via universal_replayer.cps.
 """
 
+import copy
 import json
 import os
 import sys
 import tempfile
-import types
 import unittest
 
-if "adsk" not in sys.modules:
-    adsk = types.ModuleType("adsk")
-    adsk.cam = types.ModuleType("adsk.cam")
-    adsk.cam.OperationTypes = types.SimpleNamespace(TurningOperation=1, MillingOperation=0)
-    adsk.core = types.ModuleType("adsk.core")
-    adsk.core.CommandCreatedEventHandler = type("CommandCreatedEventHandler", (), {})
-    adsk.core.InputChangedEventHandler = type("InputChangedEventHandler", (), {})
-    adsk.core.ValidateInputsEventHandler = type("ValidateInputsEventHandler", (), {})
-    adsk.core.CommandEventHandler = type("CommandEventHandler", (), {})
-    adsk.core.Application = types.SimpleNamespace(get=lambda: types.SimpleNamespace(log=lambda msg: None))
-    adsk.fusion = types.ModuleType("adsk.fusion")
-    sys.modules["adsk"] = adsk
-    sys.modules["adsk.cam"] = adsk.cam
-    sys.modules["adsk.core"] = adsk.core
-    sys.modules["adsk.fusion"] = adsk.fusion
-
-from apt_parser import parse_apt_batches, APTParser
+from context_parser import (
+    apply_promotions_to_context,
+    merge_context_dumps,
+    parse_context_dump,
+)
 from geometry import Lathe2DIPWVerifier, ToolAssembly, AxisymmetricStock2D, WorkpieceDefinition
 from geometry.tool_generator import generate_rhombic_insert, generate_turning_holder
 from geometry.models import LatheToolGeometry, ToolCompensationQuadrant
-from PostProcessAll import _StitchGcodeFiles
+from pipeline import PipelineOrchestrator
 
 
 class TestSplitBatchLathePipeline(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cls.fixture_apt = os.path.join(cls.repo_root, "tests", "fixtures", "roughing_test.apt")
-
-    def test_01_parse_apt_batches_tags_metadata(self):
-        """Verify parse_apt_batches sets batch_idx and batch_sec_id monotonically."""
-        batches = [self.fixture_apt, self.fixture_apt]
-        segments = parse_apt_batches(batches)
-
-        self.assertGreater(len(segments), 10, "Expected non-trivial motion segments")
-        
-        # Verify first half has batch_idx == 0 and second half has batch_idx == 1
-        b0_segs = [s for s in segments if s.metadata.get("batch_idx") == 0]
-        b1_segs = [s for s in segments if s.metadata.get("batch_idx") == 1]
-        
-        self.assertEqual(len(b0_segs), len(segments) // 2)
-        self.assertEqual(len(b1_segs), len(segments) // 2)
-        
-        # Verify segment_id is strictly monotonically increasing across all batches
-        for i in range(1, len(segments)):
-            self.assertEqual(segments[i].segment_id, segments[i - 1].segment_id + 1)
-
-    def test_02_global_promotion_partitioning_by_batch(self):
-        """Verify global promotion decisions are correctly partitioned into per-batch rules."""
-        cutter = generate_rhombic_insert(edge_length=9.525, nose_radius=0.4)
-        holder = generate_turning_holder(shank_width=16.0, shank_length=100.0)
-        tool_geom = LatheToolGeometry(
-            insert_shape="rhombic",
-            nose_radius=0.4,
-            hand="R",
-            quadrant=ToolCompensationQuadrant.P3,
-            cutter_polygon=cutter,
-            holder_polygon=holder,
-            is_boring=False,
-        )
-        tool_asm = ToolAssembly(tool_id=6, name="Profile Roughing8", geometry=tool_geom)
-        tools_by_op = {
-            "Profile Roughing8": tool_asm,
-            "Profile Roughing8 (2)": tool_asm,
-        }
-
-        workpiece = WorkpieceDefinition(
-            stock=AxisymmetricStock2D(z_min=-75.0, z_max=0.0, outer_radius=16.5, inner_radius=0.0)
+        cls.fixture_cnc = os.path.join(cls.repo_root, "tests", "fixtures", "roughing_test.cnc")
+        cls.centroid_cps = os.path.join(cls.repo_root, "centroid_turning.cps")
+        cls.orchestrator = PipelineOrchestrator(
+            dumper_cps=os.path.join(cls.repo_root, "universal_dumper.cps"),
+            replayer_cps=os.path.join(cls.repo_root, "universal_replayer.cps"),
         )
 
-        segments = parse_apt_batches([self.fixture_apt, self.fixture_apt])
-        verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
-        report = verifier.verify_toolpath(segments, tools_by_op, workpiece)
-
-        self.assertGreater(len(report.promoted_vectors), 0, "Expected authorized air promotions")
-
-        # Partition promotion rules per batch
-        batch_promoted = {0: {}, 1: {}}
-        for seg in segments:
-            b_idx = seg.metadata.get("batch_idx", 0)
-            v_key_str = seg.vector_key.to_wrapper_str()
-            if v_key_str in report.promoted_vectors:
-                rule = report.promoted_vectors[v_key_str]
-                batch_promoted[b_idx][v_key_str] = {"minOccur": rule.min_occur}
-
-        # Verify each batch gets non-empty promotion rules
-        self.assertGreater(len(batch_promoted[0]), 0)
-        self.assertGreater(len(batch_promoted[1]), 0)
-
-        # Verify vector keys start with local section IDs matching universal_wrapper format
-        for v_key in batch_promoted[0]:
-            self.assertRegex(v_key, r"^\d+:-?\d+,-?\d+,-?\d+->-?\d+,-?\d+,-?\d+$")
-
-    def test_03_stitch_gcode_files(self):
-        """Verify _StitchGcodeFiles combines single-tool files with headers, tool changes, and tails."""
+    def test_01_merge_and_parse_context_batches_tags_metadata(self):
+        """Verify merge_context_dumps and parse_context_dump set batch_idx and sec_id monotonically."""
         with tempfile.TemporaryDirectory() as tmp_dir:
-            f1 = os.path.join(tmp_dir, "batch_0.cnc")
-            f2 = os.path.join(tmp_dir, "batch_1.cnc")
-            f_out = os.path.join(tmp_dir, "final.cnc")
+            b0_path = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.fixture_cnc, self.centroid_cps, b0_path)
 
-            gcode_b0 = (
-                "%\n"
-                ";SPINNER TURNING TEST\n"
-                ";T0101 NR=0.0156\n"
-                "G20\n"
-                "G50 S2000\n"
-                "T0100\n"
-                "G54\n"
-                "N10 G0 X1.3 Z0.04 T0101\n"
-                "N20 G1 X1.22 Z0. F0.005\n"
-                "N30 G0 X1.3\n"
-                "M30\n"
-                "%\n"
+            combined_ctx = merge_context_dumps([b0_ctx, b0_ctx])
+            self.assertEqual(len(combined_ctx["sections"]), len(b0_ctx["sections"]) * 2)
+
+            # Verify section IDs are monotonically re-indexed 0..N-1
+            for idx, sec in enumerate(combined_ctx["sections"]):
+                self.assertEqual(sec["id"], idx)
+
+            segments = parse_context_dump(combined_ctx)
+            self.assertGreater(len(segments), 20, "Expected non-trivial motion segments")
+
+            b0_segs = [s for s in segments if s.metadata.get("batch_idx") == 0]
+            b1_segs = [s for s in segments if s.metadata.get("batch_idx") == 1]
+
+            self.assertEqual(len(b0_segs), len(segments) // 2)
+            self.assertEqual(len(b1_segs), len(segments) // 2)
+
+            for i in range(1, len(segments)):
+                self.assertEqual(segments[i].segment_id, segments[i - 1].segment_id + 1)
+
+    def test_02_global_promotion_annotation_across_batches(self):
+        """Verify global promotion decisions are stamped onto events across all merged batches."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            b0_path = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.fixture_cnc, self.centroid_cps, b0_path)
+
+            b1_ctx = copy.deepcopy(b0_ctx)
+            for sec in b1_ctx["sections"]:
+                sec["tool"]["number"] = 8
+                sec["tool"]["_toolId"] = "8"
+                sec["tool"]["compensationOffset"] = 8
+
+            combined_ctx = merge_context_dumps([b0_ctx, b1_ctx])
+            segments = parse_context_dump(combined_ctx)
+
+            cutter = generate_rhombic_insert(edge_length=9.525, nose_radius=0.4)
+            holder = generate_turning_holder(shank_width=16.0, shank_length=100.0)
+            tool_geom = LatheToolGeometry(
+                insert_shape="rhombic",
+                nose_radius=0.4,
+                hand="R",
+                quadrant=ToolCompensationQuadrant.P3,
+                cutter_polygon=cutter,
+                holder_polygon=holder,
+                is_boring=False,
             )
-            gcode_b1 = (
-                "%\n"
-                ";SPINNER OP 2\n"
-                ";T0202 NR=0.008\n"
-                "G20\n"
-                "T0200\n"
-                "G54\n"
-                "N10 G0 X0.5 Z0.04 T0202\n"
-                "N20 G1 Z-1.0 F0.003\n"
-                "N30 G0 Z0.04\n"
-                "M30\n"
-                "%\n"
-            )
-
-            with open(f1, "w", encoding="utf-8") as f:
-                f.write(gcode_b0)
-            with open(f2, "w", encoding="utf-8") as f:
-                f.write(gcode_b1)
-
-            docSettings = {
-                "endCodes": "M30:M2",
-                "toolChange": "M0 (CHANGE TO NEXT TOOL)",
+            tool_asm = ToolAssembly(tool_id=6, name="Profile Roughing8", geometry=tool_geom)
+            tools_by_op = {
+                "Profile Roughing8": tool_asm,
+                "Profile Roughing8 (2)": tool_asm,
+                "Profile Finishing6": tool_asm,
             }
 
-            _StitchGcodeFiles([f1, f2], f_out, "Spinner", docSettings)
+            workpiece = WorkpieceDefinition(
+                stock=AxisymmetricStock2D(z_min=-75.0, z_max=0.0, outer_radius=16.5, inner_radius=0.0)
+            )
 
-            self.assertTrue(os.path.isfile(f_out))
-            with open(f_out, "r", encoding="utf-8") as f:
-                stitched = f.read()
+            verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
+            report = verifier.verify_toolpath(segments, tools_by_op, workpiece)
+            self.assertGreater(len(report.promoted_vectors), 0, "Expected authorized air promotions")
 
-            # Header from Batch 0 is preserved
-            self.assertIn(";SPINNER TURNING TEST", stitched)
-            self.assertIn("G50 S2000", stitched)
+            promoted_cnt = apply_promotions_to_context(combined_ctx, report.promoted_vectors)
+            self.assertGreater(promoted_cnt, 0)
 
-            # Tool 1 motions are present
-            self.assertIn("G0 X1.3 Z0.04 T0101", stitched)
+            # Verify both batch 0 and batch 1 sections received promoted events
+            b0_promoted = sum(
+                1
+                for sec in combined_ctx["sections"]
+                if sec.get("batchIdx") == 0
+                for ev in sec.get("events", [])
+                if ev.get("promote")
+            )
+            b1_promoted = sum(
+                1
+                for sec in combined_ctx["sections"]
+                if sec.get("batchIdx") == 1
+                for ev in sec.get("events", [])
+                if ev.get("promote")
+            )
+            self.assertGreater(b0_promoted, 0)
+            self.assertGreater(b1_promoted, 0)
 
-            # Tool change block is injected
-            self.assertIn("M0 (CHANGE TO NEXT TOOL)", stitched)
+    def test_03_single_pass_replay_combines_multi_tool_batches(self):
+        """Verify replay_combined_context emits a unified multi-tool program without text stitching."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            b0_path = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.fixture_cnc, self.centroid_cps, b0_path)
 
-            # Tool 2 motions are present
-            self.assertIn("G0 X0.5 Z0.04 T0202", stitched)
-            self.assertIn("G1 Z-1.0 F0.003", stitched)
+            b1_ctx = copy.deepcopy(b0_ctx)
+            b1_ctx["sections"] = [copy.deepcopy(b0_ctx["sections"][-1])]
+            b1_sec = b1_ctx["sections"][0]
+            b1_sec["id"] = 0
+            b1_sec["tool"]["number"] = 2
+            b1_sec["tool"]["_toolId"] = "2"
+            b1_sec["tool"]["compensationOffset"] = 2
+            b1_sec["tool"]["lengthOffset"] = 2
+            b1_sec["tool"]["diameterOffset"] = 2
 
-            # Only ONE program tail (M30, %) at the end
-            self.assertEqual(stitched.count("M30"), 1)
-            self.assertEqual(stitched.count("%"), 2)  # One at start, one at end
+            combined_ctx = merge_context_dumps([b0_ctx, b1_ctx])
+            final_nc = os.path.join(tmp_dir, "combined_out.nc")
+            gcode = self.orchestrator.replay_combined_context(
+                combined_context=combined_ctx,
+                base_post_path=self.centroid_cps,
+                bootstrap_cnc_path=self.fixture_cnc,
+                final_cnc_path=final_nc,
+            )
+
+            self.assertIn("T0606", gcode)
+            self.assertIn("T0202", gcode)
+            self.assertLess(gcode.find("T0606"), gcode.find("T0202"))
 
 
 if __name__ == "__main__":

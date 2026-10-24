@@ -1,6 +1,11 @@
-# Generic Collision, IPW & Rapid-Promotion Engine: Interface Specification (v2)
+# [OBSOLETE] Generic Collision, IPW & Rapid-Promotion Engine: Interface Specification (v2)
 
-## 1. Architecture Overview
+> [!WARNING]
+> **OBSOLETE DOCUMENT**: The 4-pass APT extraction + per-batch `universal_wrapper.cps` + G-code stitching pipeline in this document has been superseded by the **Context-Dump + Unified Verification + Single-Pass Replay** architecture (`universal_dumper.cps` + `context_parser.py` + `universal_replayer.cps`).
+> - See [`docs/architecture_and_interfaces.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/architecture_and_interfaces.md) for the current system architecture and tool interfaces.
+> - See [`docs/universal_replayer.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/universal_replayer.md) for the internal design and corner cases of `universal_replayer.cps`.
+
+## 1. Architecture Overview (Historical)
 
 The verification system strictly isolates intermediate toolpath interpretation from physical simulation and post-processing:
 

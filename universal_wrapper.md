@@ -1,6 +1,11 @@
-# Architecture Decision Record: Universal Post Processor Wrapper (`universal_wrapper.cps`)
+# [OBSOLETE] Architecture Decision Record: Universal Post Processor Wrapper (`universal_wrapper.cps`)
 
-## 1. Executive Summary & Problem Context
+> [!WARNING]
+> **OBSOLETE DOCUMENT**: This design (`universal_wrapper.cps` + `apt.cps` + per-batch G-code stitching) has been superseded by the **Context-Dump + Unified Verification + Single-Pass Replay** architecture (`universal_dumper.cps` + `context_parser.py` + `universal_replayer.cps`).
+> - See [`docs/architecture_and_interfaces.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/architecture_and_interfaces.md) for the current system architecture and tool interfaces.
+> - See [`docs/universal_replayer.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/universal_replayer.md) for the internal design and corner cases of `universal_replayer.cps`.
+
+## 1. Executive Summary & Problem Context (Historical)
 
 In Fusion 360 Personal Use licenses, Autodesk masks rapid positioning moves (`G0`), forcing them into linear cutting moves (`G1`) clamped to feedrates. Machinists running personal licenses on CNC lathes and mills suffer extreme cycle time penalties due to rapid retracts and clearance moves crawling at cutting feedrates.
 
