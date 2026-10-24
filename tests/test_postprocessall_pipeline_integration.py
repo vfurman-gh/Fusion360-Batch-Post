@@ -191,94 +191,6 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertIsNone(rec["error"])
             self.assertGreater(rec["volume_mm3"], 7000.0)
 
-    def test_run_lathe_verifier_with_100_percent_analytical_stock_and_tools(self):
-        """Verify RunLatheVerifier on clean vendor G-code with zero metadata comments using analytical setup."""
-        class MockParam:
-            def __init__(self, val):
-                self.value = types.SimpleNamespace(value=val)
-
-        class MockParams:
-            def __init__(self, d):
-                self.params = {k: MockParam(v) for k, v in d.items()}
-
-            def itemByName(self, name):
-                return self.params.get(name)
-
-        class MockTool:
-            def __init__(self, d):
-                self.parameters = MockParams(d)
-
-        class MockOperation:
-            def __init__(self, name, tool_d):
-                self.name = name
-                self.tool = MockTool(tool_d)
-                self.parameters = MockParams({})
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            cnc_output = os.path.join(tmp_dir, "analytical_output.cnc")
-            sidecar_cnc = cnc_output + ".intermediate.cnc"
-
-            # 1. Copy fixture binary Compact-NCI to sidecar location
-            shutil.copyfile(self.fixture_cnc, sidecar_cnc)
-
-            # 2. Pure vendor stock G-code with NO metadata comments whatsoever
-            clean_gcode = (
-                '%\n'
-                'O1001 (ANALYTICAL_TEST)\n'
-                'G20\n'
-                'G90\n'
-                'T0606\n'
-                'M30\n'
-                '%\n'
-            )
-            with open(cnc_output, "w", encoding="utf-8") as f:
-                f.write(clean_gcode)
-
-            stock_d = {
-                "job_stockDiameter": 3.175,       # 31.75 mm OD
-                "job_stockLength": 6.35,          # 63.5 mm Length
-                "job_stockDiameterInner": 1.27,   # 12.7 mm ID
-                "job_stockOffsetFront": 0.0,
-                "job_stockClampingLength": 1.5,
-            }
-            tool_d = {
-                "tool_number": 6,
-                "tool_type": "turning boring",
-                "tool_edgeLength": 0.9525,        # 9.525 mm
-                "tool_cornerRadius": 0.02032,     # 0.2032 mm (0.008 in)
-                "tool_shankWidth": 1.27,          # 12.7 mm (0.5 in)
-                "tool_overallLength": 10.0,       # 100 mm
-            }
-
-            op1 = MockOperation("Profile Roughing8", tool_d)
-            op2 = MockOperation("Profile Roughing8 (2)", tool_d)
-            op3 = MockOperation("Profile Finishing6", tool_d)
-
-            setup = DummySetup(name="Analytical Turning Setup", is_turning=True)
-            setup.parameters = MockParams(stock_d)
-            setup.allOperations = [op1, op2, op3]
-
-            docSettings = {"verifyGcode": True, "fastZ": True}
-
-            # 3. Execute RunLatheVerifier
-            err = RunLatheVerifier(cnc_output, setup, docSettings)
-
-            self.assertIsNone(err, f"Unexpected error: {err}")
-            self.assertEqual(len(verifyResults), 1)
-            rec = verifyResults[0]
-            self.assertEqual(rec["setup"], "Analytical Turning Setup")
-            self.assertIsNone(rec["error"])
-            self.assertGreater(rec["volume_mm3"], 7000.0, "Expected >7000 mm3 material carved analytically")
-            self.assertGreaterEqual(rec["promoted"], 5, "Expected promoted rapid moves")
-
-            # Verify .png plot was created
-            plot_png = os.path.splitext(cnc_output)[0] + ".png"
-            self.assertTrue(os.path.isfile(plot_png), "PNG plot was not generated")
-            self.assertGreater(os.path.getsize(plot_png), 5000)
-
-            # Verify _report.md was created
-            report_md = os.path.splitext(cnc_output)[0] + "_report.md"
-            self.assertTrue(os.path.isfile(report_md), "Report markdown was not generated")
 
     def test_run_lathe_verifier_with_object_base_post_does_not_crash(self):
         """Verify RunLatheVerifier safely handles base_post being a PostConfiguration object without stat TypeError."""
@@ -310,32 +222,6 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertTrue(constDumperScript.endswith("universal_dumper.cps"))
         self.assertTrue(constReplayerScript.endswith("universal_replayer.cps"))
 
-    def test_stale_sys_modules_auto_reloaded_in_build_tool_assembly(self):
-        """Simulate Fusion 360 persistent Python interpreter holding a stale generate_turning_holder without is_boring."""
-        from PostProcessAll import _BuildToolAssembly
-        import geometry.tool_generator as tg
-
-        # Replace generate_turning_holder with a legacy signature lacking 'is_boring'
-        def legacy_generate_turning_holder(shank_width, shank_length, clearance_x=0.008, clearance_z=0.008):
-            raise AssertionError("Stale legacy_generate_turning_holder should have been reloaded!")
-
-        tg.generate_turning_holder = legacy_generate_turning_holder
-
-        t_info = {
-            "tool_id": 6,
-            "name": "Profile Roughing8",
-            "insert_shape": "rhombic",
-            "is_boring": True,
-            "hand": "R",
-            "edge_length": 9.525,
-            "nose_radius": 0.4,
-            "lead_angle": 5.0,
-            "shank_width": 16.0,
-            "shank_length": 100.0,
-        }
-        asm = _BuildToolAssembly(t_info)
-        self.assertEqual(asm.tool_id, 6)
-        self.assertTrue(asm.geometry.is_boring)
 
 
 if __name__ == "__main__":

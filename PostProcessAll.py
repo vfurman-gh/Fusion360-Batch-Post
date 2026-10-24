@@ -1512,202 +1512,6 @@ def _ExtractWorkpieceFromSetup(setup):
 
 
 
-def _ExtractToolsFromSetup(setup):
-    """
-    Analytically extract lathe tool parameters from native Fusion 360 Setup operations.
-    Returns Dict[str, dict] with normalized metric dimensions for every operation.
-    """
-    tools_data = {}
-    try:
-        ops = []
-        if hasattr(setup, "allOperations"):
-            ops = list(setup.allOperations)
-        elif hasattr(setup, "operations"):
-            ops = list(setup.operations)
-        elif isinstance(setup, (list, tuple)):
-            ops = list(setup)
-
-        for op in ops:
-            op_name = getattr(op, "name", "")
-            if not op_name:
-                continue
-
-            tool = getattr(op, "tool", None)
-            tool_params = getattr(tool, "parameters", None) if tool else None
-            op_params = getattr(op, "parameters", None)
-
-            def _get_num(names, default, scale=10.0):
-                for p_col in (tool_params, op_params):
-                    if not p_col:
-                        continue
-                    for n in names:
-                        try:
-                            p = p_col.itemByName(n)
-                            if p is not None:
-                                val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
-                                if isinstance(val, (int, float)):
-                                    return float(val) * scale
-                                elif isinstance(val, str):
-                                    s = val.strip().lower()
-                                    if s.endswith("in"):
-                                        return float(s[:-2].strip()) * 25.4
-                                    elif s.endswith("mm"):
-                                        return float(s[:-2].strip())
-                                    return float(s) * scale
-                        except Exception:
-                            pass
-                return default
-
-            def _get_str(names, default=""):
-                for p_col in (tool_params, op_params):
-                    if not p_col:
-                        continue
-                    for n in names:
-                        try:
-                            p = p_col.itemByName(n)
-                            if p is not None:
-                                val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
-                                return str(val)
-                        except Exception:
-                            pass
-                return default
-
-            tool_id = int(_get_num(["tool_number", "number"], default=0, scale=1.0))
-            ttype = _get_str(["tool_type", "type"], default="turning general").lower()
-            is_boring = "bore" in ttype or "boring" in ttype or "internal" in op_name.lower() or "bore" in op_name.lower()
-            is_drill = "drill" in ttype
-            is_groove = "groov" in ttype or "part" in ttype
-
-            hand = _get_str(["tool_hand", "hand"], default="R").upper()
-            hand_code = "L" if ("LEFT" in hand or hand.startswith("L")) else "R"
-
-            # Dimensions: Fusion internal unit cm -> mm (* 10.0)
-            edge_l = _get_num(["tool_edgeLength", "edgeLength", "tool_insertEdgeLength"], default=9.525, scale=10.0)
-            nose_r = _get_num(["tool_cornerRadius", "tool_noseRadius", "cornerRadius"], default=0.4, scale=10.0)
-            lead_a = _get_num(["tool_leadAngle", "tool_leadingAngle", "leadAngle"], default=5.0, scale=180.0 / math.pi)
-            shank_w = _get_num(["tool_shankWidth", "shankWidth"], default=16.0, scale=10.0)
-            shank_l = _get_num(["tool_overallLength", "overallLength"], default=100.0, scale=10.0)
-            dia = _get_num(["tool_diameter", "diameter"], default=6.35, scale=10.0)
-            flute_l = _get_num(["tool_fluteLength", "fluteLength"], default=dia * 4.0, scale=10.0)
-            blade_w = _get_num(["tool_width", "blade_width", "tool_diameter"], default=3.0, scale=10.0)
-            blade_d = _get_num(["tool_bodyLength", "blade_depth", "tool_grooveDepth"], default=12.0, scale=10.0)
-
-            shape = "drill" if is_drill else ("groove" if is_groove else "rhombic")
-
-            tools_data[op_name] = {
-                "tool_id": tool_id,
-                "name": op_name,
-                "insert_shape": shape,
-                "is_boring": is_boring,
-                "hand": hand_code,
-                "edge_length": edge_l,
-                "nose_radius": nose_r,
-                "lead_angle": lead_a,
-                "shank_width": shank_w,
-                "shank_length": shank_l,
-                "diameter": dia,
-                "flute_length": flute_l,
-                "overall_length": shank_l,
-                "blade_width": blade_w,
-                "blade_depth": blade_d,
-            }
-    except Exception:
-        pass
-    return tools_data
-
-
-def _BuildToolAssembly(t_info):
-    """Reconstruct pure-Python ToolAssembly with exact 2D Shapely geometry."""
-    import sys
-    import importlib
-    if "geometry.tool_generator" in sys.modules:
-        try:
-            tg_mod = sys.modules["geometry.tool_generator"]
-            gth = getattr(tg_mod, "generate_turning_holder", None)
-            if gth and "is_boring" not in getattr(getattr(gth, "__code__", None), "co_varnames", ()):
-                _EnsureLocalModulesLoaded()
-        except Exception:
-            pass
-
-    from shapely.geometry import Polygon
-    from geometry.tool_generator import (
-        generate_rhombic_insert,
-        generate_grooving_insert,
-        generate_drill_cutter,
-        generate_turning_holder,
-    )
-    from geometry import LatheToolGeometry, ToolCompensationQuadrant, ToolAssembly
-
-    shape = t_info.get("insert_shape", "rhombic")
-    tool_id = t_info.get("tool_id", 0)
-    op_name = t_info.get("name", "")
-    is_boring = t_info.get("is_boring", False)
-    shank_w = t_info.get("shank_width", 16.0)
-    shank_l = t_info.get("shank_length", 100.0)
-    nose_r = t_info.get("nose_radius", 0.4)
-
-    if shape == "drill":
-        cutter = generate_drill_cutter(
-            diameter=t_info.get("diameter", 6.35),
-            point_angle_deg=118.0,
-            flute_length=t_info.get("flute_length", 30.0),
-            overall_length=t_info.get("overall_length", 60.0),
-        )
-        holder = Polygon()
-    elif shape == "groove":
-        cutter = generate_grooving_insert(
-            blade_width=t_info.get("blade_width", 3.0),
-            blade_depth=t_info.get("blade_depth", 12.0),
-            corner_radius=nose_r,
-        )
-        if not is_boring:
-            from shapely.affinity import scale as shapely_scale
-            cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
-        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
-        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
-        holder = generate_turning_holder(
-            shank_width=shank_w,
-            shank_length=shank_l,
-            clearance_x=clr_x,
-            clearance_z=clr_z,
-            is_boring=is_boring,
-        )
-    else:
-        cutter = generate_rhombic_insert(
-            edge_length=t_info.get("edge_length", 9.525),
-            nose_radius=nose_r,
-            lead_angle_deg=t_info.get("lead_angle", 5.0),
-        )
-        if not is_boring:
-            from shapely.affinity import scale as shapely_scale
-            cutter = shapely_scale(cutter, xfact=1.0, yfact=-1.0, origin=(0, 0))
-        clr_x = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
-        clr_z = max(1.25, nose_r * 3.0) if is_boring else max(2.0, nose_r * 3.0)
-        holder = generate_turning_holder(
-            shank_width=shank_w,
-            shank_length=shank_l,
-            clearance_x=clr_x,
-            clearance_z=clr_z,
-            is_boring=is_boring,
-        )
-
-    if t_info.get("hand", "R") == "L":
-        from shapely.affinity import scale as shapely_scale
-        cutter = shapely_scale(cutter, xfact=-1.0, yfact=1.0, origin=(0, 0))
-        holder = shapely_scale(holder, xfact=-1.0, yfact=1.0, origin=(0, 0))
-
-    clean_holder = holder.difference(cutter.buffer(0.001)) if not holder.is_empty else holder
-    geom = LatheToolGeometry(
-        insert_shape=shape,
-        nose_radius=nose_r,
-        hand=t_info.get("hand", "R"),
-        quadrant=ToolCompensationQuadrant.P3,
-        cutter_polygon=cutter,
-        holder_polygon=clean_holder,
-        is_boring=is_boring,
-    )
-    return ToolAssembly(tool_id=tool_id, name=op_name, geometry=geom)
-
 
 def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None):
     """
@@ -1818,9 +1622,8 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         except (ImportError, OSError):
             can_import_in_process = False
 
-        # Ingest workpiece and tools directly from native Fusion Setup API
+        # Ingest workpiece directly from native Fusion Setup API
         workpiece = _ExtractWorkpieceFromSetup(setup)
-        tools_data = _ExtractToolsFromSetup(setup)
         tools_by_op = {}
 
         if workpiece and workpiece.stock:
@@ -1831,7 +1634,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         is_inch = ("G20" in gcode_content) or not ("G21" in gcode_content)
         tool_scale = 1.0
 
-        if not tools_data or not workpiece:
+        if not workpiece or not tools_by_op:
             from geometry import parse_legacy_stock, parse_legacy_tool_op
             for line in gcode_content.splitlines():
                 if not workpiece and line.startswith(";META_STOCK:"):
@@ -1846,7 +1649,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                             ),
                             fixtures=workpiece.fixtures,
                         )
-                elif not tools_data and line.startswith(";META_OP:"):
+                elif not tools_by_op and line.startswith(";META_OP:"):
                     try:
                         payload = json.loads(line.split(":", 1)[1])
                         geom = parse_legacy_tool_op(line) if can_import_in_process else None
@@ -1859,10 +1662,10 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                             tools_by_op[tool_asm.name] = tool_asm
                     except Exception:
                         pass
-            if not tools_data and is_inch:
+            if is_inch:
                 tool_scale = 25.4
 
-        _dbg(f"RunLatheVerifier: workpiece={workpiece}, tools count={len(tools_data) if tools_data else len(tools_by_op)}")
+        _dbg(f"RunLatheVerifier: workpiece={workpiece}, tools count={len(tools_by_op)}")
         if not workpiece:
             _dbg(f"RunLatheVerifier: workpiece extraction returned None! Skipping {cncPath}")
             return None
@@ -1896,8 +1699,6 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             return None
 
         if can_import_in_process:
-            if tools_data:
-                tools_by_op = {name: _BuildToolAssembly(t_info) for name, t_info in tools_data.items()}
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=tool_scale)
             orchestrator = PipelineOrchestrator(
                 dumper_cps=constDumperScript,
@@ -2146,12 +1947,8 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
             ext_fix = "." + ext_fix
         path = os.path.splitext(path)[0] + ext_fix
 
-    # 2. Extract workpiece and tools from native Setup model
+    # 2. Extract workpiece from native Setup model
     workpiece = _ExtractWorkpieceFromSetup(setup)
-    tools_data = _ExtractToolsFromSetup(setup)
-    if not tools_data:
-        return "No lathe operations with valid tools found in setup."
-    tools_by_op = {name: _BuildToolAssembly(t_info) for name, t_info in tools_data.items()}
 
     # 3. Partition setup operations into single-tool batches
     batches = []
@@ -2269,9 +2066,11 @@ def _PostProcessLathePipeline(fname, setup, setupFolder, docSettings, program, p
         if post_props:
             combined_ctx["postProperties"] = post_props
 
-        # Refine workpiece (WCS frame) and tools (exact kernel SVG cutter/holder profiles) from context dump
+        # Extract workpiece (WCS frame) and tools (exact kernel SVG cutter/holder profiles) from context dump
         workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=workpiece)
-        tools_by_op = extract_tools_from_context(combined_ctx, fallback_tools=tools_by_op)
+        tools_by_op = extract_tools_from_context(combined_ctx)
+        if not tools_by_op:
+            return "No lathe operations with valid tools found in context dump."
 
         combined_segments = parse_context_dump(combined_ctx)
         _dbg(f"Pass 2: Combined {len(combined_segments)} motion segments across {len(batches)} batches.")

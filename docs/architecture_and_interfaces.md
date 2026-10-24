@@ -39,7 +39,7 @@ By separating **Pass 1: Per-Batch Context Extraction (`universal_dumper.cps`)** 
 ```mermaid
 flowchart TD
     subgraph Fusion["Pass 1: Fusion 360 Add-In (PostProcessAll.py)"]
-        Setup["Active Turning / Milling Setup"] --> ExtractModel["_ExtractWorkpieceFromSetup() & _ExtractToolsFromSetup()"]
+        Setup["Active Turning / Milling Setup"] --> ExtractModel["_ExtractWorkpieceFromSetup() (Stock & Fixtures)"]
         Setup --> Partition["Partition into Single-Tool Batches\nBatch 0 (T1), Batch 1 (T2), ..."]
         Partition --> Dump0["Post Batch 0 with universal_dumper.cps\n(BASE_POST + TARGET_INTERMEDIATE_CNC)"]
         Partition --> Dump1["Post Batch 1..K with universal_dumper.cps\n(BASE_POST)"]
