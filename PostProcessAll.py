@@ -19,11 +19,7 @@ defaultSettings = {
     "restore_rapid" : True,
     "verifyGcode" : True,
     # Groups are expanded or not
-    "groupPersonal" : True,
-    "groupAdvanced" : False,
-    # Retry policy
-    "initialDelay" : 0.2,
-    "postRetries" : 3
+    "groupPersonal" : True
 }
 
 # Constants
@@ -172,7 +168,8 @@ class SettingsManager:
             dst["restore_rapid"] = dst.get("fastZ", dst.get("fastZHeuristic", True))
         for k in (
             "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
-            "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName"
+            "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName",
+            "groupAdvanced", "initialDelay", "postRetries"
         ):
             dst.pop(k, None)
         for item in src:
@@ -651,22 +648,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 "Fixture keep-out boundaries), and generate summary report.")
            
             inputGroup.isExpanded = docSettings["groupPersonal"]
-
-            # Advanced -- retry settings
-            inputGroup = inputs.addGroupCommandInput("groupAdvanced", "Advanced")
-            # Time delay
-            input = inputGroup.children.addFloatSpinnerCommandInput("initialDelay", 
-                "Initial time allowance", "s", 0.1, 1.0, 0.1, docSettings["initialDelay"])
-            input.tooltip = "Initial Time to Post Process an Operation"
-            input.tooltipDescription = (
-                "Initial delay to wait for post processor. Doubled for each retry.")
-            # Retry count
-            input = inputGroup.children.addIntegerSpinnerCommandInput("postRetries", 
-                "Number of retries", 1, 9, 1, docSettings["postRetries"])
-            input.tooltip = "Number of Retries"
-            input.tooltipDescription = (
-                "Retries if post processing failed. Time delay is doubled each retry.")
-            inputGroup.isExpanded = docSettings["groupAdvanced"]
 
             # button to save default settings
             input = inputs.addBoolValueInput("save", "Save as default", False)

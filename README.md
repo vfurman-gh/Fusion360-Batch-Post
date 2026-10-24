@@ -150,9 +150,7 @@ bring in a copy of `Post Process All` that's ready to use. To update, click
 
 ### Issues
 If `Post Process All` fails, run it again. There seem to be occasional timing 
-issues that usually resolve themselves. It may help to increase the time
-delay for posting operations in the `Advanced` section of the 
-`Post Process All` dialog.
+issues that usually resolve themselves.
 
 The concatenation and modification of G-code has been only been lightly
 tested, and work is ongoing. Given that there are
