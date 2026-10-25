@@ -96,6 +96,14 @@ def stop(context):
         cmdControl = addinsPanel.controls.itemById(constCmdDefId)
         if cmdControl:
             cmdControl.deleteMe()
+
+        if ui and hasattr(ui, "palettes") and ui.palettes:
+            try:
+                p = ui.palettes.itemById(constNotificationPaletteId)
+                if p:
+                    p.deleteMe()
+            except Exception:
+                pass
     except:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))	
@@ -1766,23 +1774,33 @@ class _NotificationHTMLEventHandler(_HTMLEventHandlerBase):
                 except Exception:
                     pass
 
+            _dbg_global(f"NotificationHTMLEventHandler notify: action={action}, data={data}")
+
             app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
             ui = app.userInterface if app else None
 
             if action in ("open_file", "open_folder"):
                 if data and os.path.exists(data):
                     _OpenFile(data)
+                if ui and hasattr(ui, "palettes") and ui.palettes:
+                    p = ui.palettes.itemById(self.palette_id)
+                    if p:
+                        p.isVisible = False
             elif action == "dismiss":
                 if ui and hasattr(ui, "palettes") and ui.palettes:
                     p = ui.palettes.itemById(self.palette_id)
                     if p:
-                        p.deleteMe()
+                        p.isVisible = False
         except Exception as exc:
             _dbg_global(f"NotificationHTMLEventHandler exception: {exc}")
 
 
 def _BuildNotificationHTML(title, status_type, message, details, actions):
-    """Generate self-contained HTML for non-modal Fusion toast notification."""
+    """
+    Generate self-contained HTML for non-modal Fusion toast notification.
+    Note: Fusion 360's palettes.add2 requires the HTML string to strictly start
+    with <html> (no <!DOCTYPE html> or leading whitespace).
+    """
     icon_map = {
         'success': '✓',
         'warning': '⚠',
@@ -1804,8 +1822,8 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
         )
     actions_html = "\n".join(action_buttons)
 
-    html_content = f"""<!DOCTYPE html>
-<html>
+    # Note: Must strictly begin with <html> (no <!DOCTYPE html>) for Fusion 360 C++ add2 parser
+    html_content = f"""<html>
 <head>
 <meta charset="utf-8">
 <style>
@@ -1902,13 +1920,27 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
 </style>
 <script>
   function sendAction(action, data) {{
-    if (window.adsk && window.adsk.fusionSendData) {{
-      window.adsk.fusionSendData(action, data);
+    try {{
+      if (window.adsk && window.adsk.fusionSendData) {{
+        window.adsk.fusionSendData(action, data);
+      }} else if (typeof adsk !== 'undefined' && adsk.fusionSendData) {{
+        adsk.fusionSendData(action, data);
+      }}
+    }} catch (e) {{
+      console.error(e);
     }}
   }}
-  setTimeout(function() {{
+  var dismissTimer = setTimeout(function() {{
     sendAction('dismiss', '');
   }}, 9000);
+  document.addEventListener('mouseenter', function() {{
+    if (dismissTimer) clearTimeout(dismissTimer);
+  }});
+  document.addEventListener('mouseleave', function() {{
+    dismissTimer = setTimeout(function() {{
+      sendAction('dismiss', '');
+    }}, 4000);
+  }});
 </script>
 </head>
 <body>
@@ -1924,7 +1956,7 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
   </div>
 </body>
 </html>"""
-    return html_content
+    return html_content.strip()
 
 
 def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder, verifyResults=None, is_fatal=False):
@@ -1996,57 +2028,112 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
 
     # 4. Display non-modal Palette toast if supported by ui
     if ui and hasattr(ui, "palettes") and ui.palettes is not None:
+        html_text = _BuildNotificationHTML(title, status_type, msg, details, actions)
+        tmp_html = os.path.join(tempfile.gettempdir(), "postprocess_toast.html")
         try:
-            old_palette = ui.palettes.itemById(constNotificationPaletteId)
-            if old_palette:
-                old_palette.deleteMe()
+            with open(tmp_html, "w", encoding="utf-8") as f:
+                f.write(html_text)
+        except Exception as fe:
+            _dbg_global(f"_NotifyPostProcessResult write tmp_html note: {fe}")
+
+        palette = None
+
+        # Check if existing notification palette exists
+        existing = None
+        try:
+            existing = ui.palettes.itemById(constNotificationPaletteId)
         except Exception:
-            pass
+            existing = None
 
-        try:
-            html_text = _BuildNotificationHTML(title, status_type, msg, details, actions)
-            palette = None
-            if hasattr(ui.palettes, "add2"):
-                palette = ui.palettes.add2(
-                    constNotificationPaletteId,
-                    "Post Processing",
-                    html_text,
-                    True,   # isVisible
-                    False,  # showCloseButton
-                    False,  # isResizable
-                    400,    # width
-                    130,    # height
-                )
-            else:
-                tmp_html = os.path.join(tempfile.gettempdir(), "postprocess_toast.html")
-                with open(tmp_html, "w", encoding="utf-8") as f:
-                    f.write(html_text)
-                palette = ui.palettes.add(
-                    constNotificationPaletteId,
-                    "Post Processing",
-                    tmp_html,
-                    True,
-                    False,
-                    False,
-                    400,
-                    130,
-                )
-
-            if palette:
+        if existing:
+            try:
+                _dbg_global(f"_NotifyPostProcessResult: reusing existing palette id={constNotificationPaletteId}")
+                if hasattr(ui.palettes, "add2"):
+                    existing.htmlFileURL = html_text
+                else:
+                    existing.htmlFileURL = tmp_html
+                existing.isVisible = True
+                palette = existing
+            except Exception as rex:
+                _dbg_global(f"_NotifyPostProcessResult: palette reuse failed: {rex}, deleting to recreate")
                 try:
-                    if "adsk.core" in sys.modules:
-                        if hasattr(adsk.core, "PaletteDockOptions"):
-                            palette.dockingOption = adsk.core.PaletteDockOptions.PaletteDockOptionsNone
-                        if hasattr(adsk.core, "PaletteDockStates"):
-                            palette.dockingState = adsk.core.PaletteDockStates.PaletteDockStateFloating
+                    existing.deleteMe()
                 except Exception:
                     pass
+                palette = None
 
+        if not palette:
+            # Attempt 1: add2 with inline HTML definition
+            if hasattr(ui.palettes, "add2"):
+                try:
+                    _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add2 with inline HTML")
+                    palette = ui.palettes.add2(
+                        constNotificationPaletteId,
+                        "Post Processing",
+                        html_text,
+                        True,   # isVisible
+                        True,   # showCloseButton
+                        False,  # isResizable
+                        440,    # width
+                        150,    # height
+                    )
+                except Exception as e_add2:
+                    _dbg_global(f"_NotifyPostProcessResult: add2 with inline HTML failed: {e_add2}")
+
+            # Attempt 2: fallback to tmp_html file path with add2 or add
+            if not palette and os.path.isfile(tmp_html):
+                if hasattr(ui.palettes, "add2"):
+                    try:
+                        _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add2 with tmp_html")
+                        palette = ui.palettes.add2(
+                            constNotificationPaletteId,
+                            "Post Processing",
+                            tmp_html,
+                            True,
+                            True,
+                            False,
+                            440,
+                            150,
+                        )
+                    except Exception as e_add2_f:
+                        _dbg_global(f"_NotifyPostProcessResult: add2 with tmp_html failed: {e_add2_f}")
+
+                if not palette and hasattr(ui.palettes, "add"):
+                    try:
+                        _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add with tmp_html")
+                        palette = ui.palettes.add(
+                            constNotificationPaletteId,
+                            "Post Processing",
+                            tmp_html,
+                            True,
+                            True,
+                            False,
+                            440,
+                            150,
+                        )
+                    except Exception as e_add:
+                        _dbg_global(f"_NotifyPostProcessResult: add with tmp_html failed: {e_add}")
+
+        if palette:
+            _dbg_global(f"_NotifyPostProcessResult: palette successfully active (id={constNotificationPaletteId})")
+            try:
+                if "adsk.core" in sys.modules:
+                    if hasattr(adsk.core, "PaletteDockingOptions") and hasattr(adsk.core.PaletteDockingOptions, "PaletteDockOptionsNone"):
+                        palette.dockingOption = adsk.core.PaletteDockingOptions.PaletteDockOptionsNone
+                    if hasattr(adsk.core, "PaletteDockingStates") and hasattr(adsk.core.PaletteDockingStates, "PaletteDockStateFloating"):
+                        palette.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateFloating
+            except Exception as dock_exc:
+                _dbg_global(f"_NotifyPostProcessResult docking state note: {dock_exc}")
+
+            try:
                 _notification_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)
                 if hasattr(palette, "incomingFromHTML") and hasattr(palette.incomingFromHTML, "add"):
                     palette.incomingFromHTML.add(_notification_handler)
-        except Exception as pal_exc:
-            _dbg_global(f"_NotifyPostProcessResult palette creation failed: {pal_exc}")
+            except Exception as handler_exc:
+                _dbg_global(f"_NotifyPostProcessResult handler attach note: {handler_exc}")
+        else:
+            _dbg_global("_NotifyPostProcessResult: failed to create palette through all attempts")
+
 
 
 def ShowVerifyResults(ui):

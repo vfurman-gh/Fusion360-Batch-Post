@@ -449,6 +449,14 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 self.dockingState = None
                 self.incomingFromHTML = type("Incoming", (), {"add": lambda s, h: None})()
 
+            @property
+            def htmlFileURL(self):
+                return self.html
+
+            @htmlFileURL.setter
+            def htmlFileURL(self, val):
+                self.html = val
+
             def deleteMe(self):
                 self.deleted = True
 
@@ -456,8 +464,10 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             def itemById(self, id):
                 return created_palettes.get(id)
 
-            def add2(self, id, name, html, isVisible, showCloseButton, isResizable, width, height):
-                p = MockPalette(id, name, html)
+            def add2(self, id, name, html_arg, isVisible, showCloseButton, isResizable, width, height):
+                if not (html_arg.startswith("<html>") or html_arg.startswith("<HTML>") or os.path.isfile(html_arg)):
+                    raise RuntimeError("3 : Invalid htmlFileURL argument")
+                p = MockPalette(id, name, html_arg)
                 created_palettes[id] = p
                 return p
 
