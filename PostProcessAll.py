@@ -1932,14 +1932,14 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
   }}
   var dismissTimer = setTimeout(function() {{
     sendAction('dismiss', '');
-  }}, 9000);
+  }}, 30000);
   document.addEventListener('mouseenter', function() {{
     if (dismissTimer) clearTimeout(dismissTimer);
   }});
   document.addEventListener('mouseleave', function() {{
     dismissTimer = setTimeout(function() {{
       sendAction('dismiss', '');
-    }}, 4000);
+    }}, 8000);
   }});
 </script>
 </head>
@@ -2036,6 +2036,24 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
         except Exception as fe:
             _dbg_global(f"_NotifyPostProcessResult write tmp_html note: {fe}")
 
+        # Calculate target screen coordinates in bottom-right corner of viewport
+        target_x = 950
+        target_y = 700
+        app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+        if app and hasattr(app, "activeViewport") and app.activeViewport:
+            vp = app.activeViewport
+            try:
+                if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
+                    vp_w = vp.width
+                    vp_h = vp.height
+                    pt = vp.viewToScreen(adsk.core.Point2D.create(vp_w, vp_h))
+                    if pt:
+                        target_x = max(50, int(pt.x) - 460)
+                        target_y = max(50, int(pt.y) - 180)
+                        _dbg_global(f"_NotifyPostProcessResult: activeViewport {vp_w}x{vp_h} mapped to ({pt.x}, {pt.y}) -> target ({target_x}, {target_y})")
+            except Exception as e_pos:
+                _dbg_global(f"_NotifyPostProcessResult: viewToScreen calculation failed: {e_pos}")
+
         palette = None
 
         # Check if existing notification palette exists
@@ -2048,11 +2066,7 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
         if existing:
             try:
                 _dbg_global(f"_NotifyPostProcessResult: reusing existing palette id={constNotificationPaletteId}")
-                if hasattr(ui.palettes, "add2"):
-                    existing.htmlFileURL = html_text
-                else:
-                    existing.htmlFileURL = tmp_html
-                existing.isVisible = True
+                existing.htmlFileURL = tmp_html
                 palette = existing
             except Exception as rex:
                 _dbg_global(f"_NotifyPostProcessResult: palette reuse failed: {rex}, deleting to recreate")
@@ -2062,60 +2076,41 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
                     pass
                 palette = None
 
-        if not palette:
-            # Attempt 1: add2 with inline HTML definition
+        if not palette and os.path.isfile(tmp_html):
             if hasattr(ui.palettes, "add2"):
                 try:
-                    _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add2 with inline HTML")
+                    _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add2 with tmp_html")
                     palette = ui.palettes.add2(
                         constNotificationPaletteId,
                         "Post Processing",
-                        html_text,
-                        True,   # isVisible
+                        tmp_html,
+                        False,  # Initially hidden so docking/position can be applied cleanly
                         True,   # showCloseButton
                         False,  # isResizable
                         440,    # width
-                        150,    # height
+                        160,    # height
                     )
                 except Exception as e_add2:
-                    _dbg_global(f"_NotifyPostProcessResult: add2 with inline HTML failed: {e_add2}")
+                    _dbg_global(f"_NotifyPostProcessResult: add2 with tmp_html failed: {e_add2}")
 
-            # Attempt 2: fallback to tmp_html file path with add2 or add
-            if not palette and os.path.isfile(tmp_html):
-                if hasattr(ui.palettes, "add2"):
-                    try:
-                        _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add2 with tmp_html")
-                        palette = ui.palettes.add2(
-                            constNotificationPaletteId,
-                            "Post Processing",
-                            tmp_html,
-                            True,
-                            True,
-                            False,
-                            440,
-                            150,
-                        )
-                    except Exception as e_add2_f:
-                        _dbg_global(f"_NotifyPostProcessResult: add2 with tmp_html failed: {e_add2_f}")
-
-                if not palette and hasattr(ui.palettes, "add"):
-                    try:
-                        _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add with tmp_html")
-                        palette = ui.palettes.add(
-                            constNotificationPaletteId,
-                            "Post Processing",
-                            tmp_html,
-                            True,
-                            True,
-                            False,
-                            440,
-                            150,
-                        )
-                    except Exception as e_add:
-                        _dbg_global(f"_NotifyPostProcessResult: add with tmp_html failed: {e_add}")
+            if not palette and hasattr(ui.palettes, "add"):
+                try:
+                    _dbg_global("_NotifyPostProcessResult: attempting ui.palettes.add with tmp_html")
+                    palette = ui.palettes.add(
+                        constNotificationPaletteId,
+                        "Post Processing",
+                        tmp_html,
+                        False,
+                        True,
+                        False,
+                        440,
+                        160,
+                    )
+                except Exception as e_add:
+                    _dbg_global(f"_NotifyPostProcessResult: add with tmp_html failed: {e_add}")
 
         if palette:
-            _dbg_global(f"_NotifyPostProcessResult: palette successfully active (id={constNotificationPaletteId})")
+            _dbg_global(f"_NotifyPostProcessResult: palette active (id={constNotificationPaletteId})")
             try:
                 if "adsk.core" in sys.modules:
                     if hasattr(adsk.core, "PaletteDockingOptions") and hasattr(adsk.core.PaletteDockingOptions, "PaletteDockOptionsNone"):
@@ -2124,6 +2119,23 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
                         palette.dockingState = adsk.core.PaletteDockingStates.PaletteDockStateFloating
             except Exception as dock_exc:
                 _dbg_global(f"_NotifyPostProcessResult docking state note: {dock_exc}")
+
+            try:
+                res_pos = palette.setPosition(target_x, target_y)
+                _dbg_global(f"_NotifyPostProcessResult: palette.setPosition({target_x}, {target_y}) returned {res_pos}")
+            except Exception as pos_exc:
+                _dbg_global(f"_NotifyPostProcessResult: setPosition failed: {pos_exc}")
+
+            try:
+                res_size = palette.setSize(440, 160)
+                _dbg_global(f"_NotifyPostProcessResult: palette.setSize(440, 160) returned {res_size}")
+            except Exception as size_exc:
+                _dbg_global(f"_NotifyPostProcessResult: setSize note: {size_exc}")
+
+            try:
+                palette.isVisible = True
+            except Exception as vis_exc:
+                _dbg_global(f"_NotifyPostProcessResult: set isVisible=True failed: {vis_exc}")
 
             try:
                 _notification_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)

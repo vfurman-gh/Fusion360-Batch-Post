@@ -443,19 +443,36 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             def __init__(self, id, name, html):
                 self.id = id
                 self.name = name
-                self.html = html
+                self._html = html
                 self.deleted = False
                 self.dockingOption = None
                 self.dockingState = None
                 self.incomingFromHTML = type("Incoming", (), {"add": lambda s, h: None})()
 
             @property
+            def html(self):
+                if os.path.isfile(self._html):
+                    with open(self._html, "r", encoding="utf-8") as f:
+                        return f.read()
+                return self._html
+
+            @property
             def htmlFileURL(self):
-                return self.html
+                return self._html
 
             @htmlFileURL.setter
             def htmlFileURL(self, val):
-                self.html = val
+                self._html = val
+
+            def setPosition(self, left, top):
+                self.left = left
+                self.top = top
+                return True
+
+            def setSize(self, width, height):
+                self.width = width
+                self.height = height
+                return True
 
             def deleteMe(self):
                 self.deleted = True
