@@ -132,7 +132,7 @@ function makeTool(t) {
   return obj;
 }
 
-function makeSection(s, idx) {
+function makeSection(s, idx, allRawSections) {
   var toolObj = makeTool(s.tool);
   var wp = toMat(s.workPlane);
   var wo = toVec(s.workOrigin);
@@ -191,7 +191,19 @@ function makeSection(s, idx) {
     getMovements: function() { return s.movements || 0; },
     getPatternId: function() { return s.patternId || 0; },
     getInternalPatternId: function() { return s.internalPatternId || 0; },
-    getNumberOfPatternInstances: function() { return 1; },
+    getNumberOfPatternInstances: function() {
+      if (s.numberOfPatternInstances && s.numberOfPatternInstances > 1) {
+        return s.numberOfPatternInstances;
+      }
+      if (s.patternId && allRawSections && allRawSections.length) {
+        var count = 0;
+        for (var pi = 0; pi < allRawSections.length; ++pi) {
+          if (allRawSections[pi].patternId === s.patternId) count++;
+        }
+        if (count > 0) return count;
+      }
+      return 1;
+    },
     isPatterned: function() { return !!s.isPatterned; },
     hasAnyCycle: function() { return !!s.hasAnyCycle; },
     hasCycle: function() { return !!s.hasAnyCycle; },
@@ -294,7 +306,7 @@ function onClose() {
 
   var sections = [];
   for (var i = 0; i < data.sections.length; ++i) {
-    sections.push(makeSection(data.sections[i], i));
+    sections.push(makeSection(data.sections[i], i, data.sections));
   }
 
   var uniqueTools = [];

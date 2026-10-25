@@ -262,6 +262,7 @@ onSection = function() {
     movements: currentSection.getMovements ? currentSection.getMovements() : 0,
     patternId: currentSection.getPatternId ? currentSection.getPatternId() : 0,
     internalPatternId: currentSection.getInternalPatternId ? currentSection.getInternalPatternId() : 0,
+    numberOfPatternInstances: currentSection.getNumberOfPatternInstances ? currentSection.getNumberOfPatternInstances() : 1,
     isPatterned: currentSection.isPatterned ? currentSection.isPatterned() : false,
     hasAnyCycle: currentSection.hasAnyCycle ? currentSection.hasAnyCycle() : false,
     isOptional: currentSection.isOptional ? currentSection.isOptional() : false,

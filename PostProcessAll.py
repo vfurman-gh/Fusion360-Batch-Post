@@ -273,7 +273,9 @@ def _is_folder_cam_object(obj):
         return False
     if hasattr(adsk.cam, "CAMFolder") and isinstance(obj, adsk.cam.CAMFolder):
         return True
-    if getattr(obj, "objectType", "") == "adsk::cam::CAMFolder":
+    if hasattr(adsk.cam, "CAMPattern") and isinstance(obj, adsk.cam.CAMPattern):
+        return True
+    if getattr(obj, "objectType", "") in ("adsk::cam::CAMFolder", "adsk::cam::CAMPattern"):
         return True
     if hasattr(obj, "folders") and not hasattr(obj, "operationType"):
         return True

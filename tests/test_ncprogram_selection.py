@@ -24,6 +24,7 @@ if "adsk" not in sys.modules:
     adsk.cam.Setup = type("Setup", (), {})
     adsk.cam.Operation = type("Operation", (), {})
     adsk.cam.CAMFolder = type("CAMFolder", (), {})
+    adsk.cam.CAMPattern = type("CAMPattern", (adsk.cam.CAMFolder,), {})
     adsk.core = types.ModuleType("adsk.core")
     adsk.core.CommandCreatedEventHandler = type("CommandCreatedEventHandler", (), {})
     adsk.core.InputChangedEventHandler = type("InputChangedEventHandler", (), {})
@@ -73,6 +74,12 @@ class MockFolder:
         self.objectType = "adsk::cam::CAMFolder"
         for op in self.operations:
             op.parent = self
+
+
+class MockPattern(MockFolder, adsk.cam.CAMPattern):
+    def __init__(self, name, operations, parent=None):
+        super().__init__(name, operations, parent)
+        self.objectType = "adsk::cam::CAMPattern"
 
 
 class MockSetup:
@@ -329,6 +336,28 @@ class TestNCProgramSelection(unittest.TestCase):
         default_dict[self.setup1].append(self.op1_2)
         self.assertEqual(default_dict[self.setup1], [self.op1_2])
         self.assertEqual(default_dict["Setup1"], [self.op1_2])
+
+    def test_is_folder_cam_object_recognizes_campattern(self):
+        """Verify _is_folder_cam_object recognizes CAMPattern by class, inheritance, and objectType."""
+        from PostProcessAll import _is_folder_cam_object
+
+        pattern = MockPattern("CircularPattern1", [self.op1_1], parent=self.setup1)
+        self.assertTrue(_is_folder_cam_object(pattern))
+
+    def test_ncprogram_selection_with_campattern_folder(self):
+        """Verify that an NCProgram selecting a CAMPattern extracts the operations inside it."""
+        from PostProcessAll import GetNcProgramSetupsAndOperations
+
+        pattern = MockPattern("CircularPattern1", [self.op1_1, self.op1_2], parent=self.setup1)
+        # Setup has 3 ops, pattern contains 2 ops
+        self.setup1.allOperations = [self.op1_1, self.op1_2, self.op1_3]
+        program = MockNCProgram(name="PatternProgram", operations=[pattern])
+
+        target_setups, op_map = GetNcProgramSetupsAndOperations(self.cam, self.settings, program=program)
+        self.assertEqual(target_setups, [self.setup1])
+        selected_ops = op_map.get(self.setup1)
+        self.assertEqual(selected_ops, [self.op1_1, self.op1_2])
+        self.assertNotIn(self.op1_3, selected_ops)
 
 
 if __name__ == "__main__":
