@@ -7,6 +7,16 @@ Provides:
 - Legacy adapters for extracting and validating geometries from Autodesk CAM post outputs.
 """
 
+import os
+import sys
+
+# Ensure packages directory is discoverable for Fusion 360's Python 3.14 environment
+if sys.version_info >= (3, 14):
+    _addon_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _packages_dir = os.path.join(_addon_dir, "packages")
+    if os.path.isdir(_packages_dir) and _packages_dir not in sys.path:
+        sys.path.insert(0, _packages_dir)
+
 from .models import (
     MotionKind,
     CollisionKind,
@@ -27,7 +37,17 @@ from .models import (
     PromotedVectorRule,
     VerificationReport,
 )
-from .engine_interface import IVerificationEngine, BaseVerificationEngine
+
+try:
+    from .engine_interface import IVerificationEngine, BaseVerificationEngine
+except (ImportError, AttributeError):
+    import importlib
+    if "geometry.engine_interface" in sys.modules:
+        try:
+            importlib.reload(sys.modules["geometry.engine_interface"])
+        except Exception:
+            pass
+    from .engine_interface import IVerificationEngine, BaseVerificationEngine
 
 try:
     from .lathe_engine import Lathe2DIPWVerifier
@@ -41,9 +61,14 @@ except (ImportError, OSError):
 
 try:
     from .heightfield_engine import MillHeightfieldVerifier, HeightfieldGrid
-except (ImportError, OSError):
-    MillHeightfieldVerifier = None
-    HeightfieldGrid = None
+except (ImportError, AttributeError):
+    import importlib
+    if "geometry.heightfield_engine" in sys.modules:
+        try:
+            importlib.reload(sys.modules["geometry.heightfield_engine"])
+        except Exception:
+            pass
+    from .heightfield_engine import MillHeightfieldVerifier, HeightfieldGrid
 
 try:
     from .tool_generator import (

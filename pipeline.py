@@ -246,11 +246,12 @@ class PipelineOrchestrator:
             # -----------------------------------------------------------------
             # Step 5: Execute Single-Pass Vendor Post Replay
             # -----------------------------------------------------------------
+            effective_final_cnc = final_cnc_path or os.path.join(tmp_dir, "replayed_output.cnc")
             final_gcode = self.replay_combined_context(
                 combined_context=combined_ctx,
                 bootstrap_cnc_path=bootstrap_cnc,
                 base_post_path=base_post_path,
-                final_cnc_path=final_cnc_path,
+                final_cnc_path=effective_final_cnc,
                 promoted_json_path=promoted_json_path,
             )
 

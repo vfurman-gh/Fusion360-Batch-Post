@@ -1162,7 +1162,7 @@ def _EnsureLocalModulesLoaded():
     import importlib
     if constAddonDir not in sys.path:
         sys.path.insert(0, constAddonDir)
-    if os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
+    if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
         sys.path.insert(0, constPackagesDir)
 
     # Only reload geometry.models if its schema is outdated (preserving class identities for isinstance checks)
@@ -1176,6 +1176,8 @@ def _EnsureLocalModulesLoaded():
                 _dbg_global(f"Reload of geometry.models failed: {exc}")
 
     local_mod_names = (
+        "geometry.engine_interface",
+        "geometry.heightfield_engine",
         "geometry.tool_generator",
         "geometry.stock_generator",
         "geometry.legacy_adapter",
@@ -1800,7 +1802,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
               * Milling: BoxStock3D + parametric MillToolGeometry.
             - Verify toolpath:
               * Turning: Lathe2DIPWVerifier (dynamic 2D IPW simulation + chuck guard).
-              * Milling: MillClearanceVerifier (Z+ upward retracts reaching or exceeding clearance height).
+              * Milling: MillHeightfieldVerifier (3D Heightfield Grid IPW simulation with gouge & collision detection).
             - Universal fatal collision check (RAPID_INTO_STOCK, HOLDER_STRIKE, FIXTURE_COLLISION, SHANK_RUB).
               Halts post-processing and generates markdown diagnostic report if fatal collision detected.
             - If restore_rapid is enabled, stamp promotions onto merged context.

@@ -12,6 +12,12 @@ from typing import Dict, List, Optional, Sequence
 
 from .engine_interface import IVerificationEngine
 from .heightfield_engine import HeightfieldGrid, MillHeightfieldVerifier
+
+__all__ = [
+    "MillHeightfieldVerifier",
+    "HeightfieldGrid",
+    "MillClearanceVerifier",
+]
 from .models import (
     CollisionRecord,
     MotionKind,

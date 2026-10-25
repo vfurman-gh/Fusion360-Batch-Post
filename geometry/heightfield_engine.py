@@ -14,9 +14,24 @@ Provides:
   • Full linear and circular arc (G2/G3) toolpath sweeping.
 """
 
+from __future__ import annotations
+
 import math
-from typing import Dict, List, Optional, Sequence, Tuple, Union
-import numpy as np
+import os
+import sys
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+# Ensure packages directory is discoverable for Fusion 360's Python 3.14 environment
+if sys.version_info >= (3, 14):
+    _addon_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _packages_dir = os.path.join(_addon_dir, "packages")
+    if os.path.isdir(_packages_dir) and _packages_dir not in sys.path:
+        sys.path.insert(0, _packages_dir)
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 from .engine_interface import BaseVerificationEngine
 from .models import (
@@ -43,6 +58,8 @@ class HeightfieldGrid:
         cell_size_mm: float = 0.5,
         pad_mm: float = 10.0,
     ) -> None:
+        if np is None:
+            raise ImportError("numpy is required for HeightfieldGrid but could not be imported")
         self.cell_size_mm = max(0.05, float(cell_size_mm))
         self.pad_mm = max(0.0, float(pad_mm))
         self.cell_area_mm2 = self.cell_size_mm * self.cell_size_mm
@@ -123,7 +140,7 @@ class HeightfieldGrid:
         col_max: int,
         row_min: int,
         row_max: int,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[Any, Any]:
         """Construct 2D spatial coordinate grids (X, Y) for a subgrid window."""
         xs = self.grid_x_min + np.arange(col_min, col_max, dtype=np.float32) * self.cell_size_mm
         ys = self.grid_y_min + np.arange(row_min, row_max, dtype=np.float32) * self.cell_size_mm
@@ -131,15 +148,17 @@ class HeightfieldGrid:
 
 
 def evaluate_tool_bottom_profile(
-    radius_arr: np.ndarray,
+    radius_arr: Any,
     tool_radius: float,
     corner_radius: float,
     taper_angle_deg: float = 0.0,
-) -> np.ndarray:
+) -> Any:
     """
     Vectorized computation of tool bottom relative height Z_rel(r) >= 0.
     At tool tip center (r=0), Z_rel = 0.
     """
+    if np is None:
+        raise ImportError("numpy is required for evaluate_tool_bottom_profile but could not be imported")
     r = np.maximum(0.0, radius_arr)
     R = max(1e-4, float(tool_radius))
     rc = max(0.0, min(float(corner_radius), R))
@@ -185,6 +204,8 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
         xy_tol_mm: float = 1e-3,
     ) -> None:
         super().__init__()
+        if np is None:
+            raise ImportError("numpy is required for MillHeightfieldVerifier but could not be imported")
         self.grid = HeightfieldGrid(cell_size_mm=cell_size_mm, pad_mm=pad_mm)
         self.promote_margin_mm = float(promote_margin_mm)
         self.holder_margin_mm = float(holder_margin_mm)

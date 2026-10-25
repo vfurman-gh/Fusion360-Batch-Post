@@ -45,18 +45,21 @@ class IVerificationEngine(ABC):
 
     def verify_toolpath(
         self,
-        moves: Sequence[MotionSegment],
-        tools_by_op: Dict[str, ToolAssembly],
-        workpiece: WorkpieceDefinition,
+        moves: Optional[Sequence[MotionSegment]] = None,
+        tools_by_op: Optional[Dict[str, ToolAssembly]] = None,
+        workpiece: Optional[WorkpieceDefinition] = None,
+        segments: Optional[Sequence[MotionSegment]] = None,
     ) -> VerificationReport:
         """Convenience orchestration loop executing a complete toolpath evaluation."""
-        self.reset(workpiece)
+        moves_seq = moves if moves is not None else (segments or [])
+        if workpiece is not None:
+            self.reset(workpiece)
         current_op = None
 
-        for move in moves:
+        for move in moves_seq:
             if move.op_id != current_op:
                 current_op = move.op_id
-                if current_op in tools_by_op:
+                if tools_by_op and current_op in tools_by_op:
                     self.load_tool(tools_by_op[current_op])
 
             self.step(move)
