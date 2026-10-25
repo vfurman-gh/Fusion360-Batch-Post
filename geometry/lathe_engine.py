@@ -285,6 +285,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
                         contact_point=Vector3D(p2[1], 0.0, p2[0]),
                         penetration_volume_mm3=chuck_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
                         description=f"Tool collided with chuck fixture (overlap area: {chuck_hit.area:.3f} mm²)",
+                        op_id=move.op_id,
                     )
                     self.collisions.append(col)
                     move_collisions.append(col)
@@ -305,6 +306,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
                             contact_point=Vector3D(p2[1], 0.0, p2[0]),
                             penetration_volume_mm3=rapid_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
                             description=f"Rapid move crashed into uncut stock (overlap area: {rapid_hit.area:.3f} mm²)",
+                            op_id=move.op_id,
                         )
                         self.collisions.append(col)
                         move_collisions.append(col)
@@ -320,6 +322,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
                             contact_point=Vector3D(p2[1], 0.0, p2[0]),
                             penetration_volume_mm3=holder_hit.area * ESTIMATED_PENETRATION_DEPTH_MM,
                             description=f"Toolholder rapid strike into stock (overlap area: {holder_hit.area:.3f} mm²)",
+                            op_id=move.op_id,
                         )
                         self.collisions.append(col)
                         move_collisions.append(col)
@@ -349,6 +352,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
                         contact_point=Vector3D(p2[1], 0.0, p2[0]),
                         penetration_volume_mm3=outside_wake.area * ESTIMATED_PENETRATION_DEPTH_MM,
                         description=f"Toolholder shank gouged raw stock (overlap area: {outside_wake.area:.3f} mm²)",
+                        op_id=move.op_id,
                     )
                     self.collisions.append(col)
                     move_collisions.append(col)

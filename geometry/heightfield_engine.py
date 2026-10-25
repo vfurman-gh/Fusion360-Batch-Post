@@ -447,6 +447,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                     f"Toolholder collided with uncut stock (max penetration: {max_pen:.3f} mm, "
                     f"volume: {pen_vol:.2f} mm³)"
                 ),
+                op_id=move.op_id,
             )
             self.collisions.append(col)
             move_collisions.append(col)
@@ -467,6 +468,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                 description=(
                     f"Unfluted tool shank rubbed into raw stock (depth exceeded flute by {max_pen:.3f} mm)"
                 ),
+                op_id=move.op_id,
             )
             self.collisions.append(col)
             move_collisions.append(col)
@@ -492,6 +494,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                         f"Rapid move crashed into uncut stock (penetration: {max_pen:.3f} mm, "
                         f"volume: {pen_vol:.2f} mm³)"
                     ),
+                    op_id=move.op_id,
                 )
                 self.collisions.append(col)
                 move_collisions.append(col)

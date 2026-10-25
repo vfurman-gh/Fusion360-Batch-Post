@@ -55,14 +55,20 @@ class IVerificationEngine(ABC):
         if workpiece is not None:
             self.reset(workpiece)
         current_op = None
+        op_order: List[str] = []
 
         for move in moves_seq:
+            if move.op_id and move.op_id not in op_order:
+                op_order.append(move.op_id)
             if move.op_id != current_op:
                 current_op = move.op_id
                 if tools_by_op and current_op in tools_by_op:
                     self.load_tool(tools_by_op[current_op])
 
             self.step(move)
+
+        if hasattr(self, "operation_names"):
+            self.operation_names = op_order
 
         return self.generate_report()
 
@@ -85,6 +91,7 @@ class BaseVerificationEngine(IVerificationEngine):
         self.vector_last_cut_occurrence: Dict[str, int] = {}
         self.vector_has_air_occurrence: Dict[str, bool] = {}
         self.promoted_vectors: Dict[str, PromotedVectorRule] = {}
+        self.operation_names: List[str] = []
 
     def _reset_base_state(self, workpiece: WorkpieceDefinition) -> None:
         """Reset the shared timing, collision, MRR, and vector occurrence collections."""
@@ -99,6 +106,7 @@ class BaseVerificationEngine(IVerificationEngine):
         self.vector_last_cut_occurrence.clear()
         self.vector_has_air_occurrence.clear()
         self.promoted_vectors.clear()
+        self.operation_names.clear()
 
     def record_vector_occurrence(self, v_key_str: str, is_air_move: bool) -> int:
         """
@@ -172,4 +180,5 @@ class BaseVerificationEngine(IVerificationEngine):
             promoted_vectors=final_promoted,
             mrr_timeline=list(self.mrr_timeline),
             mrr_spikes=spikes,
+            operation_names=list(getattr(self, "operation_names", [])),
         )

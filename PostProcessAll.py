@@ -934,7 +934,7 @@ def PerformPostProcess(docSettings, setups=None):
 verifyResults = []
 
 
-def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=None, promoted=None, spikes=None, volume_mm3=None, collisions=None, error=None):
+def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=None, promoted=None, spikes=None, volume_mm3=None, collisions=None, error=None, warning=None):
     basePath = os.path.splitext(cncPath)[0]
     if not reportPath:
         reportPath = basePath + "_report.md"
@@ -959,6 +959,7 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=Non
         "volume_mm3": volume_mm3,
         "kinds": kinds,
         "error": error,
+        "warning": warning,
     })
     try:
         adsk.core.Application.get().log(f"[PostProcessAll] {setup.name}:\n{reportText}")
@@ -1599,7 +1600,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                 c for c in report.collisions
                 if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION)
             ]
-            err = f"{len(fatal_cols)} fatal collision(s) detected!" if fatal_cols else None
+            warn = f"{len(fatal_cols)} collision(s) detected!" if fatal_cols else None
             promoted_cnt = len(report.promoted_vectors) if promote else 0
             spikes_cnt = len(report.mrr_spikes)
             vol_mm3 = report.total_volume_removed_mm3
@@ -1681,7 +1682,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
                         collision_cnt = res_data.get("collisions", 0)
 
                 cols_list = []
-                err = f"{collision_cnt} fatal collision(s) detected!" if collision_cnt > 0 else None
+                warn = f"{collision_cnt} collision(s) detected!" if collision_cnt > 0 else None
             finally:
                 if tools_tmp_path and os.path.isfile(tools_tmp_path):
                     try:
@@ -1702,7 +1703,7 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             with open(reportPath, "r", encoding="utf8", errors="replace") as rf:
                 report_md = rf.read()
 
-        _dbg(f"RunLatheVerifier: recording result for {setup.name}: cols={len(cols_list)}, promoted={promoted_cnt}, err={err}")
+        _dbg(f"RunLatheVerifier: recording result for {setup.name}: cols={len(cols_list)}, promoted={promoted_cnt}, warn={warn}")
         _RecordVerifyResult(
             setup=setup,
             cncPath=cncPath,
@@ -1713,11 +1714,17 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
             spikes=spikes_cnt,
             volume_mm3=vol_mm3,
             collisions=cols_list,
-            error=err,
+            error=None,
+            warning=warn,
         )
 
-        if err:
-            return f"Lathe verification detected {err} in {os.path.basename(cncPath)}"
+        if warn:
+            _dbg(f"RunLatheVerifier: WARNING: {warn} in {os.path.basename(cncPath)}. Final NC code generated.")
+            try:
+                adsk.core.Application.get().log(f"[PostProcessAll] WARNING: {warn} in setup {setup.name}")
+            except Exception:
+                pass
+
         return None
 
     except Exception as exc:
@@ -1726,46 +1733,28 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
 
 
 def ShowVerifyResults(ui):
+    """
+    Log verification summaries to Application log without modal dialog interruption.
+    Diagnostic details and collision breakdowns are saved to the XXX_report.md files.
+    """
     _dbg_global(f"ShowVerifyResults called: verifyResults count={len(verifyResults)}")
     if not verifyResults:
         return
-    lines = []
     for r in verifyResults:
-        status = "FAILED: " + r["error"] if r["error"] else "OK"
-        lines.append(f"{r['setup']}: {status}")
-        if r["promoted"] is not None:
-            lines.append(f"    G0 Rapids Restored: {r['promoted']}")
-        if r.get("volume_mm3") is not None:
-            vol = r["volume_mm3"]
-            vol_in3 = vol / (25.4 ** 3)
-            lines.append(f"    Total Material Removed: {vol:.2f} mm³ ({vol_in3:.3f} in³)")
-        if r["spikes"] is not None:
-            lines.append(f"    MRR spikes flagged: {r['spikes']}")
-        for kind, n in sorted(r["kinds"].items()):
-            lines.append(f"    {kind}: {n}")
-        lines.append(f"    G-code: {r['cnc']}")
-        if r.get("png") and os.path.isfile(r["png"]):
-            lines.append(f"    Plot:   {r['png']}")
-        if r.get("report") and os.path.isfile(r["report"]):
-            lines.append(f"    Report: {r['report']}")
-        lines.append("")
-    lines.append("Open the verification plot(s) and report(s) now?")
-    res = ui.messageBox("\n".join(lines),
-                        constCmdName + " - Lathe Verification",
-                        adsk.core.MessageBoxButtonTypes.YesNoButtonType,
-                        adsk.core.MessageBoxIconTypes.InformationIconType)
-    if res == adsk.core.DialogResults.DialogYes:
-        failures = []
-        for r in verifyResults:
-            for p in (r.get("png"), r.get("report")):
-                if p and os.path.isfile(p):
-                    err = _OpenFile(p)
-                    if err:
-                        failures.append(f"{p}: {err}")
-        if failures:
-            ui.messageBox("Could not open:\n" + "\n".join(failures), constCmdName,
-                          adsk.core.MessageBoxButtonTypes.OKButtonType,
-                          adsk.core.MessageBoxIconTypes.WarningIconType)
+        total_cols = sum(r["kinds"].values()) if r.get("kinds") else 0
+        if r.get("error"):
+            status = "FAILED: " + r["error"]
+        elif r.get("warning") or total_cols > 0:
+            warn_str = r.get("warning") or f"{total_cols} collision(s) detected"
+            status = f"WARNING: {warn_str}"
+        else:
+            status = "OK"
+        msg = f"[PostProcessAll] Verification for '{r['setup']}': {status} | NC: {r.get('cnc')} | Report: {r.get('report')}"
+        _dbg_global(msg)
+        try:
+            adsk.core.Application.get().log(msg)
+        except Exception:
+            pass
 
 
 def _OpenFile(path):
@@ -1803,8 +1792,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             - Verify toolpath:
               * Turning: Lathe2DIPWVerifier (dynamic 2D IPW simulation + chuck guard).
               * Milling: MillHeightfieldVerifier (3D Heightfield Grid IPW simulation with gouge & collision detection).
-            - Universal fatal collision check (RAPID_INTO_STOCK, HOLDER_STRIKE, FIXTURE_COLLISION, SHANK_RUB).
-              Halts post-processing and generates markdown diagnostic report if fatal collision detected.
+            - Universal collision check (RAPID_INTO_STOCK, HOLDER_STRIKE, FIXTURE_COLLISION, SHANK_RUB).
+              Issues warnings, logs diagnostics, and highlights collisions while continuing final NC generation.
             - If restore_rapid is enabled, stamp promotions onto merged context.
             - Single-pass replay of unmodified vendor post via universal_replayer.cps.
             - Generate summary report (_report.md) and record verify results for UI.
@@ -2027,29 +2016,19 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             replayer_cps=constReplayerScript,
         )
 
-        # Universal collision check: halt before replaying vendor post if any fatal collision is found
+        # Universal collision check: issue warnings and record collision metrics while continuing NC generation
         fatal_cols = [
             c for c in report.collisions
             if c.kind in (CollisionKind.RAPID_INTO_STOCK, CollisionKind.HOLDER_STRIKE, CollisionKind.FIXTURE_COLLISION, CollisionKind.SHANK_RUB)
         ]
+        warning_msg = None
         if fatal_cols:
-            _dbg(f"Pass 2: {len(fatal_cols)} fatal collision(s) detected! Halting machine post replay.")
-            summary_md = orchestrator._format_summary_report(report, final_gcode="", base_post_path=base_post_path)
-            with open(report_path, "w", encoding="utf-8") as rf:
-                rf.write(summary_md)
-            _RecordVerifyResult(
-                setup=setup,
-                cncPath=path,
-                reportText=summary_md,
-                reportPath=report_path,
-                pngPath=plot_path,
-                promoted=0,
-                spikes=len(report.mrr_spikes),
-                volume_mm3=report.total_volume_removed_mm3,
-                collisions=report.collisions,
-                error=f"{len(fatal_cols)} fatal collision(s) detected",
-            )
-            return f"{len(fatal_cols)} fatal collision(s) detected in setup {setup.name}! See {os.path.basename(report_path)}."
+            warning_msg = f"{len(fatal_cols)} collision(s) detected"
+            _dbg(f"Pass 2: WARNING: {warning_msg} in setup {setup.name}! Continuing with final NC code generation.")
+            try:
+                adsk.core.Application.get().log(f"[PostProcessAll] WARNING: {warning_msg} in setup {setup.name}!")
+            except Exception:
+                pass
 
         # Stamp promoted rapid flags directly onto merged context
         do_promote = bool(docSettings.get("restore_rapid", True))
@@ -2086,6 +2065,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             volume_mm3=report.total_volume_removed_mm3,
             collisions=report.collisions,
             error=None,
+            warning=warning_msg,
         )
 
         return None

@@ -183,6 +183,7 @@ class CollisionRecord:
     contact_point: Vector3D
     penetration_volume_mm3: float
     description: str
+    op_id: str = ""
 
 
 @dataclass
@@ -221,3 +222,4 @@ class VerificationReport:
     promoted_vectors: Dict[str, PromotedVectorRule] # Map of vector keys to occurrence rules
     mrr_timeline: List[MRRSample]
     mrr_spikes: List[MRRSample]
+    operation_names: List[str] = field(default_factory=list)

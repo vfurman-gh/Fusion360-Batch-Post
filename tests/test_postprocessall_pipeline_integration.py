@@ -33,6 +33,26 @@ if "adsk" not in sys.modules:
     sys.modules["adsk.cam"] = adsk.cam
     sys.modules["adsk.core"] = adsk.core
     sys.modules["adsk.fusion"] = adsk.fusion
+else:
+    adsk = sys.modules["adsk"]
+
+if not hasattr(adsk.core, "MessageBoxIconTypes"):
+    adsk.core.MessageBoxIconTypes = types.SimpleNamespace(
+        InformationIconType=0,
+        WarningIconType=1,
+        CriticalIconType=2,
+    )
+if not hasattr(adsk.core, "MessageBoxButtonTypes"):
+    adsk.core.MessageBoxButtonTypes = types.SimpleNamespace(
+        OKButtonType=0,
+        YesNoButtonType=1,
+    )
+if not hasattr(adsk.core, "DialogResults"):
+    adsk.core.DialogResults = types.SimpleNamespace(
+        DialogYes=0,
+        DialogNo=1,
+        DialogOK=2,
+    )
 
 from PostProcessAll import RunLatheVerifier, verifyResults, _RecordVerifyResult
 
@@ -268,6 +288,151 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 content = f.read()
             self.assertIn("Toolpath Verification", content)
             self.assertIn("Total Material Removed", content)
+
+    def test_record_verify_result_with_warning(self):
+        """Verify _RecordVerifyResult records warnings and collision kinds properly."""
+        from PostProcessAll import _RecordVerifyResult, verifyResults
+        from geometry.models import CollisionRecord, CollisionKind, Vector3D
+
+        setup = DummySetup(name="Collision Setup", is_turning=True)
+        col = CollisionRecord(
+            segment_id=1,
+            vector_key="v1",
+            kind=CollisionKind.RAPID_INTO_STOCK,
+            timestamp_sec=0.1,
+            contact_point=Vector3D(0.0, 0.0, -5.0),
+            penetration_volume_mm3=10.0,
+            description="Rapid into uncut stock",
+        )
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath="/tmp/test.nc",
+            reportText="# Report",
+            collisions=[col],
+            warning="1 collision(s) detected!",
+            error=None,
+        )
+        self.assertEqual(len(verifyResults), 1)
+        rec = verifyResults[0]
+        self.assertEqual(rec["setup"], "Collision Setup")
+        self.assertIsNone(rec["error"])
+        self.assertEqual(rec["warning"], "1 collision(s) detected!")
+        self.assertEqual(rec["kinds"].get("RAPID_INTO_STOCK"), 1)
+
+    def test_show_verify_results_does_not_popup_modal_dialog(self):
+        """Verify ShowVerifyResults operates silently without modal dialog popups."""
+        from PostProcessAll import _RecordVerifyResult, ShowVerifyResults, verifyResults
+        from geometry.models import CollisionRecord, CollisionKind, Vector3D
+
+        setup = DummySetup(name="Warning Setup", is_turning=False)
+        col = CollisionRecord(
+            segment_id=5,
+            vector_key="v5",
+            kind=CollisionKind.HOLDER_STRIKE,
+            timestamp_sec=0.5,
+            contact_point=Vector3D(10.0, 20.0, -10.0),
+            penetration_volume_mm3=20.0,
+            description="Holder strikes stock wall",
+        )
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath="/tmp/warn.nc",
+            reportText="# Warning Report",
+            collisions=[col],
+            warning="1 collision(s) detected",
+            error=None,
+        )
+
+        popup_called = []
+        class MockUI:
+            def messageBox(self, *args, **kwargs):
+                popup_called.append(args)
+                return 0
+
+        ShowVerifyResults(MockUI())
+        self.assertEqual(len(popup_called), 0, "ShowVerifyResults must never pop up modal message boxes in the user's face")
+
+    def test_format_summary_report_specifies_operation_collisions(self):
+        """Verify _format_summary_report outputs markdown table and breakdown by operation."""
+        from pipeline import PipelineOrchestrator
+        from geometry.models import CollisionRecord, CollisionKind, Vector3D, VerificationReport
+
+        orchestrator = PipelineOrchestrator(
+            dumper_cps=os.path.join(self.repo_root, "universal_dumper.cps"),
+            replayer_cps=os.path.join(self.repo_root, "universal_replayer.cps"),
+        )
+
+        col1 = CollisionRecord(
+            segment_id=42,
+            vector_key="v42",
+            kind=CollisionKind.RAPID_INTO_STOCK,
+            timestamp_sec=12.5,
+            contact_point=Vector3D(10.0, -15.0, -2.0),
+            penetration_volume_mm3=8.5,
+            description="Rapid crashed into raw stock",
+            op_id="3D Adaptive Roughing1",
+        )
+        col2 = CollisionRecord(
+            segment_id=88,
+            vector_key="v88",
+            kind=CollisionKind.RAPID_INTO_STOCK,
+            timestamp_sec=25.0,
+            contact_point=Vector3D(12.0, -14.0, -3.0),
+            penetration_volume_mm3=4.2,
+            description="Rapid crashed into raw stock again",
+            op_id="3D Adaptive Roughing1",
+        )
+        col3 = CollisionRecord(
+            segment_id=150,
+            vector_key="v150",
+            kind=CollisionKind.HOLDER_STRIKE,
+            timestamp_sec=60.0,
+            contact_point=Vector3D(20.0, 5.0, 15.0),
+            penetration_volume_mm3=12.0,
+            description="Holder struck uncut wall",
+            op_id="2D Contour1",
+        )
+
+        report = VerificationReport(
+            total_machining_time_sec=120.0,
+            total_volume_removed_mm3=15000.0,
+            collisions=[col1, col2, col3],
+            promoted_vectors={},
+            mrr_timeline=[],
+            mrr_spikes=[],
+            operation_names=["3D Adaptive Roughing1", "2D Contour3", "2D Contour1"],
+        )
+
+        md = orchestrator._format_summary_report(
+            report=report,
+            final_gcode="",
+            base_post_path="/path/to/tormach.cps",
+            restored_count=10,
+        )
+
+        # 1. Table header exists
+        self.assertIn("### Collisions by Operation", md)
+        self.assertIn("| Operation | Status | Collisions | Details by Type |", md)
+
+        # 2. 3D Adaptive Roughing1 row: 2 collisions, RAPID_INTO_STOCK (2)
+        self.assertIn("| **3D Adaptive Roughing1** | ⚠️ **Collision** | **2** | `RAPID_INTO_STOCK` (2) |", md)
+
+        # 3. 2D Contour3 row: clean/safe
+        self.assertIn("| 2D Contour3 | ✅ Safe | 0 | None |", md)
+
+        # 4. 2D Contour1 row: 1 collision, HOLDER_STRIKE (1)
+        self.assertIn("| **2D Contour1** | ⚠️ **Collision** | **1** | `HOLDER_STRIKE` (1) |", md)
+
+        # 5. Total row
+        self.assertIn("| **Total** | | **3** | |", md)
+
+        # 6. Detailed breakdown section
+        self.assertIn("### Detailed Collision Breakdown", md)
+        self.assertIn("#### ⚠️ Operation: 3D Adaptive Roughing1 (2 collisions)", md)
+        self.assertIn("Move 42", md)
+        self.assertIn("Move 88", md)
+        self.assertIn("#### ⚠️ Operation: 2D Contour1 (1 collision)", md)
+        self.assertIn("Move 150", md)
 
 
 if __name__ == "__main__":

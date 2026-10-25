@@ -333,14 +333,63 @@ class PipelineOrchestrator:
             "## Collision Status",
         ]
 
+        # Collate collisions by operation
+        cols_by_op: Dict[str, List[CollisionRecord]] = {}
+        for c in report.collisions:
+            op_label = c.op_id if c.op_id else "General"
+            cols_by_op.setdefault(op_label, []).append(c)
+
+        all_ops = list(report.operation_names) if getattr(report, "operation_names", None) else []
+        for op in cols_by_op.keys():
+            if op not in all_ops:
+                all_ops.append(op)
+        if not all_ops:
+            all_ops = list(cols_by_op.keys()) or ["All Operations"]
+
         if collision_count == 0:
-            lines.append("✅ **Zero collisions detected.** All rapid moves and holder clearances are verified safe.")
+            lines.append("✅ **Zero collisions detected.** All rapid moves and holder clearances are verified safe across all operations.")
+            lines.append("")
+            lines.append("### Operations Verification Summary")
+            lines.append("| Operation | Status | Collisions | Details by Type |")
+            lines.append("| :--- | :--- | :--- | :--- |")
+            for op in all_ops:
+                lines.append(f"| {op} | ✅ Safe | 0 | None |")
         else:
-            lines.append(f"⚠️ **{collision_count} Collisions Detected:**")
-            for c in report.collisions:
-                lines.append(
-                    f"- Line/Move {c.segment_id} ({c.kind.name}): {c.description} "
-                    f"at contact ({c.contact_point.x:.2f}, {c.contact_point.y:.2f}, {c.contact_point.z:.2f})"
-                )
+            affected_ops = [op for op, clist in cols_by_op.items() if len(clist) > 0]
+            lines.append(
+                f"⚠️ **{collision_count} Collision(s) Detected across {len(affected_ops)} operation(s)!**  \n"
+                "Final NC code generation completed with warnings. Review the table and detailed move listings below before machining."
+            )
+            lines.append("")
+            lines.append("### Collisions by Operation")
+            lines.append("| Operation | Status | Collisions | Details by Type |")
+            lines.append("| :--- | :--- | :--- | :--- |")
+            for op in all_ops:
+                op_cols = cols_by_op.get(op, [])
+                if op_cols:
+                    type_counts: Dict[str, int] = {}
+                    for c in op_cols:
+                        k_name = c.kind.name if hasattr(c.kind, "name") else str(c.kind)
+                        type_counts[k_name] = type_counts.get(k_name, 0) + 1
+                    type_str = ", ".join(f"`{k}` ({n})" for k, n in sorted(type_counts.items()))
+                    lines.append(f"| **{op}** | ⚠️ **Collision** | **{len(op_cols)}** | {type_str} |")
+                else:
+                    lines.append(f"| {op} | ✅ Safe | 0 | None |")
+            lines.append(f"| **Total** | | **{collision_count}** | |")
+            lines.append("")
+
+            lines.append("### Detailed Collision Breakdown")
+            for op in all_ops:
+                op_cols = cols_by_op.get(op, [])
+                if not op_cols:
+                    continue
+                lines.append(f"#### ⚠️ Operation: {op} ({len(op_cols)} collision{'s' if len(op_cols) != 1 else ''})")
+                for c in op_cols:
+                    k_name = c.kind.name if hasattr(c.kind, "name") else str(c.kind)
+                    lines.append(
+                        f"- **Move {c.segment_id}** (`{k_name}`): {c.description} "
+                        f"at contact `({c.contact_point.x:.2f}, {c.contact_point.y:.2f}, {c.contact_point.z:.2f})`"
+                    )
+                lines.append("")
 
         return "\n".join(lines)
