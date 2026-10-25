@@ -27,7 +27,7 @@ from .models import (
     PromotedVectorRule,
     VerificationReport,
 )
-from .engine_interface import IVerificationEngine
+from .engine_interface import IVerificationEngine, BaseVerificationEngine
 
 try:
     from .lathe_engine import Lathe2DIPWVerifier
@@ -38,6 +38,12 @@ try:
     from .mill_engine import MillClearanceVerifier
 except (ImportError, OSError):
     MillClearanceVerifier = None
+
+try:
+    from .heightfield_engine import MillHeightfieldVerifier, HeightfieldGrid
+except (ImportError, OSError):
+    MillHeightfieldVerifier = None
+    HeightfieldGrid = None
 
 try:
     from .tool_generator import (
@@ -100,8 +106,11 @@ __all__ = [
     "PromotedVectorRule",
     "VerificationReport",
     "IVerificationEngine",
+    "BaseVerificationEngine",
     "Lathe2DIPWVerifier",
     "MillClearanceVerifier",
+    "MillHeightfieldVerifier",
+    "HeightfieldGrid",
     "generate_rhombic_insert",
     "generate_grooving_insert",
     "generate_drill_cutter",

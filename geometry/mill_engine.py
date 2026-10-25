@@ -11,6 +11,7 @@ import math
 from typing import Dict, List, Optional, Sequence
 
 from .engine_interface import IVerificationEngine
+from .heightfield_engine import HeightfieldGrid, MillHeightfieldVerifier
 from .models import (
     CollisionRecord,
     MotionKind,

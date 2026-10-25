@@ -1985,8 +1985,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             from geometry import Lathe2DIPWVerifier
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
         else:
-            from geometry.mill_engine import MillClearanceVerifier
-            verifier = MillClearanceVerifier()
+            from geometry import MillHeightfieldVerifier
+            verifier = MillHeightfieldVerifier()
 
         report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
 
