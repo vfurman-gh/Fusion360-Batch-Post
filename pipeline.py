@@ -136,7 +136,7 @@ class PipelineOrchestrator:
             if isinstance(combined_context, dict):
                 ctx_path = os.path.join(tmp_dir, "combined_context.json")
                 with open(ctx_path, "w", encoding="utf-8") as f:
-                    json.dump(combined_context, f)
+                    json.dump(combined_context, f, separators=(',', ':'))
             else:
                 ctx_path = combined_context
 

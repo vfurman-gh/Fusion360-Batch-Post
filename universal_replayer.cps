@@ -27,6 +27,31 @@ minimumRevision = 45000;
 capabilities = CAPABILITY_TURNING | CAPABILITY_MILLING | CAPABILITY_INTERMEDIATE;
 extension = "nc";
 
+function loadLargeText(path, encoding) {
+  if (!path) return "";
+  try {
+    if (typeof FileSystem !== "undefined" && FileSystem.isFile(path) && FileSystem.getFileSize(path) < 800000) {
+      return loadText(path, encoding || "utf-8");
+    }
+  } catch (e) {
+    // Fall back to streaming TextFile
+  }
+
+  // Stream via TextFile to bypass the Autodesk Post Processor kernel 1 MB buffer limit
+  var file = new TextFile(path, false, encoding || "utf-8");
+  var lines = [];
+  while (true) {
+    try {
+      var l = file.readln();
+      lines.push(l);
+    } catch (e) {
+      break;
+    }
+  }
+  file.close();
+  return lines.join("\n");
+}
+
 function toVec(v) {
   if (!v) return new Vector(0, 0, 0);
   return new Vector(v.x, v.y, v.z);
@@ -255,14 +280,14 @@ function onClose() {
     promotedJsonPath = getEnvironmentVariable("PROMOTED_MOVES_JSON");
   } catch (e) {}
 
-  var data = JSON.parse(loadText(jsonPath, "utf-8"));
-  var vendorCode = loadText(basePostPath, "utf-8");
+  var data = JSON.parse(loadLargeText(jsonPath, "utf-8"));
+  var vendorCode = loadLargeText(basePostPath, "utf-8");
 
   var authorizedMap = null;
   var hasPromotedMap = false;
   if (promotedJsonPath && FileSystem.isFile(promotedJsonPath)) {
     try {
-      authorizedMap = JSON.parse(loadText(promotedJsonPath, "utf-8"));
+      authorizedMap = JSON.parse(loadLargeText(promotedJsonPath, "utf-8"));
       hasPromotedMap = true;
     } catch (e) {}
   }

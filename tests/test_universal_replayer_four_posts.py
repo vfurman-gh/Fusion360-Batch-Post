@@ -596,6 +596,35 @@ class TestUniversalReplayerFourPosts(unittest.TestCase):
             # Clean M30 program termination
             self.assertEqual(gcode.count("M30"), 1)
 
+    def test_large_combined_context_streaming_exceeding_1mb(self):
+        """
+        Verify that replay_combined_context succeeds without exit code 244
+        when combined_context.json exceeds 1 MB (Autodesk loadText() buffer limit).
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            b0_json = os.path.join(tmp_dir, "batch_0.json")
+            b0_ctx = self.orchestrator.dump_context(self.milling_cnc, self.tormach_cps, b0_json)
+            large_ctx = copy.deepcopy(b0_ctx)
+
+            base_events = list(large_ctx["sections"][0]["events"])
+            while len(json.dumps(large_ctx, separators=(",", ":")).encode("utf-8")) < 1200000:
+                large_ctx["sections"][0]["events"].extend(copy.deepcopy(base_events))
+
+            ctx_bytes_len = len(json.dumps(large_ctx, separators=(",", ":")).encode("utf-8"))
+            self.assertGreater(ctx_bytes_len, 1048576, f"Context must exceed 1MB, got {ctx_bytes_len} bytes")
+
+            out_nc = os.path.join(tmp_dir, "large_out.nc")
+            gcode = self.orchestrator.replay_combined_context(
+                combined_context=large_ctx,
+                bootstrap_cnc_path=self.turning_cnc,
+                base_post_path=self.tormach_cps,
+                final_cnc_path=out_nc,
+            )
+            self.assertTrue(os.path.exists(out_nc))
+            self.assertGreater(len(gcode), 0)
+            self.assertIn("M30", gcode)
+
 
 if __name__ == "__main__":
     unittest.main()
+
