@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections
+import adsk.core, adsk.fusion, adsk.cam, sys, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections, html
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
@@ -910,27 +910,31 @@ def PerformPostProcess(docSettings, setups=None):
                     except Exception:
                         pass
 
-        # done with setups, report results
-        if cntSkipped != 0:
-            ui.messageBox("{} files were written. {} Setups were skipped due to error:{}".format(cntFiles, cntSkipped, lstSkipped), 
-                constCmdName, 
-                adsk.core.MessageBoxButtonTypes.OKButtonType,
-                adsk.core.MessageBoxIconTypes.WarningIconType)
-            
-        elif cntFiles == 0:
-            ui.messageBox('No CAM operations posted', 
-                constCmdName, 
-                adsk.core.MessageBoxButtonTypes.OKButtonType,
-                adsk.core.MessageBoxIconTypes.WarningIconType)
-
+        # done with setups, report results non-modally
+        _NotifyPostProcessResult(
+            ui=ui,
+            cntFiles=cntFiles,
+            cntSkipped=cntSkipped,
+            lstSkipped=lstSkipped,
+            outputFolder=outputFolder,
+            verifyResults=verifyResults,
+        )
         ShowVerifyResults(ui)
-            
 
     except:
         if progress:
             progress.hide()
-        if ui:
-            ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
+        err_msg = traceback.format_exc()
+        _dbg_global("PerformPostProcess exception:\n" + err_msg)
+        _NotifyPostProcessResult(
+            ui=ui,
+            cntFiles=0,
+            cntSkipped=1,
+            lstSkipped=err_msg,
+            outputFolder=outputFolder if 'outputFolder' in locals() else "",
+            verifyResults=verifyResults,
+            is_fatal=True,
+        )
 
 # Per-run list of lathe verification summaries, shown in a modal dialog at the end
 verifyResults = []
@@ -1732,6 +1736,317 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     except Exception as exc:
         _dbg(f"RunLatheVerifier threw exception: {exc}\n{traceback.format_exc()}")
         return f"Lathe pipeline verifier failed on {os.path.basename(cncPath)}: {exc}"
+
+
+_notification_handler = None
+constNotificationPaletteId = "PostProcessAll_NotificationPalette"
+
+_HTMLEventHandlerBase = (
+    getattr(adsk.core, "HTMLEventHandler", object)
+    if ("adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "HTMLEventHandler"))
+    else object
+)
+
+
+class _NotificationHTMLEventHandler(_HTMLEventHandlerBase):
+    def __init__(self, palette_id):
+        super().__init__()
+        self.palette_id = palette_id
+
+    def notify(self, args):
+        try:
+            action = getattr(args, "action", "")
+            data = getattr(args, "data", "")
+            if "adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "HTMLEventArgs"):
+                try:
+                    c = adsk.core.HTMLEventArgs.cast(args)
+                    if c:
+                        action = c.action
+                        data = c.data
+                except Exception:
+                    pass
+
+            app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+            ui = app.userInterface if app else None
+
+            if action in ("open_file", "open_folder"):
+                if data and os.path.exists(data):
+                    _OpenFile(data)
+            elif action == "dismiss":
+                if ui and hasattr(ui, "palettes") and ui.palettes:
+                    p = ui.palettes.itemById(self.palette_id)
+                    if p:
+                        p.deleteMe()
+        except Exception as exc:
+            _dbg_global(f"NotificationHTMLEventHandler exception: {exc}")
+
+
+def _BuildNotificationHTML(title, status_type, message, details, actions):
+    """Generate self-contained HTML for non-modal Fusion toast notification."""
+    icon_map = {
+        'success': '✓',
+        'warning': '⚠',
+        'error': '✕',
+    }
+    color_map = {
+        'success': '#2e7d32',
+        'warning': '#ed6c02',
+        'error': '#d32f2f',
+    }
+    bg_accent = color_map.get(status_type, '#2e7d32')
+    icon = icon_map.get(status_type, '✓')
+
+    action_buttons = []
+    for label, action_name, action_data in actions:
+        esc_data = html.escape(action_data, quote=True).replace('\\', '\\\\').replace("'", "\\'")
+        action_buttons.append(
+            f'<button class="action-btn" onclick="sendAction(\'{action_name}\', \'{esc_data}\')">{html.escape(label)}</button>'
+        )
+    actions_html = "\n".join(action_buttons)
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #2b2b2b;
+    color: #f0f0f0;
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.4;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }}
+  @media (prefers-color-scheme: light) {{
+    body {{ background: #fdfdfd; color: #202020; border: 1px solid #d0d0d0; }}
+  }}
+  .toast-header {{
+    display: flex;
+    align-items: center;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }}
+  .toast-icon {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: {bg_accent};
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: bold;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }}
+  .toast-title {{
+    flex-grow: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .toast-close {{
+    cursor: pointer;
+    font-size: 14px;
+    color: #888;
+    padding: 0 4px;
+    line-height: 1;
+  }}
+  .toast-close:hover {{ color: #ccc; }}
+  .toast-body {{
+    font-size: 11.5px;
+    margin-bottom: 8px;
+    color: #cccccc;
+  }}
+  @media (prefers-color-scheme: light) {{
+    .toast-body {{ color: #555555; }}
+  }}
+  .toast-details {{
+    font-size: 10.5px;
+    color: #999999;
+    margin-bottom: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .toast-actions {{
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }}
+  button.action-btn {{
+    background: #3e3e3e;
+    color: #ffffff;
+    border: 1px solid #555555;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }}
+  @media (prefers-color-scheme: light) {{
+    button.action-btn {{ background: #eeeeee; color: #111111; border-color: #cccccc; }}
+  }}
+  button.action-btn:hover {{
+    background: #007acc;
+    border-color: #007acc;
+    color: #ffffff;
+  }}
+</style>
+<script>
+  function sendAction(action, data) {{
+    if (window.adsk && window.adsk.fusionSendData) {{
+      window.adsk.fusionSendData(action, data);
+    }}
+  }}
+  setTimeout(function() {{
+    sendAction('dismiss', '');
+  }}, 9000);
+</script>
+</head>
+<body>
+  <div class="toast-header">
+    <div class="toast-icon">{icon}</div>
+    <div class="toast-title">{html.escape(title)}</div>
+    <div class="toast-close" onclick="sendAction('dismiss', '')">✕</div>
+  </div>
+  <div class="toast-body">{html.escape(message)}</div>
+  {f'<div class="toast-details">{html.escape(details)}</div>' if details else ''}
+  <div class="toast-actions">
+    {actions_html}
+  </div>
+</body>
+</html>"""
+    return html_content
+
+
+def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder, verifyResults=None, is_fatal=False):
+    """
+    Provide non-modal feedback via Fusion statusMessage and non-modal Palette toast,
+    matching Fusion native post-processing behavior without blocking modal message boxes.
+    """
+    global _notification_handler
+    verifyResults = verifyResults or []
+
+    # 1. Determine status type and headline
+    has_errors = (cntFiles == 0 or is_fatal)
+    has_collisions = any(bool(r.get("kinds")) for r in verifyResults)
+    has_warnings = (cntSkipped > 0 or has_collisions or any(bool(r.get("warning")) for r in verifyResults))
+
+    if has_errors:
+        status_type = "error"
+        title = "Post Processing Failed"
+        msg = lstSkipped.strip() if lstSkipped else "No CAM operations posted."
+    elif has_warnings:
+        status_type = "warning"
+        title = "Post Processing Completed with Warnings"
+        if cntSkipped > 0:
+            msg = f"{cntFiles} file(s) written. {cntSkipped} setup(s) skipped due to errors."
+        else:
+            msg = f"{cntFiles} file(s) written. Collision warnings detected during verification."
+    else:
+        status_type = "success"
+        title = "Post Processing Completed Successfully"
+        if len(verifyResults) == 1:
+            r0 = verifyResults[0]
+            prom = r0.get("promoted", 0) or 0
+            msg = f"{r0['setup']}: {cntFiles} file written ({prom} rapid moves restored, 0 collisions)."
+        else:
+            msg = f"{cntFiles} file(s) successfully written."
+
+    details = outputFolder if outputFolder else ""
+
+    # 2. Update native Fusion statusMessage (bottom-right status bar)
+    status_summary = f"[PostProcessAll] {title}: {msg}"
+    if ui and hasattr(ui, "statusMessage"):
+        try:
+            ui.statusMessage = status_summary
+            if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
+                adsk.doEvents()
+        except Exception:
+            pass
+
+    # Log to Application console
+    try:
+        if "adsk.core" in sys.modules and hasattr(adsk.core, "Application"):
+            adsk.core.Application.get().log(status_summary)
+    except Exception:
+        pass
+
+    # 3. Build Action buttons for the non-modal toast
+    actions = []
+    last_res = verifyResults[-1] if verifyResults else None
+    if last_res:
+        if last_res.get("cnc") and os.path.isfile(last_res["cnc"]):
+            actions.append(("Open NC File", "open_file", last_res["cnc"]))
+    if outputFolder and os.path.isdir(outputFolder):
+        actions.append(("Open Folder", "open_folder", outputFolder))
+    if last_res:
+        if last_res.get("report") and os.path.isfile(last_res["report"]):
+            actions.append(("View Report", "open_file", last_res["report"]))
+        if last_res.get("png") and os.path.isfile(last_res["png"]):
+            actions.append(("View Plot", "open_file", last_res["png"]))
+
+    # 4. Display non-modal Palette toast if supported by ui
+    if ui and hasattr(ui, "palettes") and ui.palettes is not None:
+        try:
+            old_palette = ui.palettes.itemById(constNotificationPaletteId)
+            if old_palette:
+                old_palette.deleteMe()
+        except Exception:
+            pass
+
+        try:
+            html_text = _BuildNotificationHTML(title, status_type, msg, details, actions)
+            palette = None
+            if hasattr(ui.palettes, "add2"):
+                palette = ui.palettes.add2(
+                    constNotificationPaletteId,
+                    "Post Processing",
+                    html_text,
+                    True,   # isVisible
+                    False,  # showCloseButton
+                    False,  # isResizable
+                    400,    # width
+                    130,    # height
+                )
+            else:
+                tmp_html = os.path.join(tempfile.gettempdir(), "postprocess_toast.html")
+                with open(tmp_html, "w", encoding="utf-8") as f:
+                    f.write(html_text)
+                palette = ui.palettes.add(
+                    constNotificationPaletteId,
+                    "Post Processing",
+                    tmp_html,
+                    True,
+                    False,
+                    False,
+                    400,
+                    130,
+                )
+
+            if palette:
+                try:
+                    if "adsk.core" in sys.modules:
+                        if hasattr(adsk.core, "PaletteDockOptions"):
+                            palette.dockingOption = adsk.core.PaletteDockOptions.PaletteDockOptionsNone
+                        if hasattr(adsk.core, "PaletteDockStates"):
+                            palette.dockingState = adsk.core.PaletteDockStates.PaletteDockStateFloating
+                except Exception:
+                    pass
+
+                _notification_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)
+                if hasattr(palette, "incomingFromHTML") and hasattr(palette.incomingFromHTML, "add"):
+                    palette.incomingFromHTML.add(_notification_handler)
+        except Exception as pal_exc:
+            _dbg_global(f"_NotifyPostProcessResult palette creation failed: {pal_exc}")
 
 
 def ShowVerifyResults(ui):

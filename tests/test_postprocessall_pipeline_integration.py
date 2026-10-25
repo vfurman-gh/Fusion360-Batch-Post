@@ -434,6 +434,96 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertIn("#### ⚠️ Operation: 2D Contour1 (1 collision)", md)
         self.assertIn("Move 150", md)
 
+    def test_non_modal_notifications_success_warning_and_failure(self):
+        """Verify _NotifyPostProcessResult provides non-modal statusMessage & HTML toast without modal dialogs."""
+        from PostProcessAll import _NotifyPostProcessResult, constNotificationPaletteId
+
+        created_palettes = {}
+        class MockPalette:
+            def __init__(self, id, name, html):
+                self.id = id
+                self.name = name
+                self.html = html
+                self.deleted = False
+                self.dockingOption = None
+                self.dockingState = None
+                self.incomingFromHTML = type("Incoming", (), {"add": lambda s, h: None})()
+
+            def deleteMe(self):
+                self.deleted = True
+
+        class MockPalettes:
+            def itemById(self, id):
+                return created_palettes.get(id)
+
+            def add2(self, id, name, html, isVisible, showCloseButton, isResizable, width, height):
+                p = MockPalette(id, name, html)
+                created_palettes[id] = p
+                return p
+
+        class MockUI:
+            def __init__(self):
+                self.statusMessage = ""
+                self.palettes = MockPalettes()
+                self.message_box_calls = []
+
+            def messageBox(self, *args, **kwargs):
+                self.message_box_calls.append(args)
+                return 0
+
+        mock_ui = MockUI()
+
+        # 1. Success notification
+        _NotifyPostProcessResult(
+            ui=mock_ui,
+            cntFiles=1,
+            cntSkipped=0,
+            lstSkipped="",
+            outputFolder="/tmp/nc_output",
+            verifyResults=[{
+                "setup": "OilLid",
+                "cnc": "/tmp/nc_output/OilLid.nc",
+                "promoted": 68,
+                "kinds": {},
+                "warning": None,
+                "error": None,
+            }]
+        )
+        self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on success")
+        self.assertIn("Post Processing Completed Successfully", mock_ui.statusMessage)
+        self.assertIn("OilLid", mock_ui.statusMessage)
+        self.assertIn(constNotificationPaletteId, created_palettes)
+        self.assertIn("Post Processing Completed Successfully", created_palettes[constNotificationPaletteId].html)
+
+        # 2. Warning notification (skipped setups)
+        _NotifyPostProcessResult(
+            ui=mock_ui,
+            cntFiles=2,
+            cntSkipped=1,
+            lstSkipped="SetupB failed",
+            outputFolder="/tmp/nc_output",
+            verifyResults=[]
+        )
+        self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on warning")
+        self.assertIn("Completed with Warnings", mock_ui.statusMessage)
+        self.assertIn("1 setup(s) skipped", mock_ui.statusMessage)
+        self.assertIn("Post Processing Completed with Warnings", created_palettes[constNotificationPaletteId].html)
+
+        # 3. Failure notification (0 files posted)
+        _NotifyPostProcessResult(
+            ui=mock_ui,
+            cntFiles=0,
+            cntSkipped=1,
+            lstSkipped="Kernel failed to solve",
+            outputFolder="/tmp/nc_output",
+            verifyResults=[],
+            is_fatal=True
+        )
+        self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on failure")
+        self.assertIn("Post Processing Failed", mock_ui.statusMessage)
+        self.assertIn("Kernel failed to solve", mock_ui.statusMessage)
+        self.assertIn("Post Processing Failed", created_palettes[constNotificationPaletteId].html)
+
 
 if __name__ == "__main__":
     unittest.main()
