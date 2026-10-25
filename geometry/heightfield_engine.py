@@ -164,10 +164,21 @@ def evaluate_tool_bottom_profile(
     rc = max(0.0, min(float(corner_radius), R))
 
     if rc <= 1e-4:
-        # Flat endmill: flat bottom
+        # Flat endmill or conical / chamfer / drill tool
         if taper_angle_deg > 0.01:
-            rad = math.radians(taper_angle_deg)
-            return r * np.tan(rad)
+            # Conical tip (drill, chamfer mill, spot drill, countersink).
+            # If included angle is given (> 45 deg, e.g. 90 deg for chamfer, 118 deg for drill):
+            # half angle with vertical Z axis is alpha = taper_angle_deg / 2.
+            # If half angle is given (<= 45 deg, e.g. 45 deg for 90 deg chamfer):
+            # half angle is taper_angle_deg.
+            if taper_angle_deg > 45.0:
+                half_angle_deg = taper_angle_deg / 2.0
+            else:
+                half_angle_deg = taper_angle_deg
+            half_angle_deg = min(89.5, max(0.5, half_angle_deg))
+            alpha_rad = math.radians(half_angle_deg)
+            # Conical geometry: r = z * tan(alpha) => z_rel = r / tan(alpha)
+            return (r / math.tan(alpha_rad)).astype(np.float32)
         return np.zeros_like(r, dtype=np.float32)
 
     if abs(rc - R) < 1e-4:

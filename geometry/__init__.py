@@ -69,6 +69,9 @@ except (ImportError, AttributeError):
         except Exception:
             pass
     from .heightfield_engine import MillHeightfieldVerifier, HeightfieldGrid
+    from .mesh_utils import greedy_mesh_heightfield, compute_cam_palette_facecolors
+except Exception:
+    pass
 
 try:
     from .tool_generator import (
@@ -106,9 +109,10 @@ except (ImportError, OSError):
     transform_tool_svg = None
 
 try:
-    from .plotter import generate_verification_plot
+    from .plotter import generate_verification_plot, generate_mill_verification_plot
 except (ImportError, OSError):
     generate_verification_plot = None
+    generate_mill_verification_plot = None
 
 
 __all__ = [
@@ -136,6 +140,8 @@ __all__ = [
     "MillClearanceVerifier",
     "MillHeightfieldVerifier",
     "HeightfieldGrid",
+    "greedy_mesh_heightfield",
+    "compute_cam_palette_facecolors",
     "generate_rhombic_insert",
     "generate_grooving_insert",
     "generate_drill_cutter",
@@ -147,4 +153,5 @@ __all__ = [
     "parse_svg_polygon",
     "transform_tool_svg",
     "generate_verification_plot",
+    "generate_mill_verification_plot",
 ]

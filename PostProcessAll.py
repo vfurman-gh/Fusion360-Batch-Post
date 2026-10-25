@@ -1980,7 +1980,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         base_no_ext = os.path.splitext(path)[0]
         report_path = base_no_ext + "_report.md"
-        plot_path = (base_no_ext + ".png") if is_turning else None
+        plot_path = base_no_ext + ".png"
 
         # Instantiate verification engine based on setup operation type
         if is_turning:
@@ -1992,24 +1992,35 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
 
-        # Generate verification plot (.png) for turning setups
-        if is_turning and plot_path:
+        # Generate verification plot (.png)
+        if plot_path:
             try:
-                from geometry.plotter import generate_verification_plot
+                from geometry.plotter import generate_verification_plot, generate_mill_verification_plot
                 is_inch = (combined_ctx.get("unit", 1) == 0)
-                generate_verification_plot(
-                    workpiece=workpiece,
-                    final_ipw=getattr(verifier, "ipw", None),
-                    chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
-                    segments=combined_segments,
-                    report=report,
-                    tools_by_op=tools_by_op,
-                    out_png_path=plot_path,
-                    unit_is_inch=is_inch,
-                )
+                if is_turning:
+                    generate_verification_plot(
+                        workpiece=workpiece,
+                        final_ipw=getattr(verifier, "ipw", None),
+                        chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
+                        segments=combined_segments,
+                        report=report,
+                        tools_by_op=tools_by_op,
+                        out_png_path=plot_path,
+                        unit_is_inch=is_inch,
+                    )
+                else:
+                    generate_mill_verification_plot(
+                        workpiece=workpiece,
+                        grid=getattr(verifier, "grid", None),
+                        segments=combined_segments,
+                        report=report,
+                        tools_by_op=tools_by_op,
+                        out_png_path=plot_path,
+                        unit_is_inch=is_inch,
+                    )
                 _dbg(f"Pass 2: Generated verification plot: {plot_path}")
             except Exception as pl_exc:
-                _dbg(f"Pass 2: generate_verification_plot exception: {pl_exc}")
+                _dbg(f"Pass 2: generate verification plot exception: {pl_exc}")
 
         orchestrator = PipelineOrchestrator(
             dumper_cps=constDumperScript,

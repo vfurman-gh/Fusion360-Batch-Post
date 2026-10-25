@@ -119,6 +119,18 @@ class TestHeightfieldGrid(unittest.TestCase):
         self.assertAlmostEqual(bull_z[2], 0.0)  # at r=4.0 (end of flat)
         self.assertAlmostEqual(bull_z[3], 1.0)  # at r=5.0 (outer corner)
 
+        # 4. 90-degree Chamfer tool / Spot drill (D=6.35, R=3.175, included angle 90 deg -> half angle 45 deg)
+        # z(r) = r / tan(45) = r
+        r_chamfer = np.array([0.0, 1.0, 2.0, 3.175], dtype=np.float32)
+        chamfer_z = evaluate_tool_bottom_profile(r_chamfer, tool_radius=3.175, corner_radius=0.0, taper_angle_deg=90.0)
+        np.testing.assert_allclose(chamfer_z, [0.0, 1.0, 2.0, 3.175], atol=1e-5)
+
+        # 5. 118-degree Drill (D=10, included angle 118 deg -> half angle 59 deg)
+        # z(r) = r / tan(59 deg) = 0.60086 * r
+        r_drill = np.array([0.0, 5.0], dtype=np.float32)
+        drill_z = evaluate_tool_bottom_profile(r_drill, tool_radius=5.0, corner_radius=0.0, taper_angle_deg=118.0)
+        np.testing.assert_allclose(drill_z, [0.0, 5.0 / math.tan(math.radians(59.0))], atol=1e-5)
+
 
 class TestMillHeightfieldVerifier(unittest.TestCase):
     """Test complete 3D milling verifier against kinematic toolpaths."""
@@ -384,6 +396,107 @@ class TestMillHeightfieldVerifier(unittest.TestCase):
         self.assertGreater(len(report.mrr_spikes), 0)
         self.assertEqual(report.mrr_spikes[0].segment_id, 200)
 
+    def test_generate_mill_verification_plot_end_to_end(self):
+        """Verify that generate_mill_verification_plot creates a valid dual-panel 3D PNG."""
+        import os
+        import tempfile
+        from geometry.plotter import generate_mill_verification_plot
+
+        moves = [
+            _make_segment(1, MotionKind.RAPID, Vector3D(-20.0, -20.0, 15.0), Vector3D(-15.0, 0.0, 5.0), op_id="Facing"),
+            _make_segment(2, MotionKind.LINEAR, Vector3D(-15.0, 0.0, 5.0), Vector3D(-15.0, 0.0, -2.0), op_id="Facing"),
+            _make_segment(3, MotionKind.LINEAR, Vector3D(-15.0, 0.0, -2.0), Vector3D(15.0, 0.0, -2.0), duration_sec=3.0, op_id="Facing"),
+            _make_segment(4, MotionKind.LINEAR, Vector3D(15.0, 0.0, -2.0), Vector3D(15.0, 0.0, 15.0), metadata={"z_clearance_mm": 10.0}, op_id="Facing"),
+        ]
+        tools_map = {"Facing": self.tool}
+        report = self.verifier.verify_toolpath(moves, tools_map, self.workpiece)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_png = os.path.join(tmp_dir, "mill_verification.png")
+            generate_mill_verification_plot(
+                workpiece=self.workpiece,
+                grid=self.verifier.grid,
+                segments=moves,
+                report=report,
+                tools_by_op=tools_map,
+                out_png_path=out_png,
+                unit_is_inch=False,
+            )
+            self.assertTrue(os.path.exists(out_png))
+            self.assertGreater(os.path.getsize(out_png), 10000)
+
+    def test_plot_mrr_timeline_gapless_and_clean_spikes(self):
+        """Verify _plot_mrr_timeline creates gapless operation spans, plots all spikes, and has no text labels."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from geometry.plotter import _plot_mrr_timeline
+
+        # 2 operations: Op1 (1.0s rapid + 2.0s cut) and Op2 (1.0s cut + 1.0s rapid retract)
+        moves = [
+            _make_segment(1, MotionKind.RAPID, Vector3D(-20, 0, 10), Vector3D(-10, 0, 0), duration_sec=1.0, op_id="Facing"),
+            _make_segment(2, MotionKind.LINEAR, Vector3D(-10, 0, -1), Vector3D(10, 0, -1), duration_sec=2.0, op_id="Facing"),
+            _make_segment(3, MotionKind.LINEAR, Vector3D(10, 0, -3), Vector3D(10, 10, -3), duration_sec=1.0, op_id="Contour"),
+            _make_segment(4, MotionKind.RAPID, Vector3D(10, 10, 10), Vector3D(0, 0, 20), duration_sec=1.0, op_id="Contour"),
+        ]
+        tools_map = {"Facing": self.tool, "Contour": self.tool}
+        report = self.verifier.verify_toolpath(moves, tools_map, self.workpiece)
+
+        fig, ax = plt.subplots()
+        try:
+            _plot_mrr_timeline(ax, report, moves, vol_scale=1.0, vol_unit="mm³")
+            # 1. Check xlim covers entire sequence: 1+2+1+1 = 5.0 seconds
+            self.assertAlmostEqual(ax.get_xlim()[0], 0.0)
+            self.assertAlmostEqual(ax.get_xlim()[1], 5.0)
+
+            # 2. Check no text annotations were placed on ax
+            self.assertEqual(len(ax.texts), 0, "Spike text annotations should not be created")
+
+            # 3. Check legend does not contain tool flute or holder
+            handles, labels = ax.get_legend_handles_labels()
+            for lbl in labels:
+                self.assertNotIn("Flute", lbl)
+                self.assertNotIn("Holder", lbl)
+        finally:
+            plt.close(fig)
+
+    def test_chamfer_operation_mrr_is_virtually_zero(self):
+        """Verify that a 2D chamfer operation using a conical chamfer tool produces virtually zero MRR."""
+        # 1. Flat endmill cuts initial rough pocket at Z=-2.0
+        rough_cut = _make_segment(
+            1, MotionKind.LINEAR, Vector3D(-5, 0, -2.0), Vector3D(5, 0, -2.0),
+            feedrate=600.0, duration_sec=2.0, op_id="Roughing"
+        )
+        self.verifier.step(rough_cut)
+
+        # 2. Load 90-degree chamfer tool (Tool 9: D=6.35, R=3.175, taper_angle_deg=90.0)
+        chamfer_geom = MillToolGeometry(
+            diameter=6.35,
+            corner_radius=0.0,
+            flute_length=15.0,
+            overall_length=50.0,
+            taper_angle_deg=90.0,
+            holder_diameter=30.0,
+            holder_length=40.0,
+        )
+        chamfer_tool = ToolAssembly(tool_id=9, name="1/4 90deg Chamfer Mill", geometry=chamfer_geom)
+        self.verifier.load_tool(chamfer_tool)
+
+        # 3. Run 2D Chamfer move along the top edge beveling a 0.2mm edge break
+        # Tip is at Z=-2.1, center is offset at X=7.0 (slot edge at X=5.0).
+        # At slot edge (dr=2.0): z_cone = -2.1 + 2.0 = -0.1 mm, taking a tiny 0.1mm corner bevel.
+        chamfer_move = _make_segment(
+            2, MotionKind.LINEAR, Vector3D(7.0, -3.0, -2.1), Vector3D(7.0, 3.0, -2.1),
+            feedrate=1000.0, duration_sec=1.0, op_id="2D Chamfer1"
+        )
+        res = self.verifier.step(chamfer_move)
+
+        # Material removed by the chamfer cut must be virtually zero (< 1.0 mm³)
+        self.assertLess(res.material_removed_mm3, 1.0)
+        self.assertLess(res.instantaneous_mrr, 60.0)
+        self.assertEqual(len(res.collisions), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

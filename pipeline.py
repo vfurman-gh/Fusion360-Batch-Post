@@ -258,22 +258,34 @@ class PipelineOrchestrator:
             # -----------------------------------------------------------------
             # Step 6: Generate Summary Report & Verification Plot
             # -----------------------------------------------------------------
-            if plot_output_path and getattr(verifier, "ipw", None) is not None:
+            if plot_output_path:
                 try:
-                    from geometry.plotter import generate_verification_plot
                     is_inch = (combined_ctx.get("unit", 0) == 0)
-                    final_ipw = getattr(verifier, "ipw", None)
-                    chuck_obs = getattr(verifier, "chuck_obstacle", None)
-                    generate_verification_plot(
-                        workpiece=workpiece,
-                        final_ipw=final_ipw,
-                        chuck_obstacle=chuck_obs,
-                        segments=segments,
-                        report=report,
-                        tools_by_op=tools_by_op,
-                        out_png_path=plot_output_path,
-                        unit_is_inch=is_inch,
-                    )
+                    if getattr(verifier, "ipw", None) is not None:
+                        from geometry.plotter import generate_verification_plot
+                        final_ipw = getattr(verifier, "ipw", None)
+                        chuck_obs = getattr(verifier, "chuck_obstacle", None)
+                        generate_verification_plot(
+                            workpiece=workpiece,
+                            final_ipw=final_ipw,
+                            chuck_obstacle=chuck_obs,
+                            segments=segments,
+                            report=report,
+                            tools_by_op=tools_by_op,
+                            out_png_path=plot_output_path,
+                            unit_is_inch=is_inch,
+                        )
+                    elif getattr(verifier, "grid", None) is not None:
+                        from geometry.plotter import generate_mill_verification_plot
+                        generate_mill_verification_plot(
+                            workpiece=workpiece,
+                            grid=getattr(verifier, "grid", None),
+                            segments=segments,
+                            report=report,
+                            tools_by_op=tools_by_op,
+                            out_png_path=plot_output_path,
+                            unit_is_inch=is_inch,
+                        )
                 except Exception as exc:
                     print(f"WARNING: Verification plot generation failed: {exc}", file=sys.stderr)
 

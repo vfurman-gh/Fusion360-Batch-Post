@@ -129,8 +129,11 @@ class BaseVerificationEngine(IVerificationEngine):
         """Record volumetric removal rate sample in timeline."""
         dur = max(1e-4, float(duration_sec))
         mrr_rate = (volume_removed_mm3 / dur) * 60.0
+        # self.current_time_sec has been advanced by dur at the beginning of step();
+        # compute start time so timestamp_sec reflects the actual beginning of the cut.
+        t_sample_start = max(0.0, self.current_time_sec - max(0.0, float(duration_sec)))
         sample = MRRSample(
-            timestamp_sec=self.current_time_sec,
+            timestamp_sec=t_sample_start,
             duration_sec=dur,
             segment_id=segment_id,
             tool_id=self.active_tool.tool_id if self.active_tool else 0,

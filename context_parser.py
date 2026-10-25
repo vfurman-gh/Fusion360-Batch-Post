@@ -601,7 +601,12 @@ def extract_tools_from_context(
             cr = float(t.get("cornerRadius", t.get("corner_radius", t.get("noseRadius", 0.0))) or 0.0) * scale
             flute_l = float(t.get("fluteLength", t.get("flute_length", 0.0)) or 0.0) * scale
             overall_l = float(t.get("overallLength", t.get("overall_length", 0.0)) or 0.0) * scale
-            taper_a = float(t.get("taperAngle", t.get("taper_angle", 0.0)) or 0.0)
+            raw_taper = t.get("_taperAngle", t.get("taperAngle", t.get("taper_angle", 0.0))) or 0.0
+            taper_val = float(raw_taper)
+            if 0.0 < taper_val <= math.pi:
+                taper_a = math.degrees(taper_val)
+            else:
+                taper_a = taper_val
             holder_d = float(t.get("holderDiameter", t.get("holder_diameter", 40.0)) or 40.0) * scale
             holder_l = float(t.get("holderLength", t.get("holder_length", 60.0)) or 60.0) * scale
             mill_geom = MillToolGeometry(
