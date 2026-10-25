@@ -34,7 +34,7 @@ from .models import (
     VerificationReport,
     WorkpieceDefinition,
 )
-from .engine_interface import IVerificationEngine
+from .engine_interface import BaseVerificationEngine, IVerificationEngine
 
 
 # Domain Constants
@@ -127,7 +127,7 @@ def sweep_polygon(poly: Polygon, p1: Tuple[float, float], p2: Tuple[float, float
     return sweep_linear_polygon(poly, p1, p2, is_convex=False)
 
 
-class Lathe2DIPWVerifier(IVerificationEngine):
+class Lathe2DIPWVerifier(BaseVerificationEngine):
     """
     High-fidelity 2D Lathe IPW Verifier.
     All internal calculations use standardized metric units (mm, mm/min, mm³, sec).
@@ -141,6 +141,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         min_promote_len_mm: float = 0.35,   # Minimum travel distance to justify G0 promotion (mm)
         tool_scale_to_mm: float = 1.0,      # Legacy tool polygon scale factor to mm
     ):
+        super().__init__()
         self.clearance_tol_mm = clearance_tol_mm
         self.promote_margin_mm = promote_margin_mm
         self.min_promote_len_mm = min_promote_len_mm
@@ -150,23 +151,16 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         self.chuck_obstacle: Polygon = Polygon()
         self.active_cutter: Polygon = Polygon()
         self.active_holder: Polygon = Polygon()
-        self.active_tool: Optional[ToolAssembly] = None
 
         self.cutter_is_convex: bool = False
         self.holder_is_convex: bool = False
         self.holder_has_neg_y: bool = False
         self.is_boring: bool = False
 
-        self.collisions: List[CollisionRecord] = []
-        self.promoted_vectors: Dict[str, PromotedVectorRule] = {}
-        self.vector_occurrences: Dict[str, int] = {}
-        self.mrr_timeline: List[MRRSample] = []
-        self.total_machining_time_sec: float = 0.0
-        self.total_volume_removed_mm3: float = 0.0
-        self.current_time_sec: float = 0.0
-
     def reset(self, workpiece: WorkpieceDefinition) -> None:
         """Initialize single-quadrant (R >= 0) IPW stock model and fixtures in metric coordinates."""
+        self._reset_base_state(workpiece)
+
         stock = workpiece.stock
         if not isinstance(stock, AxisymmetricStock2D):
             raise TypeError(f"Lathe2DIPWVerifier requires AxisymmetricStock2D, got {type(stock)}")
@@ -181,7 +175,6 @@ class Lathe2DIPWVerifier(IVerificationEngine):
 
         self.ipw = box(z_min, r_in, z_max, r_out)
 
-
         # Chuck keep-out geometry in R >= 0
         chuck_polys = []
         for fixture in workpiece.fixtures:
@@ -192,15 +185,6 @@ class Lathe2DIPWVerifier(IVerificationEngine):
                     chuck_polys.append(box(min_z, min_r, max_z, max_r))
 
         self.chuck_obstacle = unary_union(chuck_polys) if chuck_polys else Polygon()
-
-        # Reset state accumulators
-        self.collisions = []
-        self.promoted_vectors = {}
-        self.vector_occurrences = {}
-        self.mrr_timeline = []
-        self.total_machining_time_sec = 0.0
-        self.total_volume_removed_mm3 = 0.0
-        self.current_time_sec = 0.0
 
     def load_tool(self, tool: ToolAssembly) -> None:
         """Mount the active tool, precompute convexity and radial extension properties."""
@@ -372,9 +356,6 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         # ---------------------------------------------------------------------
         # 4. Air Move & Rapid Promotion Check (Inverted Buffering)
         # ---------------------------------------------------------------------
-        seen = self.vector_occurrences.get(v_key_str, 0) + 1
-        self.vector_occurrences[v_key_str] = seen
-
         if not move.is_arc and dist >= self.min_promote_len_mm:
             # Inverted buffering: buffer the simple tool instead of buffering the complex IPW
             sc_pad = swept_cutter.buffer(self.promote_margin_mm)
@@ -387,9 +368,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
             holder_air = (not aabb_overlap(sh_pad.bounds, stock_bounds)) or h_hit.is_empty or (h_hit.area < 1e-4)
 
             if cutter_air and holder_air:
-                if v_key_str not in self.promoted_vectors:
-                    self.promoted_vectors[v_key_str] = PromotedVectorRule(min_occur=seen)
-
+                self.record_vector_occurrence(v_key_str, is_air_move=True)
                 return MoveEvaluation(
                     segment_id=move.segment_id,
                     vector_key=v_key_str,
@@ -402,8 +381,7 @@ class Lathe2DIPWVerifier(IVerificationEngine):
         # ---------------------------------------------------------------------
         # 5. Cutting Move: Material Removal & Volumetric MRR
         # ---------------------------------------------------------------------
-        if v_key_str in self.promoted_vectors:
-            self.promoted_vectors[v_key_str] = PromotedVectorRule(min_occur=seen + 1)
+        self.record_vector_occurrence(v_key_str, is_air_move=False)
 
         vol_3d_mm3 = 0.0
         area_2d = 0.0
@@ -415,44 +393,19 @@ class Lathe2DIPWVerifier(IVerificationEngine):
                 r_cent = abs(removed.centroid.y)
                 vol_3d_mm3 = 2.0 * math.pi * r_cent * area_2d
                 self.ipw = self.ipw.difference(swept_cutter)
-                self.total_volume_removed_mm3 += vol_3d_mm3
 
-        mrr_rate = (vol_3d_mm3 / max(1e-4, move.duration_sec)) * 60.0
-
-        sample = MRRSample(
-            timestamp_sec=self.current_time_sec,
-            duration_sec=move.duration_sec,
+        sample = self.record_mrr_sample(
             segment_id=move.segment_id,
-            tool_id=self.active_tool.tool_id if self.active_tool else 0,
+            duration_sec=move.duration_sec,
             volume_removed_mm3=vol_3d_mm3,
-            mrr_rate_mm3_per_min=mrr_rate,
             depth_of_cut_mm=math.sqrt(area_2d),
         )
-        self.mrr_timeline.append(sample)
 
         return MoveEvaluation(
             segment_id=move.segment_id,
             vector_key=v_key_str,
             is_air_move=False,
             material_removed_mm3=vol_3d_mm3,
-            instantaneous_mrr=mrr_rate,
+            instantaneous_mrr=sample.mrr_rate_mm3_per_min,
             collisions=move_collisions,
-        )
-
-    def generate_report(self) -> VerificationReport:
-        """Compile final report with collision records, promoted vectors, and MRR timeline."""
-        non_zero_mrrs = [s.mrr_rate_mm3_per_min for s in self.mrr_timeline if s.mrr_rate_mm3_per_min > 1.0]
-        spikes = []
-        if non_zero_mrrs:
-            mean_mrr = sum(non_zero_mrrs) / len(non_zero_mrrs)
-            threshold = mean_mrr * 2.5
-            spikes = [s for s in self.mrr_timeline if s.mrr_rate_mm3_per_min > threshold]
-
-        return VerificationReport(
-            total_machining_time_sec=self.total_machining_time_sec,
-            total_volume_removed_mm3=self.total_volume_removed_mm3,
-            collisions=self.collisions,
-            promoted_vectors=self.promoted_vectors,
-            mrr_timeline=self.mrr_timeline,
-            mrr_spikes=spikes,
         )
