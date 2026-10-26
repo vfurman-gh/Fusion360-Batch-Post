@@ -30,7 +30,6 @@ constAttrGroup = constCmdDefId
 constAttrName = "settings"
 constAttrCompressedName = "CompressedName"
 constSettingsFileExt = ".settings"
-constPostLoopDelay = 0.1
 constNcProgramName = "PostProcessAll NC Program"
 constAddonDir = os.path.dirname(os.path.abspath(__file__))
 constDumperScript = os.path.join(constAddonDir, "universal_dumper.cps")
@@ -2062,6 +2061,13 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                 for op in op_list:
                     target_ops.add(op)
 
+            # Ensure no stale output file exists before invoking dumper
+            if os.path.isfile(b_json):
+                try:
+                    os.remove(b_json)
+                except Exception:
+                    pass
+
             post_ok = False
             try:
                 post_ok = bool(cam.postProcess(target_ops, post_input))
@@ -2069,17 +2075,21 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                 _dbg(f"Pass 1: cam.postProcess exception for batch {b_idx}: {pp_exc}")
                 post_ok = False
 
-            time.sleep(constPostLoopDelay)
-
             if not os.path.isfile(b_json):
+                # Search tmp_dir strictly for batch_{b_idx}.json or batch_{b_idx}_<digits>.json
+                # to prevent batch_1 from matching batch_10..batch_19 (Fix B5)
+                pattern = re.compile(rf"^{re.escape(b_prefix)}(_\d+)?\.json$")
                 for f in os.listdir(tmp_dir):
-                    if f == f"{b_prefix}.json" or (f.startswith(b_prefix + "_") and f.endswith(".json")):
+                    if pattern.match(f):
                         b_json = os.path.join(tmp_dir, f)
                         break
 
             if not os.path.isfile(b_json):
-                _dbg(f"Pass 1: Failed to produce {b_json}!")
-                return f"Failed to dump post context for batch {b_idx} (Tool {t_num})."
+                _dbg(f"Pass 1: Failed to produce {b_json} (post_ok={post_ok})!")
+                return f"Failed to dump post context for batch {b_idx + 1} (Tool {t_num})."
+
+            if not post_ok:
+                _dbg(f"Pass 1: cam.postProcess returned False for batch {b_idx}, but {b_json} was created.")
 
             if b_idx == 0 and not os.path.isfile(bootstrap_cnc):
                 fallback_inter = b_json + ".intermediate.cnc"

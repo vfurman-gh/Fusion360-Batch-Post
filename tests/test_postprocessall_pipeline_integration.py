@@ -1233,8 +1233,22 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertNotIn("TARGET_INTERMEDIATE_CNC", os.environ)
 
 
+    def test_b5_batch_json_matching_no_prefix_collision(self):
+        """Verify batch regex matching isolates batch_1 from batch_10 and batch_11."""
+        import re
+        b_prefix = "batch_1"
+        pattern = re.compile(rf"^{re.escape(b_prefix)}(_\d+)?\.json$")
+        self.assertTrue(pattern.match("batch_1.json"))
+        self.assertTrue(pattern.match("batch_1_1.json"))
+        self.assertTrue(pattern.match("batch_1_2.json"))
+        self.assertIsNone(pattern.match("batch_10.json"))
+        self.assertIsNone(pattern.match("batch_11.json"))
+        self.assertIsNone(pattern.match("batch_100.json"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
