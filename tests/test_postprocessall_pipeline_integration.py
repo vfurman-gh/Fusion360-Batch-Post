@@ -1230,6 +1230,35 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             # Extension parameter value should not have been overwritten to ".cnc"
             self.assertEqual(mock_ext_param.value.value, ".nc")
 
+    def test_w1_windows_post_binary_discovery(self):
+        """Verify find_autodesk_post_binary locates post.exe on Windows and selects newest by mtime."""
+        from pipeline import find_autodesk_post_binary
+        from unittest.mock import patch
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            v1_dir = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_v1", "Applications", "CAM360")
+            v2_dir = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_v2", "Applications", "CAM360")
+            os.makedirs(v1_dir, exist_ok=True)
+            os.makedirs(v2_dir, exist_ok=True)
+
+            post_v1 = os.path.join(v1_dir, "post.exe")
+            post_v2 = os.path.join(v2_dir, "post.exe")
+
+            with open(post_v1, "w") as f:
+                f.write("v1")
+            with open(post_v2, "w") as f:
+                f.write("v2")
+
+            # Set mtime so v2 is newer than v1
+            now = time.time()
+            os.utime(post_v1, (now - 100, now - 100))
+            os.utime(post_v2, (now, now))
+
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmp_dir}):
+                found = find_autodesk_post_binary()
+                self.assertEqual(found, post_v2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,29 +41,75 @@ from context_parser import (
 
 
 def find_autodesk_post_binary() -> Optional[str]:
-    """Locate the standalone Autodesk CAM post processor binary."""
+    """Locate the standalone Autodesk CAM post processor binary (macOS post or Windows post.exe)."""
+    env_post = os.environ.get("AUTODESK_POST_BINARY")
+    if env_post and os.path.isfile(env_post):
+        return env_post
+
+    candidates = []
     patterns = [
+        # macOS paths
         "/Users/*/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/post",
         "/Applications/Autodesk Fusion 360.app/Contents/Libraries/Applications/CAM360/post",
+        os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/post"),
     ]
+
+    # Windows paths
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    programfiles = os.environ.get("ProgramFiles", "")
+    programfiles_x86 = os.environ.get("ProgramFiles(x86)", "")
+    for base in (localappdata, programfiles, programfiles_x86):
+        if base:
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Applications", "CAM360", "post.exe"))
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "post.exe"))
+
     for pattern in patterns:
-        matches = glob.glob(pattern)
-        if matches:
-            return matches[0]
-    return None
+        if pattern:
+            for match in glob.glob(pattern):
+                if os.path.isfile(match):
+                    candidates.append(match)
+
+    if not candidates:
+        return None
+
+    # Sort descending by modification time to pick the newest active webdeploy installation
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return candidates[0]
 
 
 def find_autodesk_apt_cps() -> Optional[str]:
     """Locate Autodesk's standard apt.cps configuration."""
+    env_apt = os.environ.get("AUTODESK_APT_CPS")
+    if env_apt and os.path.isfile(env_apt):
+        return env_apt
+
+    candidates = []
     patterns = [
+        # macOS paths
         "/Users/*/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps",
         "/Applications/Autodesk Fusion 360.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps",
+        os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps"),
     ]
+
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    programfiles = os.environ.get("ProgramFiles", "")
+    programfiles_x86 = os.environ.get("ProgramFiles(x86)", "")
+    for base in (localappdata, programfiles, programfiles_x86):
+        if base:
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Applications", "CAM360", "Data", "Posts", "apt.cps"))
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Data", "Posts", "apt.cps"))
+
     for pattern in patterns:
-        matches = glob.glob(pattern)
-        if matches:
-            return matches[0]
-    return None
+        if pattern:
+            for match in glob.glob(pattern):
+                if os.path.isfile(match):
+                    candidates.append(match)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return candidates[0]
 
 
 class PipelineOrchestrator:
