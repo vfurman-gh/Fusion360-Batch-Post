@@ -1148,6 +1148,16 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertTrue(ctx["sections"][0]["events"][0].get("promote"))
         self.assertFalse(ctx["sections"][0]["events"][1].get("promote", False))
 
+    def test_b1_verify_checkbox_removed_and_verification_always_runs(self):
+        """Verify that verifyGcode is removed from defaultSettings and obsolete settings cleaned up."""
+        import PostProcessAll
+        self.assertNotIn("verifyGcode", PostProcessAll.defaultSettings)
+
+        mgr = PostProcessAll.SettingsManager()
+        dst = {"version": 16, "verifyGcode": True, "restore_rapid": True}
+        mgr.UpdateSettings(PostProcessAll.defaultSettings, dst)
+        self.assertNotIn("verifyGcode", dst)
+
 
 if __name__ == "__main__":
     unittest.main()

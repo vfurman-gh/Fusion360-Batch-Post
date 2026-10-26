@@ -15,7 +15,6 @@ defaultSettings = {
     "output" : "",
     "combineTool" : True,
     "restore_rapid" : True,
-    "verifyGcode" : True,
     # Groups are expanded or not
     "groupPersonal" : True
 }
@@ -167,7 +166,7 @@ class SettingsManager:
         if "restore_rapid" not in dst:
             dst["restore_rapid"] = dst.get("fastZ", dst.get("fastZHeuristic", True))
         for k in (
-            "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
+            "verifyGcode", "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
             "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName",
             "groupAdvanced", "initialDelay", "postRetries", "delFiles", "delFolder"
         ):
@@ -588,17 +587,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
                 "• <b>Turning:</b> Promotes collision-free air moves verified against dynamic 2D IPW simulation.<br>"
                 "• <b>Milling:</b> Promotes upward vertical Z+ retract moves reaching or exceeding clearance height.<br>"
                 "Restored moves are annotated with comments in the output program.")
-
-            # check box to run 2D collision verification & MRR analysis
-            input = inputGroup.children.addBoolValueInput("verifyGcode",
-                                                          "Verify G-code & collision guard",
-                                                          True,
-                                                          "",
-                                                          docSettings.get("verifyGcode", True))
-            input.tooltip = "Verify G-Code & Collision Guard"
-            input.tooltipDescription = (
-                "Run toolpath verification, detect potential collisions (Rapid-into-stock, Holder strikes, "
-                "Fixture keep-out boundaries), and generate summary report.")
            
             inputGroup.isExpanded = docSettings["groupPersonal"]
 
@@ -701,7 +689,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                         self.docSettings[key] = inp.selectedItem.name
                 elif hasattr(inp, "value"):
                     self.docSettings[key] = inp.value
-        _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, verifyGcode={self.docSettings.get('verifyGcode')}, restore_rapid={self.docSettings.get('restore_rapid')}")
+        _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, restore_rapid={self.docSettings.get('restore_rapid')}")
         PerformPostProcess(self.docSettings)
 
 
@@ -1442,12 +1430,8 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
     if setup is None or setup.operationType != adsk.cam.OperationTypes.TurningOperation:
         _dbg("RunLatheVerifier: setup is None or not TurningOperation, skipping")
         return None
-    verify_flag = docSettings.get("verifyGcode", True)
     fastz_flag = docSettings.get("restore_rapid", True)
-    _dbg(f"RunLatheVerifier: verifyGcode={verify_flag}, restore_rapid={fastz_flag}")
-    if not (verify_flag or fastz_flag):
-        _dbg("RunLatheVerifier: neither verifyGcode nor restore_rapid enabled, skipping")
-        return None
+    _dbg(f"RunLatheVerifier: restore_rapid={fastz_flag}")
     if not os.path.isfile(cncPath):
         _dbg(f"RunLatheVerifier: cncPath does not exist: {cncPath}")
         return None
