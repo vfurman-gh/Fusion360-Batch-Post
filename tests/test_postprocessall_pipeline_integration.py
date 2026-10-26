@@ -1158,6 +1158,78 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         mgr.UpdateSettings(PostProcessAll.defaultSettings, dst)
         self.assertNotIn("verifyGcode", dst)
 
+    def test_b2_progress_cancellation_aborts_pipeline(self):
+        """Verify that returning False from progress_cb immediately aborts the pipeline."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        mock_setup = MagicMock()
+        mock_setup.name = "Setup 1"
+        mock_setup.operationType = 0
+        mock_setup.allOperations = []
+
+        mock_prog = MagicMock()
+        mock_prog.parameters.itemByName.return_value = MagicMock(value=MagicMock(value="centroid_turning"))
+
+        cancelled_cb = lambda msg, frac: False
+
+        with patch("PostProcessAll._ResolveBasePostPath", return_value=os.path.abspath("centroid_turning.cps")):
+            status = PostProcessAll._PostProcessUnifiedPipeline(
+                fname="test_cancel",
+                setup=mock_setup,
+                setupFolder="/tmp",
+                docSettings=dict(PostProcessAll.defaultSettings),
+                program=mock_prog,
+                path="/tmp/test_cancel.nc",
+                fileExt=".nc",
+                progress_cb=cancelled_cb,
+            )
+            self.assertIn("cancelled", status.lower())
+
+    def test_b4_nc_program_nc_extension_not_mutated(self):
+        """Verify that PostProcessSetup does not mutate nc_program_nc_extension."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        mock_ext_value = MagicMock(value=".nc")
+        mock_ext_param = MagicMock(value=mock_ext_value)
+
+        def param_lookup(name):
+            if name == "nc_program_nc_extension":
+                return mock_ext_param
+            return MagicMock(value=MagicMock(value=""))
+
+        mock_prog = MagicMock()
+        mock_prog.parameters.itemByName.side_effect = param_lookup
+
+        mock_cam = MagicMock()
+        mock_cam.checkToolpath.return_value = True
+
+        mock_doc = MagicMock()
+        mock_doc.products.itemByProductType.return_value = mock_cam
+
+        mock_app = MagicMock()
+        mock_app.activeDocument = mock_doc
+
+        mock_setup = MagicMock()
+        mock_setup.name = "Setup 1"
+        mock_setup.operationType = 0
+        mock_setup.allOperations = []
+
+        with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+             patch("PostProcessAll._PostProcessUnifiedPipeline", return_value=None), \
+             tempfile.TemporaryDirectory() as tmp_dir:
+            res = PostProcessAll.PostProcessSetup(
+                fname="test_ext",
+                setup=mock_setup,
+                setupFolder=tmp_dir,
+                docSettings=dict(PostProcessAll.defaultSettings),
+                program=mock_prog,
+            )
+            self.assertIsNone(res)
+            # Extension parameter value should not have been overwritten to ".cnc"
+            self.assertEqual(mock_ext_param.value.value, ".nc")
+
 
 if __name__ == "__main__":
     unittest.main()

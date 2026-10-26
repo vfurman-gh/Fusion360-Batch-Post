@@ -826,7 +826,7 @@ def PerformPostProcess(docSettings, setups=None):
 
             # Snapshot original NCProgram parameters so the user's NCProgram is never left mutated
             orig_prog_params = {}
-            for p_key in ("nc_program_name", "nc_program_filename", "nc_program_openInEditor"):
+            for p_key in ("nc_program_name", "nc_program_filename", "nc_program_openInEditor", "nc_program_nc_extension"):
                 try:
                     p_item = parameters.itemByName(p_key)
                     if p_item is not None:
@@ -865,6 +865,10 @@ def PerformPostProcess(docSettings, setups=None):
                     if status == None:
                         cntFiles += 1
                         setup_cb("Completed.", 1.0)
+                    elif "cancelled" in status.lower():
+                        cntSkipped += 1
+                        lstSkipped += "\nCancelled by user on setup " + setup.name
+                        break
                     else:
                         cntSkipped += 1
                         lstSkipped += "\nFailed on setup " + setup.name + ": " + status
@@ -2266,7 +2270,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     """
     _dbg = _dbg_global
     _notify_p = progress_cb or (lambda msg, frac: True)
-    _notify_p("Initializing pipeline...", 0.02)
+    if not _notify_p("Initializing pipeline...", 0.02):
+        return "Operation cancelled by user."
     is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
     _dbg(f"_PostProcessUnifiedPipeline entered for {fname}, path={path}, is_turning={is_turning}")
 
@@ -2351,7 +2356,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         n_batches = max(1, len(batches))
         for b_idx, (t_num, op_list) in enumerate(batches):
             b_frac = 0.08 + 0.32 * (b_idx / n_batches)
-            _notify_p(f"Pass 1: Dumping toolpath batch {b_idx + 1} of {n_batches} (Tool {t_num})...", b_frac)
+            if not _notify_p(f"Pass 1: Dumping toolpath batch {b_idx + 1} of {n_batches} (Tool {t_num})...", b_frac):
+                return "Operation cancelled by user."
             b_prefix = f"batch_{b_idx}"
             b_json = os.path.join(tmp_dir, f"{b_prefix}.json")
 
@@ -2398,7 +2404,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
             if not os.path.isfile(b_json):
                 for f in os.listdir(tmp_dir):
-                    if f.startswith(b_prefix) and f.endswith(".json"):
+                    if f == f"{b_prefix}.json" or (f.startswith(b_prefix + "_") and f.endswith(".json")):
                         b_json = os.path.join(tmp_dir, f)
                         break
 
@@ -2416,7 +2422,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         # -------------------------------------------------------------
         # PASS 2: Merge Contexts, Universal Domain Extraction & Single-Pass Replay
         # -------------------------------------------------------------
-        _notify_p("Pass 2: Merging toolpath context...", 0.42)
+        if not _notify_p("Pass 2: Merging toolpath context...", 0.42):
+            return "Operation cancelled by user."
         from context_parser import (
             merge_context_dumps,
             parse_context_dump,
@@ -2448,7 +2455,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         plot_path = base_no_ext + ".png"
 
         # Instantiate verification engine based on setup operation type
-        _notify_p(f"Pass 2: Simulating stock & collisions ({'turning' if is_turning else 'milling'})...", 0.50)
+        if not _notify_p(f"Pass 2: Simulating stock & collisions ({'turning' if is_turning else 'milling'})...", 0.50):
+            return "Operation cancelled by user."
         if is_turning:
             from geometry import Lathe2DIPWVerifier
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
@@ -2460,7 +2468,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         # Generate verification plot (.png)
         if plot_path:
-            _notify_p("Pass 2: Generating verification plot & report...", 0.70)
+            if not _notify_p("Pass 2: Generating verification plot & report...", 0.70):
+                return "Operation cancelled by user."
             try:
                 from geometry.plotter import generate_verification_plot, generate_mill_verification_plot
                 is_inch = (combined_ctx.get("unit", 1) == 0)
@@ -2535,7 +2544,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                 )
 
         # Single-pass replay of unmodified vendor post across all merged sections
-        _notify_p("Pass 2: Emitting final NC program...", 0.85)
+        if not _notify_p("Pass 2: Emitting final NC program...", 0.85):
+            return "Operation cancelled by user."
         _dbg(f"Pass 2: Replaying merged context ({len(combined_ctx.get('sections', []))} sections, {promoted_total} promoted moves) with universal_replayer.cps...")
         final_gcode = orchestrator.replay_combined_context(
             combined_context=combined_ctx,
@@ -2599,10 +2609,6 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         fileExt = parameters.itemByName("nc_program_nc_extension").value.value
         if fileExt and fileExt.lower().lstrip(".") == "json":
             fileExt = ".cnc"
-            try:
-                parameters.itemByName("nc_program_nc_extension").value.value = ".cnc"
-            except Exception:
-                pass
         path = setupFolder + "/" + fname + fileExt
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
@@ -2620,11 +2626,16 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         ops_to_check = target_operations if target_operations is not None else [setup]
         for item in ops_to_check:
             if not cam.checkToolpath(item):
-                if progress_cb:
-                    progress_cb("Generating missing toolpath...", 0.02)
+                if progress_cb and not progress_cb("Generating missing toolpath...", 0.02):
+                    return "Operation cancelled by user."
                 genStat = cam.generateToolpath(item)
+                start_wait = time.time()
                 while not genStat.isGenerationCompleted:
                     time.sleep(.1)
+                    if progress_cb and not progress_cb("Generating missing toolpath...", 0.02):
+                        return "Operation cancelled by user."
+                    if time.time() - start_wait > 300.0:
+                        return "Toolpath generation timed out."
                     if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
                         try:
                             adsk.doEvents()
