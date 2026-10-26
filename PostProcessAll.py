@@ -1,7 +1,7 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, sys, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections, html
+import adsk.core, adsk.fusion, adsk.cam, sys, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections, html, urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Version number of settings as saved in documents and settings file
@@ -13,8 +13,6 @@ defaultSettings = {
     "version" : version,
     "ncProgram": "",
     "output" : "",
-    "delFiles" : False,
-    "delFolder" : False,
     "combineTool" : True,
     "restore_rapid" : True,
     "verifyGcode" : True,
@@ -134,9 +132,6 @@ class SettingsManager:
             try:
                 file = open(self.GetPath())
                 self.default = json.load(file)
-                # never allow delFiles or delFolder to default to True
-                self.default["delFiles"] = False
-                self.default["delFolder"] = False
                 if self.default["version"] != version:
                     self.UpdateSettings(defaultSettings, self.default)
             except Exception:
@@ -155,9 +150,6 @@ class SettingsManager:
     def SaveDefault(self, docSettings):
         self.fMustSave = False
         self.default = dict(docSettings)
-        # never allow delFiles or delFolder to default to True
-        self.default["delFiles"] = False
-        self.default["delFolder"] = False
         try:
             strSettings = json.dumps(docSettings)
             file = open(self.GetPath(), "w")
@@ -177,7 +169,7 @@ class SettingsManager:
         for k in (
             "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
             "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName",
-            "groupAdvanced", "initialDelay", "postRetries"
+            "groupAdvanced", "initialDelay", "postRetries", "delFiles", "delFolder"
         ):
             dst.pop(k, None)
         for item in src:
@@ -202,7 +194,8 @@ def InitAddIn():
 
         # Create a button command definition.
         cmdDefs = ui.commandDefinitions
-        cmdDef = cmdDefs.addButtonDefinition(constCmdDefId, constCmdName, toolTip, "resources/Command")
+        cmdResFolder = os.path.join(constAddonDir, "resources", "Command")
+        cmdDef = cmdDefs.addButtonDefinition(constCmdDefId, constCmdName, toolTip, cmdResFolder)
         
         # Connect to the commandCreated event.
         commandEventHandler = CommandEventHandler()
@@ -221,22 +214,6 @@ def InitAddIn():
     except:
         if ui:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
-
-
-def CountOutputFolderFiles(folder, limit, fileExt):
-    cntFiles = 0
-    cntNcFiles = 0
-    for path, dirs, files in os.walk(folder):
-        for file in files:
-            if file.endswith(fileExt):
-                cntNcFiles += 1
-            else:
-                cntFiles += 1
-        if cntFiles > limit:
-            return "many files that are not G-code"
-        if cntNcFiles > limit * 1.5:
-            return "many more G-code files than are produced by this design"
-    return None
 
 
 def ExpandFileName(file):
@@ -585,40 +562,6 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             label.tooltip = input.tooltip
             label.tooltipDescription = input.tooltipDescription
 
-            # check box to delete existing files
-            input = inputs.addBoolValueInput("delFiles", 
-                                             "Delete existing files", 
-                                             True, 
-                                             "", 
-                                             docSettings["delFiles"])
-            input.tooltip = "Delete Existing Files in Each Folder"
-            input.tooltipDescription = (
-                "Delete all files in each output folder before post processing. "
-                "This will help prevent accumulation of G-code files which are "
-                "no longer used."
-                "<p>This option will only delete the files in folders in which new "
-                "G-code files are being written. If you change the name of a "
-                "folder, for example, it will not be deleted.</p>")
-
-            # check box to delete entire output folder
-            input = inputs.addBoolValueInput("delFolder", 
-                                             "Delete output folder", 
-                                             True, 
-                                             "", 
-                                             docSettings["delFolder"] and docSettings["delFiles"])
-            input.isEnabled = docSettings["delFiles"] # enable only if delete existing files
-            input.tooltip = "Delete Entire Output Folder First"
-            input.tooltipDescription = (
-                "Delete the entire output folder before post processing. This "
-                "deletes all files and subfolders regardless of whether or not "
-                "new G-code files are written to a particular folder."
-                "<p><b>WARNING!</b> Be absolutely sure the output folder is set "
-                "correctly before selecting this option. Run the command once "
-                "before setting this option and verify the results are in the "
-                "correct folder. An incorrect setting of the output folder with "
-                "this option selected could result in unintentionally wiping out "
-                "a vast number of files.</p>")
-
             # "Personal Use" version
             inputGroup = inputs.addGroupCommandInput("groupPersonal", "Optimization & Verification")
 
@@ -661,7 +604,7 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
 
             # button to save default settings
             input = inputs.addBoolValueInput("save", "Save as default", False)
-            input.resourceFolder = "resources/Save"
+            input.resourceFolder = os.path.join(constAddonDir, "resources", "Save")
             input.tooltip = "Save These Settings as System Default"
             input.tooltipDescription = (
                 "Save these settings to use as the default for each new design.")
@@ -713,14 +656,6 @@ class CommandInputChangedHandler(adsk.core.InputChangedEventHandler):
                     self.docSettings[input.id] = input.selectedItem.name
                 else:
                     self.docSettings[input.id] = input.value
-
-            # Enable delFolder only if delFiles is true
-            if input.id == "delFiles":
-                item = inputs.itemById("delFolder")
-                item.value = input.value and item.value
-                item.isEnabled = input.value
-
-            pass
 
         except:
             ui.messageBox('Failed:\n{}'.format(traceback.format_exc()))
@@ -786,6 +721,10 @@ def PerformPostProcess(docSettings, setups=None):
         verifyResults.clear()
         _dbg_global(f"PerformPostProcess entered: incoming setups count={len(setups) if setups else 0}")
 
+        global settingsMgr
+        if settingsMgr is None:
+            settingsMgr = SettingsManager()
+
         program = GetNcProgram(cam, docSettings)
         parameters = program.parameters
         setups, setup_operations_map = GetNcProgramSetupsAndOperations(cam, docSettings, setups, program)
@@ -813,43 +752,89 @@ def PerformPostProcess(docSettings, setups=None):
         settingsMgr.SaveSettings(doc.attributes, docSettings)
 
         if len(setups) != 0 and cam.allOperations.count != 0:
-            # make sure we're not going to delete too much
-            if not docSettings["delFiles"]:
-                docSettings["delFolder"] = False
+            # Check upfront if any final output file already exists.
+            # When the final output file already exists, modally ask user if to overwrite it (Yes/No, No aborts).
+            fileExt = parameters.itemByName("nc_program_nc_extension").value.value
+            if fileExt and fileExt.lower().lstrip(".") == "json":
+                fileExt = ".cnc"
+            if not fileExt.startswith("."):
+                fileExt = "." + fileExt
 
-            if docSettings["delFolder"]:
-                fileExt = parameters.itemByName("nc_program_nc_extension").value.value
-                strMsg = CountOutputFolderFiles(outputFolder, len(setups), fileExt)
-                if strMsg:
-                    docSettings["delFolder"] = False
-                    strMsg = (
-                        "The output folder contains {}. "
-                        "It will not be deleted. You may wish to make sure you selected "
-                        "the correct folder. If you want the folder deleted, you must "
-                        "do it manually."
-                        ).format(strMsg)
-                    res = ui.messageBox(strMsg, 
-                                        constCmdName,
-                                        adsk.core.MessageBoxButtonTypes.OKCancelButtonType,
-                                        adsk.core.MessageBoxIconTypes.WarningIconType)
-                    if res == adsk.core.DialogResults.DialogCancel:
+            existing_files = []
+            for setup in setups:
+                target_ops = _lookup_setup_ops(setup, setup_operations_map)
+                if not target_ops or getattr(setup, "isSuppressed", False):
+                    continue
+                if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
+                    continue
+
+                nameList = setup.name.split(':')
+                sFolder = outputFolder
+                cnt = len(nameList) - 1
+                i = 0
+                while i < cnt:
+                    sFolder += "/" + nameList[i].strip()
+                    i += 1
+                sFname = nameList[i].strip()
+                target_path = os.path.join(sFolder, sFname + fileExt)
+                if os.path.isfile(target_path):
+                    existing_files.append(target_path)
+
+            if existing_files:
+                if ui:
+                    if len(existing_files) == 1:
+                        target = existing_files[0]
+                        prompt = (
+                            f"The output file already exists:\n\n"
+                            f"{target}\n\n"
+                            f"Do you want to overwrite it?"
+                        )
+                    else:
+                        file_lines = "\n".join(f"• {f}" for f in existing_files)
+                        prompt = (
+                            f"The following output file(s) already exist:\n\n"
+                            f"{file_lines}\n\n"
+                            f"Do you want to overwrite them?"
+                        )
+                    res = ui.messageBox(
+                        prompt,
+                        constCmdName,
+                        adsk.core.MessageBoxButtonTypes.YesNoButtonType,
+                        adsk.core.MessageBoxIconTypes.QuestionIconType
+                    )
+                    if res != adsk.core.DialogResults.DialogYes:
+                        _dbg_global("PerformPostProcess: user chose not to overwrite existing file; aborting.")
                         return  # abort!
 
-            if docSettings["delFolder"]:
-                try:
-                    shutil.rmtree(outputFolder, True)
-                except:
-                    pass #ignore errors
+            progress = ui.createProgressDialog() if (ui and hasattr(ui, "createProgressDialog")) else None
+            total_setups = max(1, len(setups))
+            if progress:
+                progress.isCancelButtonShown = True
+                progress.show("Post Processing...", "Initializing post processing... (%p%)", 0, 100)
+                progress.progressValue = 0
+                if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
+                    try:
+                        adsk.doEvents()
+                    except Exception:
+                        pass
 
-            progress = ui.createProgressDialog()
-            progress.isCancelButtonShown = True
-            progressMsg = "{} files written to " + outputFolder
-            progress.show("Post Processing...", "", 0, len(setups))
-            progress.progressValue = 1 # try to get it to display
-            progress.progressValue = 0
+            def make_setup_progress_cb(s_idx, s_name):
+                def _cb(step_msg, frac):
+                    if progress:
+                        if progress.wasCancelled:
+                            return False
+                        pct = int(((s_idx + max(0.0, min(1.0, frac))) / total_setups) * 100)
+                        progress.message = f"{s_name}: {step_msg} (%p%)"
+                        progress.progressValue = max(0, min(100, pct))
+                        if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
+                            try:
+                                adsk.doEvents()
+                            except Exception:
+                                pass
+                    return True
+                return _cb
 
             cntSetups = 0
-            cleaned_folders = set()
 
             # Snapshot original NCProgram parameters so the user's NCProgram is never left mutated
             orig_prog_params = {}
@@ -863,7 +848,7 @@ def PerformPostProcess(docSettings, setups=None):
 
             try:
                 for setup in setups:
-                    if progress.wasCancelled:
+                    if progress and progress.wasCancelled:
                         break
                     target_ops = _lookup_setup_ops(setup, setup_operations_map)
                     if not target_ops or getattr(setup, "isSuppressed", False):
@@ -879,35 +864,30 @@ def PerformPostProcess(docSettings, setups=None):
                         setupFolder += "/" + nameList[i].strip()
                         i += 1
 
-                    if setupFolder not in cleaned_folders:
-                        cleaned_folders.add(setupFolder)
-                        if docSettings.get("delFiles"):
-                            # delete all the files in the folder
-                            try:
-                                for entry in os.scandir(setupFolder):
-                                    if entry.is_file():
-                                        try:
-                                            os.remove(entry.path)
-                                        except:
-                                            pass #ignore errors
-                            except:
-                                pass #ignore errors
-
                     fname = nameList[i].strip()
 
+                    setup_cb = make_setup_progress_cb(cntSetups, setup.name)
+                    setup_cb("Starting setup...", 0.0)
+
                     # post the file with only the operations selected in the NCProgram
-                    status = PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=target_ops)
+                    status = PostProcessSetup(
+                        fname, setup, setupFolder, docSettings, program,
+                        target_operations=target_ops, progress_cb=setup_cb
+                    )
                     if status == None:
                         cntFiles += 1
+                        setup_cb("Completed.", 1.0)
                     else:
                         cntSkipped += 1
                         lstSkipped += "\nFailed on setup " + setup.name + ": " + status
-                        
+
                     cntSetups += 1
-                    progress.message = progressMsg.format(cntFiles)
-                    progress.progressValue = cntSetups
             finally:
-                progress.hide()
+                if progress:
+                    try:
+                        progress.hide()
+                    except Exception:
+                        pass
                 # restore program output folder and original NCProgram name/filename parameters
                 AssignOutputFolder(parameters, outputFolder)
                 for p_key, p_val in orig_prog_params.items():
@@ -1746,7 +1726,9 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         return f"Lathe pipeline verifier failed on {os.path.basename(cncPath)}: {exc}"
 
 
-_notification_handler = None
+_palette_handlers = []
+_last_action_timestamp = 0
+_last_action_key = ""
 constNotificationPaletteId = "PostProcessAll_NotificationPalette"
 
 _HTMLEventHandlerBase = (
@@ -1754,6 +1736,84 @@ _HTMLEventHandlerBase = (
     if ("adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "HTMLEventHandler"))
     else object
 )
+
+_NavigationEventHandlerBase = (
+    getattr(adsk.core, "NavigationEventHandler", object)
+    if ("adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "NavigationEventHandler"))
+    else object
+)
+
+
+def _HandleNotificationAction(palette_id, action, data):
+    global _last_action_timestamp, _last_action_key
+    now = time.time()
+    key = f"{action}:{data}"
+    # Debounce duplicate events if both Navigation and HTML handlers fire for the same click
+    if key == _last_action_key and (now - _last_action_timestamp) < 0.8:
+        _dbg_global(f"_HandleNotificationAction: debouncing duplicate action={action}")
+        return
+    _last_action_key = key
+    _last_action_timestamp = now
+
+    _dbg_global(f"_HandleNotificationAction: executing action={action}, data={data}")
+
+    # 1. Execute OS action first (independent of Fusion UI state)
+    if action in ("open_file", "open_folder"):
+        if data and os.path.exists(data):
+            res = _OpenFile(data)
+            _dbg_global(f"_HandleNotificationAction: _OpenFile({data}) returned {res}")
+        else:
+            _dbg_global(f"_HandleNotificationAction: path does not exist: '{data}'")
+
+    # 2. Hide palette if requested or on action
+    try:
+        app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "Application")) else None
+        ui = getattr(app, "userInterface", None) if app else None
+        if ui and hasattr(ui, "palettes") and ui.palettes:
+            p = ui.palettes.itemById(palette_id)
+            if p:
+                p.isVisible = False
+    except Exception as hide_exc:
+        _dbg_global(f"_HandleNotificationAction hide palette note: {hide_exc}")
+
+
+class _NotificationNavigationEventHandler(_NavigationEventHandlerBase):
+    def __init__(self, palette_id):
+        super().__init__()
+        self.palette_id = palette_id
+
+    def notify(self, args):
+        try:
+            url = getattr(args, "navigationURL", "")
+            if "adsk" in sys.modules and hasattr(adsk, "core") and hasattr(adsk.core, "NavigationEventArgs"):
+                try:
+                    c = adsk.core.NavigationEventArgs.cast(args)
+                    if c:
+                        url = c.navigationURL
+                except Exception:
+                    pass
+
+            _dbg_global(f"NotificationNavigationEventHandler notify: url={url}")
+
+            if url and url.startswith("action://"):
+                try:
+                    args.launchExternally = False
+                except Exception:
+                    pass
+                try:
+                    if hasattr(args, "preventDefault"):
+                        args.preventDefault = True
+                except Exception:
+                    pass
+
+                p = urllib.parse.urlparse(url)
+                action = (p.netloc or p.path).strip("/")
+                q = urllib.parse.parse_qs(p.query)
+                data = q.get("path", [""])[0] or q.get("data", [""])[0]
+                _dbg_global(f"NotificationNavigationEventHandler parsed: action={action}, data={data}")
+                _HandleNotificationAction(self.palette_id, action, data)
+        except Exception as exc:
+            _dbg_global(f"NotificationNavigationEventHandler exception: {exc}\n{traceback.format_exc()}")
 
 
 class _NotificationHTMLEventHandler(_HTMLEventHandlerBase):
@@ -1775,22 +1835,7 @@ class _NotificationHTMLEventHandler(_HTMLEventHandlerBase):
                     pass
 
             _dbg_global(f"NotificationHTMLEventHandler notify: action={action}, data={data}")
-
-            app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
-            ui = app.userInterface if app else None
-
-            if action in ("open_file", "open_folder"):
-                if data and os.path.exists(data):
-                    _OpenFile(data)
-                if ui and hasattr(ui, "palettes") and ui.palettes:
-                    p = ui.palettes.itemById(self.palette_id)
-                    if p:
-                        p.isVisible = False
-            elif action == "dismiss":
-                if ui and hasattr(ui, "palettes") and ui.palettes:
-                    p = ui.palettes.itemById(self.palette_id)
-                    if p:
-                        p.isVisible = False
+            _HandleNotificationAction(self.palette_id, action, data)
         except Exception as exc:
             _dbg_global(f"NotificationHTMLEventHandler exception: {exc}")
 
@@ -1817,8 +1862,9 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
     action_buttons = []
     for label, action_name, action_data in actions:
         esc_data = html.escape(action_data, quote=True).replace('\\', '\\\\').replace("'", "\\'")
+        nav_href = f"action://{action_name}?path={urllib.parse.quote(action_data)}"
         action_buttons.append(
-            f'<button class="action-btn" onclick="sendAction(\'{action_name}\', \'{esc_data}\')">{html.escape(label)}</button>'
+            f'<a class="action-btn" href="{nav_href}" onclick="sendAction(event, \'{action_name}\', \'{esc_data}\')">{html.escape(label)}</a>'
         )
     actions_html = "\n".join(action_buttons)
 
@@ -1833,10 +1879,11 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
     background: #2b2b2b;
     color: #f0f0f0;
     margin: 0;
-    padding: 10px 14px;
+    padding: 12px 16px;
     font-size: 12px;
-    line-height: 1.4;
-    overflow: hidden;
+    line-height: 1.45;
+    overflow-y: auto;
+    overflow-x: hidden;
     user-select: none;
     -webkit-user-select: none;
   }}
@@ -1846,100 +1893,102 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
   .toast-header {{
     display: flex;
     align-items: center;
-    font-size: 13px;
+    font-size: 13.5px;
     font-weight: 600;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }}
   .toast-icon {{
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     background-color: {bg_accent};
     color: #ffffff;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: bold;
     margin-right: 8px;
     flex-shrink: 0;
   }}
   .toast-title {{
     flex-grow: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-weight: 600;
   }}
-  .toast-close {{
-    cursor: pointer;
-    font-size: 14px;
-    color: #888;
-    padding: 0 4px;
-    line-height: 1;
-  }}
-  .toast-close:hover {{ color: #ccc; }}
   .toast-body {{
-    font-size: 11.5px;
-    margin-bottom: 8px;
-    color: #cccccc;
+    font-size: 12px;
+    margin-bottom: 6px;
+    color: #e0e0e0;
+    word-break: break-word;
   }}
   @media (prefers-color-scheme: light) {{
-    .toast-body {{ color: #555555; }}
+    .toast-body {{ color: #333333; }}
   }}
   .toast-details {{
-    font-size: 10.5px;
-    color: #999999;
-    margin-bottom: 10px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 11px;
+    color: #9e9e9e;
+    margin-bottom: 12px;
+    word-break: break-all;
   }}
   .toast-actions {{
     display: flex;
-    gap: 6px;
+    gap: 8px;
     flex-wrap: wrap;
+    margin-top: 4px;
   }}
-  button.action-btn {{
+  a.action-btn, button.action-btn {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: #3e3e3e;
-    color: #ffffff;
+    color: #ffffff !important;
+    text-decoration: none !important;
     border: 1px solid #555555;
-    padding: 4px 10px;
+    padding: 6px 12px;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 11.5px;
+    font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
   }}
   @media (prefers-color-scheme: light) {{
-    button.action-btn {{ background: #eeeeee; color: #111111; border-color: #cccccc; }}
+    a.action-btn, button.action-btn {{ background: #eeeeee; color: #111111 !important; border-color: #cccccc; }}
   }}
-  button.action-btn:hover {{
+  a.action-btn:hover, button.action-btn:hover {{
     background: #007acc;
     border-color: #007acc;
-    color: #ffffff;
+    color: #ffffff !important;
   }}
 </style>
 <script>
-  function sendAction(action, data) {{
+  function sendAction(e, action, data) {{
+    // 1. Try adsk.fusionSendData if available
     try {{
-      if (window.adsk && window.adsk.fusionSendData) {{
-        window.adsk.fusionSendData(action, data);
-      }} else if (typeof adsk !== 'undefined' && adsk.fusionSendData) {{
+      if (typeof adsk !== 'undefined' && adsk && adsk.fusionSendData) {{
         adsk.fusionSendData(action, data);
+      }} else if (window.adsk && window.adsk.fusionSendData) {{
+        window.adsk.fusionSendData(action, data);
       }}
-    }} catch (e) {{
-      console.error(e);
-    }}
+    }} catch (err) {{}}
+
+    // 2. Direct location navigation to fire navigatingURL (universal fail-safe)
+    try {{
+      var navUrl = 'action://' + encodeURIComponent(action) + '?path=' + encodeURIComponent(data) + '&t=' + Date.now();
+      window.location.href = navUrl;
+    }} catch (err2) {{}}
   }}
   var dismissTimer = setTimeout(function() {{
-    sendAction('dismiss', '');
-  }}, 30000);
+    sendAction(null, 'dismiss', '');
+  }}, 6000);
   document.addEventListener('mouseenter', function() {{
     if (dismissTimer) clearTimeout(dismissTimer);
   }});
   document.addEventListener('mouseleave', function() {{
     dismissTimer = setTimeout(function() {{
-      sendAction('dismiss', '');
-    }}, 8000);
+      sendAction(null, 'dismiss', '');
+    }}, 2500);
   }});
 </script>
 </head>
@@ -1947,7 +1996,6 @@ def _BuildNotificationHTML(title, status_type, message, details, actions):
   <div class="toast-header">
     <div class="toast-icon">{icon}</div>
     <div class="toast-title">{html.escape(title)}</div>
-    <div class="toast-close" onclick="sendAction('dismiss', '')">✕</div>
   </div>
   <div class="toast-body">{html.escape(message)}</div>
   {f'<div class="toast-details">{html.escape(details)}</div>' if details else ''}
@@ -1995,17 +2043,8 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
 
     details = outputFolder if outputFolder else ""
 
-    # 2. Update native Fusion statusMessage (bottom-right status bar)
+    # 2. Log status summary to Application console (without flickering status bar)
     status_summary = f"[PostProcessAll] {title}: {msg}"
-    if ui and hasattr(ui, "statusMessage"):
-        try:
-            ui.statusMessage = status_summary
-            if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
-                adsk.doEvents()
-        except Exception:
-            pass
-
-    # Log to Application console
     try:
         if "adsk.core" in sys.modules and hasattr(adsk.core, "Application"):
             adsk.core.Application.get().log(status_summary)
@@ -2036,27 +2075,41 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
         except Exception as fe:
             _dbg_global(f"_NotifyPostProcessResult write tmp_html note: {fe}")
 
-        # Calculate target screen coordinates in bottom-right corner of viewport
-        target_x = 950
-        target_y = 700
-        app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
-        if app and hasattr(app, "activeViewport") and app.activeViewport:
-            vp = app.activeViewport
+        palette_w = 500
+        palette_h = 220
+        target_x = 940
+        target_y = 680
+
+        # Query macOS Fusion window bounds for pixel-perfect lower-right placement
+        if sys.platform == "darwin":
             try:
-                if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
-                    vp_w = vp.width
-                    vp_h = vp.height
-                    pt = vp.viewToScreen(adsk.core.Point2D.create(vp_w, vp_h))
-                    if pt:
-                        target_x = max(50, int(pt.x) - 460)
-                        target_y = max(50, int(pt.y) - 180)
-                        _dbg_global(f"_NotifyPostProcessResult: activeViewport {vp_w}x{vp_h} mapped to ({pt.x}, {pt.y}) -> target ({target_x}, {target_y})")
-            except Exception as e_pos:
-                _dbg_global(f"_NotifyPostProcessResult: viewToScreen calculation failed: {e_pos}")
+                import subprocess
+                cmd = 'tell application "System Events" to tell process "Autodesk Fusion" to repeat with w in windows\nif name of w contains "Autodesk Fusion" then\nreturn {position of w, size of w}\nend if\nend repeat'
+                raw = subprocess.check_output(['osascript', '-e', cmd], timeout=0.4).decode().strip()
+                parts = [int(p.strip()) for p in raw.split(',') if p.strip().lstrip('-').isdigit()]
+                if len(parts) >= 4:
+                    win_x, win_y, win_w, win_h = parts[0], parts[1], parts[2], parts[3]
+                    target_x = max(20, win_x + win_w - palette_w - 24)
+                    target_y = max(20, win_y + win_h - palette_h - 45)
+                    _dbg_global(f"_NotifyPostProcessResult: macOS window bounds ({win_x},{win_y},{win_w},{win_h}) -> target ({target_x}, {target_y})")
+            except Exception as e_mac:
+                _dbg_global(f"_NotifyPostProcessResult: mac window query error: {e_mac}")
+        else:
+            app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+            if app and hasattr(app, "activeViewport") and app.activeViewport:
+                vp = app.activeViewport
+                try:
+                    if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
+                        pt = vp.viewToScreen(adsk.core.Point2D.create(vp.width, vp.height))
+                        if pt:
+                            target_x = max(50, int(pt.x) - palette_w - 20)
+                            target_y = max(50, int(pt.y) - palette_h - 20)
+                except Exception:
+                    pass
 
         palette = None
 
-        # Check if existing notification palette exists
+        # Check if existing notification palette exists and recreate cleanly
         existing = None
         try:
             existing = ui.palettes.itemById(constNotificationPaletteId)
@@ -2065,16 +2118,11 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
 
         if existing:
             try:
-                _dbg_global(f"_NotifyPostProcessResult: reusing existing palette id={constNotificationPaletteId}")
-                existing.htmlFileURL = tmp_html
-                palette = existing
+                _dbg_global(f"_NotifyPostProcessResult: cleaning up previous palette id={constNotificationPaletteId}")
+                existing.deleteMe()
             except Exception as rex:
-                _dbg_global(f"_NotifyPostProcessResult: palette reuse failed: {rex}, deleting to recreate")
-                try:
-                    existing.deleteMe()
-                except Exception:
-                    pass
-                palette = None
+                _dbg_global(f"_NotifyPostProcessResult: palette cleanup error: {rex}")
+            existing = None
 
         if not palette and os.path.isfile(tmp_html):
             if hasattr(ui.palettes, "add2"):
@@ -2084,11 +2132,11 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
                         constNotificationPaletteId,
                         "Post Processing",
                         tmp_html,
-                        False,  # Initially hidden so docking/position can be applied cleanly
+                        True,   # isVisible=True so native Qt window is allocated for setPosition/setSize
                         True,   # showCloseButton
                         False,  # isResizable
-                        440,    # width
-                        160,    # height
+                        palette_w,
+                        palette_h,
                     )
                 except Exception as e_add2:
                     _dbg_global(f"_NotifyPostProcessResult: add2 with tmp_html failed: {e_add2}")
@@ -2100,17 +2148,22 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
                         constNotificationPaletteId,
                         "Post Processing",
                         tmp_html,
-                        False,
+                        True,
                         True,
                         False,
-                        440,
-                        160,
+                        palette_w,
+                        palette_h,
                     )
                 except Exception as e_add:
                     _dbg_global(f"_NotifyPostProcessResult: add with tmp_html failed: {e_add}")
 
         if palette:
             _dbg_global(f"_NotifyPostProcessResult: palette active (id={constNotificationPaletteId})")
+            try:
+                palette.isVisible = True
+            except Exception:
+                pass
+
             try:
                 if "adsk.core" in sys.modules:
                     if hasattr(adsk.core, "PaletteDockingOptions") and hasattr(adsk.core.PaletteDockingOptions, "PaletteDockOptionsNone"):
@@ -2121,30 +2174,51 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
                 _dbg_global(f"_NotifyPostProcessResult docking state note: {dock_exc}")
 
             try:
+                res_size = palette.setSize(palette_w, palette_h)
+                _dbg_global(f"_NotifyPostProcessResult: palette.setSize({palette_w}, {palette_h}) returned {res_size}")
+            except Exception as size_exc:
+                _dbg_global(f"_NotifyPostProcessResult: setSize note: {size_exc}")
+
+            try:
                 res_pos = palette.setPosition(target_x, target_y)
                 _dbg_global(f"_NotifyPostProcessResult: palette.setPosition({target_x}, {target_y}) returned {res_pos}")
             except Exception as pos_exc:
                 _dbg_global(f"_NotifyPostProcessResult: setPosition failed: {pos_exc}")
 
-            try:
-                res_size = palette.setSize(440, 160)
-                _dbg_global(f"_NotifyPostProcessResult: palette.setSize(440, 160) returned {res_size}")
-            except Exception as size_exc:
-                _dbg_global(f"_NotifyPostProcessResult: setSize note: {size_exc}")
+            # Remove any stale notification handlers from global handlers
+            global _palette_handlers, handlers
+            for h in _palette_handlers:
+                if h in handlers:
+                    try:
+                        handlers.remove(h)
+                    except ValueError:
+                        pass
+            _palette_handlers = []
 
-            try:
-                palette.isVisible = True
-            except Exception as vis_exc:
-                _dbg_global(f"_NotifyPostProcessResult: set isVisible=True failed: {vis_exc}")
+            # 1. Navigation Event Handler (handles action:// links from <a> or window.location.href)
+            if hasattr(palette, "navigatingURL") and hasattr(palette.navigatingURL, "add"):
+                try:
+                    nav_handler = _NotificationNavigationEventHandler(constNotificationPaletteId)
+                    palette.navigatingURL.add(nav_handler)
+                    _palette_handlers.append(nav_handler)
+                    handlers.append(nav_handler)
+                    _dbg_global("_NotifyPostProcessResult: navigatingURL handler attached successfully")
+                except Exception as n_exc:
+                    _dbg_global(f"_NotifyPostProcessResult: navigatingURL attach note: {n_exc}")
 
-            try:
-                _notification_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)
-                if hasattr(palette, "incomingFromHTML") and hasattr(palette.incomingFromHTML, "add"):
-                    palette.incomingFromHTML.add(_notification_handler)
-            except Exception as handler_exc:
-                _dbg_global(f"_NotifyPostProcessResult handler attach note: {handler_exc}")
+            # 2. HTML Event Handler (handles adsk.fusionSendData)
+            if hasattr(palette, "incomingFromHTML") and hasattr(palette.incomingFromHTML, "add"):
+                try:
+                    html_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)
+                    palette.incomingFromHTML.add(html_handler)
+                    _palette_handlers.append(html_handler)
+                    handlers.append(html_handler)
+                    _dbg_global("_NotifyPostProcessResult: incomingFromHTML handler attached successfully")
+                except Exception as h_exc:
+                    _dbg_global(f"_NotifyPostProcessResult: incomingFromHTML attach note: {h_exc}")
         else:
             _dbg_global("_NotifyPostProcessResult: failed to create palette through all attempts")
+
 
 
 
@@ -2175,9 +2249,11 @@ def ShowVerifyResults(ui):
 
 def _OpenFile(path):
     """Open a file in the OS viewer. Returns None on success or an error string."""
+    _dbg_global(f"_OpenFile: requested for '{path}' (exists={os.path.exists(path)})")
     try:
         if os.name != "posix":
             os.startfile(path)
+            _dbg_global(f"_OpenFile: os.startfile succeeded for '{path}'")
             return None
         # Strip Fusion's embedded-Python/dyld variables so LaunchServices helpers start cleanly
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "DYLD_"))}
@@ -2188,14 +2264,18 @@ def _OpenFile(path):
         for cmd in attempts:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
             if proc.returncode == 0:
+                _dbg_global(f"_OpenFile: command {cmd} succeeded")
                 return None
             last = (proc.stderr or proc.stdout).strip() or f"exit code {proc.returncode}"
+            _dbg_global(f"_OpenFile: command {cmd} failed with {last}")
         return last
     except Exception as exc:
+        err = f"{exc}\n{traceback.format_exc()}"
+        _dbg_global(f"_OpenFile: exception: {err}")
         return str(exc)
 
 
-def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=None):
+def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=None, progress_cb=None):
     """
     Unified 2-pass Context-Dump & Single-Pass Replay pipeline for Milling and Turning setups:
     Pass 1 (Context Extraction): Post each single-tool batch inside Fusion using universal_dumper.cps
@@ -2215,6 +2295,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             - Generate summary report (_report.md) and record verify results for UI.
     """
     _dbg = _dbg_global
+    _notify_p = progress_cb or (lambda msg, frac: True)
+    _notify_p("Initializing pipeline...", 0.02)
     is_turning = (setup.operationType == adsk.cam.OperationTypes.TurningOperation)
     _dbg(f"_PostProcessUnifiedPipeline entered for {fname}, path={path}, is_turning={is_turning}")
 
@@ -2307,7 +2389,10 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         if hasattr(opts, "isFailOnToolNumberDuplication"):
             opts.isFailOnToolNumberDuplication = False
 
+        n_batches = max(1, len(batches))
         for b_idx, (t_num, op_list) in enumerate(batches):
+            b_frac = 0.08 + 0.32 * (b_idx / n_batches)
+            _notify_p(f"Pass 1: Dumping toolpath batch {b_idx + 1} of {n_batches} (Tool {t_num})...", b_frac)
             b_prefix = f"batch_{b_idx}"
             b_json = os.path.join(tmp_dir, f"{b_prefix}.json")
 
@@ -2357,6 +2442,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         # -------------------------------------------------------------
         # PASS 2: Merge Contexts, Universal Domain Extraction & Single-Pass Replay
         # -------------------------------------------------------------
+        _notify_p("Pass 2: Merging toolpath context...", 0.42)
         from context_parser import (
             merge_context_dumps,
             parse_context_dump,
@@ -2388,6 +2474,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         plot_path = base_no_ext + ".png"
 
         # Instantiate verification engine based on setup operation type
+        _notify_p(f"Pass 2: Simulating stock & collisions ({'turning' if is_turning else 'milling'})...", 0.50)
         if is_turning:
             from geometry import Lathe2DIPWVerifier
             verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
@@ -2399,6 +2486,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         # Generate verification plot (.png)
         if plot_path:
+            _notify_p("Pass 2: Generating verification plot & report...", 0.70)
             try:
                 from geometry.plotter import generate_verification_plot, generate_mill_verification_plot
                 is_inch = (combined_ctx.get("unit", 1) == 0)
@@ -2455,6 +2543,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             )
 
         # Single-pass replay of unmodified vendor post across all merged sections
+        _notify_p("Pass 2: Emitting final NC program...", 0.85)
         _dbg(f"Pass 2: Replaying merged context ({len(combined_ctx.get('sections', []))} sections, {promoted_total} promoted moves) with universal_replayer.cps...")
         final_gcode = orchestrator.replay_combined_context(
             combined_context=combined_ctx,
@@ -2469,6 +2558,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         )
         with open(report_path, "w", encoding="utf-8") as rf:
             rf.write(summary_md)
+
+        _notify_p("Setup completed.", 1.0)
 
         _RecordVerifyResult(
             setup=setup,
@@ -2506,7 +2597,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 _PostProcessLathePipeline = _PostProcessUnifiedPipeline
 
 
-def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=None):
+def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=None, progress_cb=None):
     ui = None
     retVal = "Fusion reported an exception"
 
@@ -2528,9 +2619,13 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         path = setupFolder + "/" + fname + fileExt
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf8"):
-                pass
-            os.remove(path)
+            if os.path.exists(path):
+                if not os.access(path, os.W_OK):
+                    raise PermissionError(f"File {path} is not writable")
+            else:
+                with open(path, "w", encoding="utf8"):
+                    pass
+                os.remove(path)
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
         
@@ -2538,15 +2633,22 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         ops_to_check = target_operations if target_operations is not None else [setup]
         for item in ops_to_check:
             if not cam.checkToolpath(item):
+                if progress_cb:
+                    progress_cb("Generating missing toolpath...", 0.02)
                 genStat = cam.generateToolpath(item)
                 while not genStat.isGenerationCompleted:
                     time.sleep(.1)
+                    if "adsk" in sys.modules and hasattr(adsk, "doEvents"):
+                        try:
+                            adsk.doEvents()
+                        except Exception:
+                            pass
 
         _dbg = _dbg_global
         _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, target_ops_cnt={len(target_operations) if target_operations is not None else 'all'}")
 
         # Unified 2-pass dump & single-pass replay pipeline for all setups
-        return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=target_operations)
+        return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=target_operations, progress_cb=progress_cb)
 
     except Exception as exc:
         if ui:

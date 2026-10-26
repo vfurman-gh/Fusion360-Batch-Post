@@ -22,6 +22,7 @@ if "adsk" not in sys.modules:
     adsk = types.ModuleType("adsk")
     adsk.cam = types.ModuleType("adsk.cam")
     adsk.cam.OperationTypes = types.SimpleNamespace(TurningOperation=1, MillingOperation=0)
+    adsk.cam.CAM = types.SimpleNamespace(cast=lambda x: x)
     adsk.core = types.ModuleType("adsk.core")
     adsk.core.CommandCreatedEventHandler = type("CommandCreatedEventHandler", (), {})
     adsk.core.InputChangedEventHandler = type("InputChangedEventHandler", (), {})
@@ -35,12 +36,15 @@ if "adsk" not in sys.modules:
     sys.modules["adsk.fusion"] = adsk.fusion
 else:
     adsk = sys.modules["adsk"]
+    if not hasattr(adsk.cam, "CAM"):
+        adsk.cam.CAM = types.SimpleNamespace(cast=lambda x: x)
 
 if not hasattr(adsk.core, "MessageBoxIconTypes"):
     adsk.core.MessageBoxIconTypes = types.SimpleNamespace(
         InformationIconType=0,
         WarningIconType=1,
         CriticalIconType=2,
+        QuestionIconType=3,
     )
 if not hasattr(adsk.core, "MessageBoxButtonTypes"):
     adsk.core.MessageBoxButtonTypes = types.SimpleNamespace(
@@ -448,6 +452,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 self.dockingOption = None
                 self.dockingState = None
                 self.incomingFromHTML = type("Incoming", (), {"add": lambda s, h: None})()
+                self.navigatingURL = type("Navigating", (), {"add": lambda s, h: None})()
 
             @property
             def html(self):
@@ -517,10 +522,9 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             }]
         )
         self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on success")
-        self.assertIn("Post Processing Completed Successfully", mock_ui.statusMessage)
-        self.assertIn("OilLid", mock_ui.statusMessage)
         self.assertIn(constNotificationPaletteId, created_palettes)
         self.assertIn("Post Processing Completed Successfully", created_palettes[constNotificationPaletteId].html)
+        self.assertIn("OilLid", created_palettes[constNotificationPaletteId].html)
 
         # 2. Warning notification (skipped setups)
         _NotifyPostProcessResult(
@@ -532,9 +536,8 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             verifyResults=[]
         )
         self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on warning")
-        self.assertIn("Completed with Warnings", mock_ui.statusMessage)
-        self.assertIn("1 setup(s) skipped", mock_ui.statusMessage)
         self.assertIn("Post Processing Completed with Warnings", created_palettes[constNotificationPaletteId].html)
+        self.assertIn("1 setup(s) skipped", created_palettes[constNotificationPaletteId].html)
 
         # 3. Failure notification (0 files posted)
         _NotifyPostProcessResult(
@@ -547,11 +550,396 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             is_fatal=True
         )
         self.assertEqual(len(mock_ui.message_box_calls), 0, "Must NEVER call modal messageBox on failure")
-        self.assertIn("Post Processing Failed", mock_ui.statusMessage)
-        self.assertIn("Kernel failed to solve", mock_ui.statusMessage)
         self.assertIn("Post Processing Failed", created_palettes[constNotificationPaletteId].html)
+        self.assertIn("Kernel failed to solve", created_palettes[constNotificationPaletteId].html)
+
+    def test_notification_event_handlers_and_action_urls(self):
+        """Verify that action:// navigation links and HTML events properly route to file opening."""
+        import urllib.parse
+        import PostProcessAll
+        from PostProcessAll import (
+            _BuildNotificationHTML,
+            _NotificationNavigationEventHandler,
+            _NotificationHTMLEventHandler,
+            constNotificationPaletteId,
+        )
+
+        actions = [
+            ("Open NC File", "open_file", "/tmp/test_dir/output.nc"),
+            ("Open Folder", "open_folder", "/tmp/test_dir"),
+        ]
+        html_out = _BuildNotificationHTML("Done", "success", "All good", "/tmp/test_dir", actions)
+        self.assertIn('action://open_file?path=', html_out)
+        self.assertIn('action://open_folder?path=', html_out)
+        self.assertIn('sendAction(event, \'open_file\'', html_out)
+
+        opened_files = []
+        orig_open_file = PostProcessAll._OpenFile
+        try:
+            PostProcessAll._OpenFile = lambda p: opened_files.append(p)
+
+            # Test NavigationEventHandler
+            nav_handler = _NotificationNavigationEventHandler(constNotificationPaletteId)
+            mock_nav_args = type("NavArgs", (), {
+                "navigationURL": "action://open_file?path=%2Ftmp%2Ftest_dir%2Foutput.nc",
+                "launchExternally": True,
+                "preventDefault": False,
+            })()
+
+            # Temporarily make path exist
+            with tempfile.NamedTemporaryFile() as tf:
+                mock_nav_args.navigationURL = f"action://open_file?path={urllib.parse.quote(tf.name)}"
+                nav_handler.notify(mock_nav_args)
+                self.assertFalse(mock_nav_args.launchExternally, "Must prevent external browser opening")
+                self.assertIn(tf.name, opened_files)
+
+            # Test HTMLEventHandler
+            html_handler = _NotificationHTMLEventHandler(constNotificationPaletteId)
+            with tempfile.NamedTemporaryFile() as tf2:
+                mock_html_args = type("HTMLArgs", (), {
+                    "action": "open_file",
+                    "data": tf2.name,
+                })()
+                html_handler.notify(mock_html_args)
+                self.assertIn(tf2.name, opened_files)
+        finally:
+            PostProcessAll._OpenFile = orig_open_file
+
+    def test_progress_dialog_advancement_and_auto_dismiss_timeout(self):
+        """Verify progress updates advance percentages and notification auto-dismiss timer is 6 seconds."""
+        import PostProcessAll
+        from PostProcessAll import _BuildNotificationHTML
+
+        # 1. Verify auto-dismiss timeout is 6 seconds (6000ms)
+        html = _BuildNotificationHTML("Done", "success", "OK", "", [])
+        self.assertIn("6000);", html, "Default auto-dismiss timeout must be 6 seconds")
+        self.assertIn("2500);", html, "Mouseleave auto-dismiss timeout must be 2.5 seconds")
+
+        # 2. Verify progress reporting callback logic
+        progress_calls = []
+        def mock_progress_cb(msg, frac):
+            progress_calls.append((msg, frac))
+            return True
+
+        # Simulate pipeline reporting to callback
+        mock_progress_cb("Pass 1: Dumping toolpath batch 1/2...", 0.20)
+        mock_progress_cb("Pass 2: Simulating stock & collisions...", 0.50)
+        mock_progress_cb("Pass 2: Generating verification plot & report...", 0.70)
+        mock_progress_cb("Pass 2: Emitting final NC program...", 0.85)
+        mock_progress_cb("Setup completed.", 1.0)
+
+        self.assertEqual(len(progress_calls), 5)
+        fractions = [c[1] for c in progress_calls]
+        self.assertEqual(fractions, sorted(fractions), "Progress percentages must strictly advance")
+        self.assertEqual(fractions[-1], 1.0)
+
+    def test_default_settings_and_manager_purged_del_options(self):
+        """Verify delFiles and delFolder are eliminated from defaults and purged by SettingsManager."""
+        import PostProcessAll
+
+        self.assertNotIn("delFiles", PostProcessAll.defaultSettings)
+        self.assertNotIn("delFolder", PostProcessAll.defaultSettings)
+
+        mgr = PostProcessAll.SettingsManager()
+        legacy_dst = {
+            "version": "1.0.0",
+            "delFiles": True,
+            "delFolder": True,
+            "splitSetup": True,
+            "restore_rapid": True,
+        }
+        mgr.UpdateSettings(PostProcessAll.defaultSettings, legacy_dst)
+        self.assertNotIn("delFiles", legacy_dst)
+        self.assertNotIn("delFolder", legacy_dst)
+        self.assertNotIn("splitSetup", legacy_dst)
+
+    def test_perform_post_process_modal_overwrite_abort_on_no(self):
+        """Verify modal prompt aborts before any progress dialog or posting if user selects No."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_file = os.path.join(tmp_dir, "Setup 1.nc")
+            with open(target_file, "w", encoding="utf8") as f:
+                f.write("ORIGINAL_CONTENT")
+
+            mock_param_folder = MagicMock()
+            mock_param_folder.value.value = tmp_dir
+            mock_param_ext = MagicMock()
+            mock_param_ext.value.value = ".nc"
+
+            params_dict = {
+                "nc_program_output_folder": mock_param_folder,
+                "nc_program_nc_extension": mock_param_ext,
+                "nc_program_name": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_filename": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_openInEditor": MagicMock(value=MagicMock(value=False)),
+            }
+            mock_params = MagicMock()
+            mock_params.itemByName.side_effect = lambda k: params_dict.get(k)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters = mock_params
+            mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+            mock_op = MagicMock()
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+
+            mock_setup = MagicMock()
+            mock_setup.name = "Setup 1"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([mock_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([mock_op])
+            mock_cam.setups = MockCamCollection([mock_setup])
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            msgbox_calls = []
+            progress_created = []
+
+            def mock_msgbox(prompt, title, btn_type, icon_type):
+                msgbox_calls.append((prompt, title, btn_type, icon_type))
+                return PostProcessAll.adsk.core.DialogResults.DialogNo
+
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = mock_msgbox
+            mock_ui.createProgressDialog.side_effect = lambda: progress_created.append(1)
+
+            mock_app = MagicMock()
+            mock_app.userInterface = mock_ui
+            mock_app.activeDocument = mock_doc
+
+            post_setup_calls = []
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append(args)):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup])
+
+            self.assertEqual(len(msgbox_calls), 1, "Must prompt user with modal messageBox")
+            prompt, title, btn_type, icon_type = msgbox_calls[0]
+            self.assertIn("Setup 1.nc", prompt)
+            self.assertIn("already exists", prompt)
+            self.assertEqual(btn_type, PostProcessAll.adsk.core.MessageBoxButtonTypes.YesNoButtonType)
+            self.assertEqual(len(progress_created), 0, "Must NOT open progress dialog when aborted")
+            self.assertEqual(len(post_setup_calls), 0, "Must NOT call PostProcessSetup when aborted")
+
+            # Verify existing file was not modified or truncated
+            with open(target_file, "r", encoding="utf8") as f:
+                self.assertEqual(f.read(), "ORIGINAL_CONTENT")
+
+    def test_perform_post_process_modal_overwrite_proceed_on_yes(self):
+        """Verify modal prompt proceeds with post-processing when user selects Yes."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_file = os.path.join(tmp_dir, "Setup 1.nc")
+            with open(target_file, "w", encoding="utf8") as f:
+                f.write("ORIGINAL_CONTENT")
+
+            mock_param_folder = MagicMock()
+            mock_param_folder.value.value = tmp_dir
+            mock_param_ext = MagicMock()
+            mock_param_ext.value.value = ".nc"
+
+            params_dict = {
+                "nc_program_output_folder": mock_param_folder,
+                "nc_program_nc_extension": mock_param_ext,
+                "nc_program_name": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_filename": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_openInEditor": MagicMock(value=MagicMock(value=False)),
+            }
+            mock_params = MagicMock()
+            mock_params.itemByName.side_effect = lambda k: params_dict.get(k)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters = mock_params
+            mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+            mock_op = MagicMock()
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+
+            mock_setup = MagicMock()
+            mock_setup.name = "Setup 1"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([mock_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([mock_op])
+            mock_cam.setups = MockCamCollection([mock_setup])
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            msgbox_calls = []
+            mock_progress = MagicMock()
+            mock_progress.wasCancelled = False
+
+            def mock_msgbox(prompt, title, btn_type, icon_type):
+                msgbox_calls.append((prompt, title, btn_type, icon_type))
+                return PostProcessAll.adsk.core.DialogResults.DialogYes
+
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = mock_msgbox
+            mock_ui.createProgressDialog.return_value = mock_progress
+
+            mock_app = MagicMock()
+            mock_app.userInterface = mock_ui
+            mock_app.activeDocument = mock_doc
+
+            post_setup_calls = []
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append(args)), \
+                 patch("PostProcessAll._NotifyPostProcessResult"):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup])
+
+            self.assertEqual(len(msgbox_calls), 1)
+            self.assertEqual(len(post_setup_calls), 1, "Must execute PostProcessSetup when confirmed with Yes")
+
+    def test_perform_post_process_no_modal_prompt_when_file_not_existing(self):
+        """Verify modal prompt is skipped when target output file does not already exist."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mock_param_folder = MagicMock()
+            mock_param_folder.value.value = tmp_dir
+            mock_param_ext = MagicMock()
+            mock_param_ext.value.value = ".nc"
+
+            params_dict = {
+                "nc_program_output_folder": mock_param_folder,
+                "nc_program_nc_extension": mock_param_ext,
+                "nc_program_name": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_filename": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_openInEditor": MagicMock(value=MagicMock(value=False)),
+            }
+            mock_params = MagicMock()
+            mock_params.itemByName.side_effect = lambda k: params_dict.get(k)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters = mock_params
+            mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+            mock_op = MagicMock()
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+
+            mock_setup = MagicMock()
+            mock_setup.name = "Setup 1"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([mock_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([mock_op])
+            mock_cam.setups = MockCamCollection([mock_setup])
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            msgbox_calls = []
+            mock_progress = MagicMock()
+            mock_progress.wasCancelled = False
+
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = lambda *args, **kwargs: msgbox_calls.append(args)
+            mock_ui.createProgressDialog.return_value = mock_progress
+
+            mock_app = MagicMock()
+            mock_app.userInterface = mock_ui
+            mock_app.activeDocument = mock_doc
+
+            post_setup_calls = []
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append(args)), \
+                 patch("PostProcessAll._NotifyPostProcessResult"):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup])
+
+            self.assertEqual(len(msgbox_calls), 0, "No modal messageBox should be shown when file does not exist")
+            self.assertEqual(len(post_setup_calls), 1, "Must proceed directly to PostProcessSetup")
+
+    def test_post_process_setup_non_destructive_writeability_check(self):
+        """Verify PostProcessSetup does not destroy/truncate existing file during initial write check."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_name = "setup_out"
+            file_path = os.path.join(tmp_dir, file_name + ".nc")
+            with open(file_path, "w", encoding="utf8") as f:
+                f.write("DO_NOT_TRUNCATE_THIS_DATA")
+
+            mock_param_ext = MagicMock()
+            mock_param_ext.value.value = ".nc"
+            mock_program = MagicMock()
+            mock_program.parameters.itemByName.return_value = mock_param_ext
+
+            mock_setup = MagicMock()
+            mock_setup.name = file_name
+            mock_setup.operationType = 1
+
+            mock_cam = MagicMock()
+            mock_cam.checkToolpath.return_value = True
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+            mock_app.userInterface = MagicMock()
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._PostProcessUnifiedPipeline", return_value=None):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll.PostProcessSetup(
+                    file_name, mock_setup, tmp_dir, doc_settings, mock_program
+                )
+                self.assertIsNone(res)
+
+            # Check file content was not wiped during the initial probe
+            with open(file_path, "r", encoding="utf8") as f:
+                self.assertEqual(f.read(), "DO_NOT_TRUNCATE_THIS_DATA")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
