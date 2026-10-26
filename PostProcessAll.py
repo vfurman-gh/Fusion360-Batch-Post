@@ -1040,10 +1040,10 @@ def _GetPostSearchDirs():
             dirs.append(norm)
 
     try:
-        from pipeline import find_autodesk_apt_cps, find_autodesk_post_binary
-        apt_p = find_autodesk_apt_cps()
-        if apt_p:
-            _add_dir(os.path.dirname(apt_p))
+        from pipeline import find_autodesk_system_posts_dir, find_autodesk_post_binary
+        sys_posts_dir = find_autodesk_system_posts_dir()
+        if sys_posts_dir:
+            _add_dir(sys_posts_dir)
         post_b = find_autodesk_post_binary()
         if post_b:
             cam_dir = os.path.dirname(post_b)

@@ -79,18 +79,18 @@ def find_autodesk_post_binary() -> Optional[str]:
     return candidates[0]
 
 
-def find_autodesk_apt_cps() -> Optional[str]:
-    """Locate Autodesk's standard apt.cps configuration."""
-    env_apt = os.environ.get("AUTODESK_APT_CPS")
-    if env_apt and os.path.isfile(env_apt):
-        return env_apt
+def find_autodesk_system_posts_dir() -> Optional[str]:
+    """Locate Autodesk Fusion's system Posts directory."""
+    env_dir = os.environ.get("AUTODESK_SYSTEM_POSTS_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
 
     candidates = []
     patterns = [
         # macOS paths
-        "/Users/*/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps",
-        "/Applications/Autodesk Fusion 360.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps",
-        os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts/apt.cps"),
+        "/Users/*/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts",
+        "/Applications/Autodesk Fusion 360.app/Contents/Libraries/Applications/CAM360/Data/Posts",
+        os.path.expanduser("~/Library/Application Support/Autodesk/webdeploy/production/*/Autodesk Fusion.app/Contents/Libraries/Applications/CAM360/Data/Posts"),
     ]
 
     localappdata = os.environ.get("LOCALAPPDATA", "")
@@ -98,20 +98,43 @@ def find_autodesk_apt_cps() -> Optional[str]:
     programfiles_x86 = os.environ.get("ProgramFiles(x86)", "")
     for base in (localappdata, programfiles, programfiles_x86):
         if base:
-            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Applications", "CAM360", "Data", "Posts", "apt.cps"))
-            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Data", "Posts", "apt.cps"))
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Applications", "CAM360", "Data", "Posts"))
+            patterns.append(os.path.join(base, "Autodesk", "webdeploy", "production", "*", "Data", "Posts"))
 
     for pattern in patterns:
         if pattern:
             for match in glob.glob(pattern):
-                if os.path.isfile(match):
+                if os.path.isdir(match):
                     candidates.append(match)
+
+    if not candidates:
+        post_bin = find_autodesk_post_binary()
+        if post_bin:
+            cam_dir = os.path.dirname(post_bin)
+            for sub in ("Data/Posts", "Posts"):
+                cand = os.path.join(cam_dir, sub)
+                if os.path.isdir(cand):
+                    candidates.append(cand)
 
     if not candidates:
         return None
 
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates[0]
+
+
+def find_autodesk_apt_cps() -> Optional[str]:
+    """Locate Autodesk's standard apt.cps configuration (deprecated, use find_autodesk_system_posts_dir)."""
+    env_apt = os.environ.get("AUTODESK_APT_CPS")
+    if env_apt and os.path.isfile(env_apt):
+        return env_apt
+
+    posts_dir = find_autodesk_system_posts_dir()
+    if posts_dir:
+        cand = os.path.join(posts_dir, "apt.cps")
+        if os.path.isfile(cand):
+            return cand
+    return None
 
 
 class PipelineOrchestrator:
@@ -298,8 +321,12 @@ class PipelineOrchestrator:
                     from geometry.lathe_engine import Lathe2DIPWVerifier
                     verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
                 else:
-                    from geometry.heightfield_engine import MillHeightfieldVerifier
-                    verifier = MillHeightfieldVerifier()
+                    try:
+                        from geometry.heightfield_engine import MillHeightfieldVerifier
+                        verifier = MillHeightfieldVerifier()
+                    except ImportError:
+                        from geometry.mill_engine import MillClearanceVerifier
+                        verifier = MillClearanceVerifier()
 
             report = verifier.verify_toolpath(segments, tools_by_op, workpiece)
 

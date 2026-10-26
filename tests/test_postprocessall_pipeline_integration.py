@@ -1363,6 +1363,81 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertEqual(folder, os.path.join(out_root, "SubFolder", "NestedFolder"))
         self.assertEqual(fname, "PartSetup")
 
+    def test_b7_unit_handling_consistency(self):
+        """Verify B7: Unit handling is consistent across context_parser and pipeline."""
+        from context_parser import parse_context_dump
+        import pipeline
+
+        # Metric context (unit = 1)
+        metric_ctx = {
+            "unit": 1,
+            "sections": [
+                {
+                    "id": 0,
+                    "params": {"operation-comment": "MetricOp"},
+                    "events": [
+                        {"type": "onRapid", "x": 10.0, "y": 20.0, "z": 5.0, "sx": 0.0, "sy": 0.0, "sz": 0.0}
+                    ]
+                }
+            ]
+        }
+        segs_metric = parse_context_dump(metric_ctx)
+        self.assertEqual(len(segs_metric), 1)
+        self.assertAlmostEqual(segs_metric[0].end.x, 10.0)
+        self.assertAlmostEqual(segs_metric[0].end.y, 20.0)
+        self.assertAlmostEqual(segs_metric[0].end.z, 5.0)
+
+        # Imperial context (unit = 0)
+        inch_ctx = {
+            "unit": 0,
+            "sections": [
+                {
+                    "id": 0,
+                    "params": {"operation-comment": "InchOp"},
+                    "events": [
+                        {"type": "onRapid", "x": 1.0, "y": 2.0, "z": 0.5, "sx": 0.0, "sy": 0.0, "sz": 0.0}
+                    ]
+                }
+            ]
+        }
+        segs_inch = parse_context_dump(inch_ctx)
+        self.assertEqual(len(segs_inch), 1)
+        self.assertAlmostEqual(segs_inch[0].end.x, 25.4)
+        self.assertAlmostEqual(segs_inch[0].end.y, 50.8)
+        self.assertAlmostEqual(segs_inch[0].end.z, 12.7)
+
+        # Missing unit defaults consistently to inch (0)
+        missing_ctx = {
+            "sections": [
+                {
+                    "id": 0,
+                    "params": {"operation-comment": "DefaultOp"},
+                    "events": [
+                        {"type": "onRapid", "x": 1.0, "y": 0.0, "z": 0.0, "sx": 0.0, "sy": 0.0, "sz": 0.0}
+                    ]
+                }
+            ]
+        }
+        segs_default = parse_context_dump(missing_ctx)
+        self.assertEqual(len(segs_default), 1)
+        self.assertAlmostEqual(segs_default[0].end.x, 25.4)
+
+    def test_system_posts_discovery_and_fallback(self):
+        """Verify find_autodesk_system_posts_dir and MillClearanceVerifier fallback."""
+        from pipeline import find_autodesk_system_posts_dir, find_autodesk_apt_cps, PipelineOrchestrator
+        import unittest.mock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            posts_dir = os.path.join(tmp_dir, "Posts")
+            os.makedirs(posts_dir)
+            apt_file = os.path.join(posts_dir, "apt.cps")
+            with open(apt_file, "w") as f:
+                f.write('description = "Autodesk APT Post";\n')
+
+            with unittest.mock.patch.dict(os.environ, {"AUTODESK_SYSTEM_POSTS_DIR": posts_dir}):
+                self.assertEqual(find_autodesk_system_posts_dir(), posts_dir)
+                self.assertEqual(find_autodesk_apt_cps(), apt_file)
+
 
 if __name__ == "__main__":
     unittest.main()

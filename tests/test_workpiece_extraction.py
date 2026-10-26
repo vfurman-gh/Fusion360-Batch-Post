@@ -136,16 +136,14 @@ class TestWorkpieceExtraction(unittest.TestCase):
         self.assertEqual(_ResolveBasePostPath(None, is_turning=True), "")
         self.assertEqual(_ResolveBasePostPath(None, is_turning=False), "")
 
+        import unittest.mock
+
         # Mock NCProgram with Centroid turning post for turning setup
         class MockTurningConfig:
             name = "centroid_turning"
             description = "Centroid Turning"
         class MockTurningProg:
             postConfiguration = MockTurningConfig()
-
-        resolved_turn = _ResolveBasePostPath(MockTurningProg(), is_turning=True)
-        self.assertTrue(os.path.isfile(resolved_turn))
-        self.assertTrue(resolved_turn.endswith("centroid_turning.cps"))
 
         # Mock NCProgram with Tormach milling post for milling setup
         class MockPostConfig:
@@ -154,13 +152,26 @@ class TestWorkpieceExtraction(unittest.TestCase):
         class MockProg:
             postConfiguration = MockPostConfig()
 
-        resolved_tormach = _ResolveBasePostPath(MockProg(), is_turning=False)
-        self.assertTrue(os.path.isfile(resolved_tormach))
-        self.assertTrue(resolved_tormach.endswith("tormach.cps"))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turning_cps = os.path.join(tmp_dir, "centroid_turning.cps")
+            with open(turning_cps, "w", encoding="utf-8") as f:
+                f.write('capabilities = CAPABILITY_TURNING;\ndescription = "Centroid Turning";\n')
+            milling_cps = os.path.join(tmp_dir, "tormach.cps")
+            with open(milling_cps, "w", encoding="utf-8") as f:
+                f.write('capabilities = CAPABILITY_MILLING;\ndescription = "Tormach PathPilot";\n')
 
-        # Incompatible turning post on milling setup rejected without guessing
-        resolved_incompat = _ResolveBasePostPath(MockTurningProg(), is_turning=False)
-        self.assertEqual(resolved_incompat, "")
+            with unittest.mock.patch("PostProcessAll._GetPostSearchDirs", return_value=[tmp_dir]):
+                resolved_turn = _ResolveBasePostPath(MockTurningProg(), is_turning=True)
+                self.assertTrue(os.path.isfile(resolved_turn))
+                self.assertTrue(resolved_turn.endswith("centroid_turning.cps"))
+
+                resolved_tormach = _ResolveBasePostPath(MockProg(), is_turning=False)
+                self.assertTrue(os.path.isfile(resolved_tormach))
+                self.assertTrue(resolved_tormach.endswith("tormach.cps"))
+
+                # Incompatible turning post on milling setup rejected without guessing
+                resolved_incompat = _ResolveBasePostPath(MockTurningProg(), is_turning=False)
+                self.assertEqual(resolved_incompat, "")
 
 
 if __name__ == "__main__":
