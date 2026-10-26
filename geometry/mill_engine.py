@@ -56,6 +56,9 @@ class MillClearanceVerifier(IVerificationEngine):
 
     def reset(self, workpiece: WorkpieceDefinition) -> None:
         """Initialize or reset the workpiece state and per-section clearance cache."""
+        stock = getattr(workpiece, "stock", None)
+        if stock is None:
+            raise ValueError(f"MillClearanceVerifier requires valid stock, got {type(stock)}")
         self.workpiece = workpiece
         self.active_tool = None
         self._sec_clearance_mm.clear()

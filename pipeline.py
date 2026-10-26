@@ -305,6 +305,13 @@ class PipelineOrchestrator:
                 )
             if workpiece is None:
                 workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_workpiece, is_turning=is_turning)
+
+            if workpiece is None or getattr(workpiece, "stock", None) is None:
+                setup_label = f"'{program_name}'" if program_name else "this setup"
+                raise ValueError(
+                    f"No stock detected or defined for {setup_label}. "
+                    "A valid stock definition is required for toolpath verification and simulation."
+                )
             if not tools_by_op:
                 tools_by_op = extract_tools_from_context(combined_ctx, is_turning=is_turning)
             if is_turning and not tools_by_op:

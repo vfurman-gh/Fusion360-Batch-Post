@@ -259,7 +259,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                 self.grid.reset(box_stock)
                 self.has_valid_stock = True
         else:
-            self.has_valid_stock = False
+            raise ValueError(f"MillHeightfieldVerifier requires valid BoxStock3D, got {type(stock)}")
 
     def reset_workpiece(self, workpiece: WorkpieceDefinition) -> None:
         """Backwards compatibility alias for reset()."""

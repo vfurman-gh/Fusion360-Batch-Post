@@ -1391,44 +1391,6 @@ def _ExtractWorkpieceFromSetup(setup):
         if z_max_mm is None or math.isnan(z_max_mm):
             z_max_mm = 0.0
 
-        if d_outer_mm is None or length_mm is None or d_outer_mm <= 0.0 or length_mm <= 0.0:
-            # Fallback: inspect stockSolids or models bounding boxes ONLY if centered on world Z axis (S4)
-            try:
-                for col_name in ("stockSolids", "models"):
-                    col = getattr(setup, col_name, None)
-                    if col and hasattr(col, "count") and col.count > 0:
-                        for c_idx in range(col.count):
-                            item = col.item(c_idx)
-                            bb = getattr(item, "boundingBox", None)
-                            if bb:
-                                # S4: Verify that bounding box straddles the Z axis (spindle axis).
-                                # If the part or stock does not encompass origin in X and Y,
-                                # world coordinates cannot be assumed to be turning spindle aligned.
-                                if bb.minPoint.x > 0.05 or bb.maxPoint.x < -0.05 or bb.minPoint.y > 0.05 or bb.maxPoint.y < -0.05:
-                                    _dbg_global(f"_ExtractWorkpieceFromSetup: {col_name}[{c_idx}] is not centered on world Z axis; skipping world bbox")
-                                    continue
-
-                                z_min_c = bb.minPoint.z * 10.0
-                                z_max_c = bb.maxPoint.z * 10.0
-                                r_c = max(
-                                    abs(bb.minPoint.x),
-                                    abs(bb.maxPoint.x),
-                                    abs(bb.minPoint.y),
-                                    abs(bb.maxPoint.y),
-                                ) * 10.0
-                                if col_name == "models":
-                                    r_c += 1.0  # radial stock margin
-                                    z_max_c += 0.5
-                                if d_outer_mm is None or (r_c * 2.0 > d_outer_mm):
-                                    d_outer_mm = r_c * 2.0
-                                if length_mm is None or (z_max_c - z_min_c > length_mm):
-                                    length_mm = z_max_c - z_min_c
-                                    z_max_mm = z_max_c
-                        if d_outer_mm is not None and length_mm is not None:
-                            break
-            except Exception as b_exc:
-                _dbg_global(f"Bounding box stock fallback threw: {b_exc}")
-
         if d_outer_mm is None or math.isnan(d_outer_mm) or d_outer_mm <= 0.0:
             _dbg_global("_ExtractWorkpieceFromSetup: stock diameter is missing or non-positive; returning None")
             return None
@@ -2294,8 +2256,22 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         return None
 
     except Exception as exc:
+        err_msg = str(exc)
         _dbg(f"_PostProcessUnifiedPipeline exception: {traceback.format_exc()}")
-        return f"PostProcess pipeline error: {str(exc)}"
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath=path,
+            reportText=f"# Verification Failed\n\nError: {err_msg}",
+            reportPath=report_path,
+            pngPath=plot_path,
+            promoted=0,
+            spikes=0,
+            volume_mm3=0.0,
+            collisions=[],
+            error=err_msg,
+            warning=None,
+        )
+        return f"PostProcess pipeline error: {err_msg}"
     finally:
         _ClearDumperConfig(target_dir=tmp_dir)
         try:

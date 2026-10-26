@@ -838,7 +838,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 # Create the batch_0.json and bootstrap.intermediate.cnc expected by Pass 2
                 batch_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
                 with open(batch_json, "w", encoding="utf-8") as f:
-                    f.write('{"unit": 1, "comments": [], "sections": []}')
+                    f.write('{"unit": 1, "workpiece": {"lower": {"x": -50, "y": -50, "z": -20}, "upper": {"x": 50, "y": 50, "z": 0}}, "comments": [], "sections": []}')
                 bootstrap_cnc = os.path.join(post_input.outputFolder, "bootstrap.intermediate.cnc")
                 shutil.copyfile(self.fixture_cnc, bootstrap_cnc)
                 return True
@@ -1437,6 +1437,81 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             with unittest.mock.patch.dict(os.environ, {"AUTODESK_SYSTEM_POSTS_DIR": posts_dir}):
                 self.assertEqual(find_autodesk_system_posts_dir(), posts_dir)
                 self.assertEqual(find_autodesk_apt_cps(), apt_file)
+
+    def test_no_stock_detected_raises_error_to_user(self):
+        """Verify that missing stock raises an explicit error and reports failure to the user."""
+        import json
+        from pipeline import PipelineOrchestrator
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. PipelineOrchestrator directly raises ValueError when context has no stock
+            ctx_path = os.path.join(tmp_dir, "batch_0.json")
+            with open(ctx_path, "w", encoding="utf-8") as f:
+                json.dump({"unit": 1, "comments": [], "sections": []}, f)
+
+            dummy_cps = os.path.join(tmp_dir, "dummy.cps")
+            with open(dummy_cps, "w", encoding="utf-8") as f:
+                f.write('description = "Dummy Post";\ncapabilities = CAPABILITY_MILLING;\n')
+
+            orchestrator = PipelineOrchestrator(
+                dumper_cps=PostProcessAll.constDumperScript,
+                replayer_cps=PostProcessAll.constReplayerScript,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                orchestrator.run(
+                    context_dump_paths=[ctx_path],
+                    base_post_path=dummy_cps,
+                    program_name="TestSetupNoStock",
+                )
+            self.assertIn("No stock detected or defined", str(ctx.exception))
+
+            # 2. _PostProcessUnifiedPipeline catches and returns formatted error string
+            mock_setup = MagicMock()
+            mock_setup.name = "SetupWithoutStock"
+            mock_setup.operationType = 0  # Milling
+            mock_setup.parameters.itemByName.return_value = None
+            mock_setup.stockSolids.count = 0
+            mock_setup.models.count = 0
+
+            mock_op = MagicMock()
+            mock_op.tool = MagicMock(number=1)
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+            mock_setup.allOperations = [mock_op]
+
+            mock_cam = MagicMock()
+            def fake_post_process(target_ops, post_input):
+                b_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
+                with open(b_json, "w", encoding="utf-8") as f:
+                    f.write('{"unit": 1, "comments": [], "sections": []}')
+                return True
+            mock_cam.postProcess.side_effect = fake_post_process
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_app = MagicMock(activeDocument=mock_doc)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters.itemByName.return_value = MagicMock(value=MagicMock(value="tormach"))
+
+            out_file = os.path.join(tmp_dir, "output.nc")
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=dummy_cps):
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="SetupWithoutStock",
+                    setup=mock_setup,
+                    setupFolder=tmp_dir,
+                    docSettings={},
+                    program=mock_prog,
+                    path=out_file,
+                    fileExt=".nc",
+                    target_operations=[mock_op],
+                )
+                self.assertIsNotNone(res)
+                self.assertIn("No stock detected or defined", res)
 
 
 if __name__ == "__main__":
