@@ -162,7 +162,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
         self._reset_base_state(workpiece)
 
         stock = workpiece.stock
-        if not isinstance(stock, AxisymmetricStock2D):
+        if not isinstance(stock, AxisymmetricStock2D) and not (hasattr(stock, "z_min") and hasattr(stock, "outer_radius")):
             raise TypeError(f"Lathe2DIPWVerifier requires AxisymmetricStock2D, got {type(stock)}")
 
         # Build axisymmetric 2D stock in half-plane R >= 0

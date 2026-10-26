@@ -1291,8 +1291,36 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertIsNone(wp_off)
 
 
+    def test_b11_notification_placement_no_osascript(self):
+        """Verify _NotifyPostProcessResult uses activeViewport.viewToScreen and executes no osascript."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        mock_app = MagicMock()
+        mock_ui = MagicMock()
+        mock_vp = MagicMock()
+        mock_vp.width = 1920
+        mock_vp.height = 1080
+        mock_vp.viewToScreen.return_value = MagicMock(x=1900, y=1000)
+        mock_app.activeViewport = mock_vp
+        mock_ui.palettes.itemById.return_value = None
+
+        with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+             patch("subprocess.check_output") as mock_subp:
+            PostProcessAll._NotifyPostProcessResult(
+                ui=mock_ui,
+                cntFiles=1,
+                cntSkipped=0,
+                lstSkipped="",
+                outputFolder="/fake/out",
+                verifyResults=[],
+            )
+            mock_subp.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

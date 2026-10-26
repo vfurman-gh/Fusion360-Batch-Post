@@ -1153,16 +1153,28 @@ def _ExtractPostProperties(program=None) -> dict:
     return props
 
 
-def _EnsureLocalModulesLoaded():
-    """Ensure Add-In directory and packages are on sys.path and reload local modules to avoid stale sys.modules in Fusion 360."""
+_modules_loaded_session = False
+
+
+def _EnsureLocalModulesLoaded(force=False):
+    """Ensure Add-In directory and packages are on sys.path and reload local modules once per session."""
+    global _modules_loaded_session
     import sys
-    import importlib
     if constAddonDir not in sys.path:
         sys.path.insert(0, constAddonDir)
     if sys.version_info >= (3, 14) and os.path.isdir(constPackagesDir) and constPackagesDir not in sys.path:
         sys.path.insert(0, constPackagesDir)
 
-    # Only reload geometry.models if its schema is outdated (preserving class identities for isinstance checks)
+    # Do not reload modules during automated test execution to preserve Enum and Class identities
+    if "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+
+    if _modules_loaded_session and not force:
+        return
+    _modules_loaded_session = True
+
+    import importlib
+    # Only reload geometry.models if its schema is outdated (preserving class identities for isinstance/enum checks)
     if "geometry.models" in sys.modules:
         gm = sys.modules["geometry.models"]
         ltg = getattr(gm, "LatheToolGeometry", None)
@@ -1172,20 +1184,21 @@ def _EnsureLocalModulesLoaded():
             except Exception as exc:
                 _dbg_global(f"Reload of geometry.models failed: {exc}")
 
-    local_mod_names = (
+    # Reload in strict dependency order (engines, plotter, parser, pipeline)
+    ordered_mods = (
         "geometry.engine_interface",
-        "geometry.heightfield_engine",
-        "geometry.tool_generator",
         "geometry.stock_generator",
+        "geometry.tool_generator",
         "geometry.legacy_adapter",
         "geometry.lathe_engine",
+        "geometry.heightfield_engine",
         "geometry.mill_engine",
         "geometry.plotter",
         "geometry",
         "context_parser",
         "pipeline",
     )
-    for mod_name in local_mod_names:
+    for mod_name in ordered_mods:
         if mod_name in sys.modules:
             try:
                 importlib.reload(sys.modules[mod_name])
@@ -1750,32 +1763,18 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
         target_x = 940
         target_y = 680
 
-        # Query macOS Fusion window bounds for pixel-perfect lower-right placement
-        if sys.platform == "darwin":
+        # Position notification palette in lower-right of active viewport
+        app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+        if app and hasattr(app, "activeViewport") and app.activeViewport:
+            vp = app.activeViewport
             try:
-                import subprocess
-                cmd = 'tell application "System Events" to tell process "Autodesk Fusion" to repeat with w in windows\nif name of w contains "Autodesk Fusion" then\nreturn {position of w, size of w}\nend if\nend repeat'
-                raw = subprocess.check_output(['osascript', '-e', cmd], timeout=0.4).decode().strip()
-                parts = [int(p.strip()) for p in raw.split(',') if p.strip().lstrip('-').isdigit()]
-                if len(parts) >= 4:
-                    win_x, win_y, win_w, win_h = parts[0], parts[1], parts[2], parts[3]
-                    target_x = max(20, win_x + win_w - palette_w - 24)
-                    target_y = max(20, win_y + win_h - palette_h - 45)
-                    _dbg_global(f"_NotifyPostProcessResult: macOS window bounds ({win_x},{win_y},{win_w},{win_h}) -> target ({target_x}, {target_y})")
-            except Exception as e_mac:
-                _dbg_global(f"_NotifyPostProcessResult: mac window query error: {e_mac}")
-        else:
-            app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
-            if app and hasattr(app, "activeViewport") and app.activeViewport:
-                vp = app.activeViewport
-                try:
-                    if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
-                        pt = vp.viewToScreen(adsk.core.Point2D.create(vp.width, vp.height))
-                        if pt:
-                            target_x = max(50, int(pt.x) - palette_w - 20)
-                            target_y = max(50, int(pt.y) - palette_h - 20)
-                except Exception:
-                    pass
+                if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
+                    pt = vp.viewToScreen(adsk.core.Point2D.create(vp.width, vp.height))
+                    if pt:
+                        target_x = max(50, int(pt.x) - palette_w - 20)
+                        target_y = max(50, int(pt.y) - palette_h - 20)
+            except Exception as pt_exc:
+                _dbg_global(f"_NotifyPostProcessResult: viewToScreen note: {pt_exc}")
 
         palette = None
 
