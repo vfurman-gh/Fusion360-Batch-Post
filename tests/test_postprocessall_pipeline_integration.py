@@ -57,6 +57,33 @@ if not hasattr(adsk.core, "DialogResults"):
         DialogNo=1,
         DialogOK=2,
     )
+if not hasattr(adsk.core, "ObjectCollection"):
+    class MockObjectCollection(list):
+        @classmethod
+        def create(cls):
+            return cls()
+        def add(self, item):
+            self.append(item)
+    adsk.core.ObjectCollection = MockObjectCollection
+
+if not hasattr(adsk.cam, "PostOutputUnitOptions"):
+    adsk.cam.PostOutputUnitOptions = types.SimpleNamespace(
+        DocumentUnitsOutput=0,
+        InchesOutput=1,
+        MillimetersOutput=2,
+    )
+if not hasattr(adsk.cam, "PostProcessInput"):
+    class MockPostProcessInput:
+        @classmethod
+        def create(cls, programName, postConfiguration, outputFolder, outputUnits):
+            inst = cls()
+            inst.programName = programName
+            inst.postConfiguration = postConfiguration
+            inst.outputFolder = outputFolder
+            inst.outputUnits = outputUnits
+            inst.isOpenInEditor = False
+            return inst
+    adsk.cam.PostProcessInput = MockPostProcessInput
 
 from PostProcessAll import RunLatheVerifier, verifyResults, _RecordVerifyResult
 
@@ -937,6 +964,91 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             # Check file content was not wiped during the initial probe
             with open(file_path, "r", encoding="utf8") as f:
                 self.assertEqual(f.read(), "DO_NOT_TRUNCATE_THIS_DATA")
+
+
+    def test_pass1_direct_post_process_input_execution(self):
+        """Verify Pass 1 uses direct cam.postProcess with PostProcessInput and zero Post Library sync."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = os.path.join(tmp_dir, "test_out.nc")
+
+            mock_tool = MagicMock()
+            mock_tool.number = 1
+
+            mock_op = MagicMock()
+            mock_op.name = "Contour 1"
+            mock_op.tool = mock_tool
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+
+            mock_setup = MagicMock()
+            mock_setup.name = "Setup 1"
+            mock_setup.operationType = 0  # Milling
+            mock_setup.allOperations = [mock_op]
+
+            post_calls = []
+
+            def fake_post_process(target_ops, post_input):
+                post_calls.append((target_ops, post_input))
+                # Create the batch_0.json and bootstrap.intermediate.cnc expected by Pass 2
+                batch_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
+                with open(batch_json, "w", encoding="utf-8") as f:
+                    f.write('{"unit": 1, "comments": [], "sections": []}')
+                bootstrap_cnc = os.path.join(post_input.outputFolder, "bootstrap.intermediate.cnc")
+                shutil.copyfile(self.fixture_cnc, bootstrap_cnc)
+                return True
+
+            mock_cam = MagicMock()
+            mock_cam.postProcess.side_effect = fake_post_process
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+
+            mock_program = MagicMock()
+            mock_program.parameters.itemByName.return_value = MagicMock(value=MagicMock(value="centroid_turning"))
+
+            import pipeline
+
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                final_cnc = cmd[-1]
+                with open(final_cnc, "w", encoding="utf-8") as f:
+                    f.write("G0 X0\nM30\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=os.path.abspath("centroid_turning.cps")), \
+                 patch("pipeline.subprocess.run", side_effect=fake_subprocess_run):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="test_out",
+                    setup=mock_setup,
+                    setupFolder=tmp_dir,
+                    docSettings=doc_settings,
+                    program=mock_program,
+                    path=out_file,
+                    fileExt=".nc",
+                    target_operations=[mock_op],
+                )
+                self.assertIsNone(res)
+
+            # Verify cam.postProcess was called directly
+            self.assertEqual(len(post_calls), 1)
+            target_ops, post_in = post_calls[0]
+            self.assertEqual(target_ops, mock_op)
+            self.assertEqual(post_in.programName, "batch_0")
+            self.assertEqual(post_in.postConfiguration, PostProcessAll.constDumperScript)
+            self.assertFalse(post_in.isOpenInEditor)
+
+            # Verify universal_dumper.cps was NOT copied to local post library
+            local_posts_dir = os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts")
+            if os.path.isdir(local_posts_dir):
+                self.assertFalse(os.path.isfile(os.path.join(local_posts_dir, "universal_dumper.cps")))
 
 
 if __name__ == "__main__":

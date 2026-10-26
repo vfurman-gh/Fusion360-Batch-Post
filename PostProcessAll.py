@@ -1222,22 +1222,7 @@ def _ClearDumperConfig():
 
 
 def _GetPostConfigObj(post_script_path):
-    """Obtain adsk.cam.PostConfiguration object for a .cps script, syncing to Local Post Library if needed."""
-    if os.path.isfile(post_script_path):
-        local_posts_candidates = [
-            os.path.expanduser("~/Library/Application Support/Autodesk/Fusion 360 CAM/Posts"),
-        ]
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            local_posts_candidates.append(os.path.join(appdata, "Autodesk", "Fusion 360 CAM", "Posts"))
-        for posts_dir in local_posts_candidates:
-            try:
-                if os.path.isdir(posts_dir):
-                    dst_path = os.path.join(posts_dir, os.path.basename(post_script_path))
-                    if not os.path.isfile(dst_path) or os.path.getmtime(post_script_path) > os.path.getmtime(dst_path):
-                        shutil.copy2(post_script_path, dst_path)
-            except Exception as sync_exc:
-                _dbg_global(f"Sync of {post_script_path} to {posts_dir} failed: {sync_exc}")
+    """Obtain adsk.cam.PostConfiguration object for a .cps script."""
 
     if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
         try:
@@ -1386,14 +1371,9 @@ def _ExtractWorkpieceFromSetup(setup):
 def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None, target_operations=None):
     """
     Extract Compact-NCI intermediate file using universal_dumper.cps
-    by querying PostLibrary and posting all valid operations of the setup.
+    by posting all valid operations of the setup directly.
     """
     try:
-        dumper_post_obj = _GetPostConfigObj(constDumperScript)
-        if not dumper_post_obj:
-            _dbg_global("Could not obtain dumper_post_obj")
-            return None
-
         if base_post_path and os.path.isfile(base_post_path):
             os.environ["BASE_POST"] = os.path.abspath(base_post_path)
         os.environ["TARGET_INTERMEDIATE_CNC"] = target_cnc_path
@@ -1402,32 +1382,36 @@ def _ExtractIntermediateWithDumper(setup, target_cnc_path, base_post_path=None, 
         app = adsk.core.Application.get()
         doc = app.activeDocument
         cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
-        if not cam or not hasattr(cam, "ncPrograms"):
+        if not cam:
             return None
 
         tmp_out_dir = tempfile.gettempdir().replace("\\", "/")
-        nc_input = cam.ncPrograms.createInput()
-        nc_prog = cam.ncPrograms.add(nc_input)
+        ops_source = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
+        ops_list = _extract_cam_collection(ops_source)
+        valid_ops = [op for op in ops_list if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
+
+        units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
+        post_input = adsk.cam.PostProcessInput.create(
+            "dumper_extract_tmp",
+            constDumperScript,
+            tmp_out_dir,
+            units,
+        )
+        post_input.isOpenInEditor = False
+
+        if len(valid_ops) == 1:
+            target_ops = valid_ops[0]
+        elif len(valid_ops) > 1:
+            target_ops = adsk.core.ObjectCollection.create()
+            for op in valid_ops:
+                target_ops.add(op)
+        else:
+            target_ops = setup
+
         try:
-            nc_prog.postConfiguration = dumper_post_obj
-            ops_source = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
-            ops_list = _extract_cam_collection(ops_source)
-            valid_ops = [op for op in ops_list if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)]
-            nc_prog.operations = valid_ops if valid_ops else [setup]
-            params = nc_prog.parameters
-            AssignOutputFolder(params, tmp_out_dir)
-            params.itemByName("nc_program_filename").value.value = "dumper_extract_tmp"
-            params.itemByName("nc_program_openInEditor").value.value = False
-            opts = adsk.cam.NCProgramPostProcessOptions.create()
-            if hasattr(opts, "isFailOnToolNumberDuplication"):
-                opts.isFailOnToolNumberDuplication = False
-            nc_prog.postProcess(opts)
+            cam.postProcess(target_ops, post_input)
         finally:
             _ClearDumperConfig()
-            try:
-                nc_prog.deleteMe()
-            except Exception:
-                pass
 
         if not os.path.isfile(target_cnc_path):
             fallback_cnc = os.path.join(tmp_out_dir, "dumper_extract_tmp.json.intermediate.cnc")
@@ -2365,29 +2349,18 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         return "No active operations to post process."
 
     tmp_dir = tempfile.mkdtemp(prefix="unified_pipe_")
-    tmp_prog = None
     try:
         # -------------------------------------------------------------
         # PASS 1: Extract full post context (.json) per single-tool batch
-        # Use a temporary NCProgram so the user's NCProgram (Rapid_Restore)
-        # retains its selected vendor post processor and custom postParameters.
+        # Direct execution via cam.postProcess using constDumperScript path
+        # Zero NCProgram creation and zero registration in Post Library required.
         # -------------------------------------------------------------
         app = adsk.core.Application.get()
         cam = adsk.cam.CAM.cast(app.activeDocument.products.itemByProductType(constCAMProductId))
-        nc_input = cam.ncPrograms.createInput()
-        nc_input.displayName = "_Tmp_Unified_Context_Dumper"
-        tmp_prog = cam.ncPrograms.add(nc_input)
-        try:
-            tmp_prog.parameters.itemByName("nc_program_createInBrowser").value.value = False
-        except Exception:
-            pass
 
-        dumper_post_obj = _GetPostConfigObj(constDumperScript)
         batch_json_files = []
         bootstrap_cnc = os.path.join(tmp_dir, "bootstrap.intermediate.cnc")
-        opts = adsk.cam.NCProgramPostProcessOptions.create()
-        if hasattr(opts, "isFailOnToolNumberDuplication"):
-            opts.isFailOnToolNumberDuplication = False
+        units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
 
         n_batches = max(1, len(batches))
         for b_idx, (t_num, op_list) in enumerate(batches):
@@ -2412,14 +2385,29 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     post_properties=post_props,
                 )
 
-            tmp_prog.postConfiguration = dumper_post_obj
-            tmp_prog.operations = op_list
-            AssignOutputFolder(tmp_prog.parameters, tmp_dir)
-            tmp_prog.parameters.itemByName("nc_program_filename").value.value = b_prefix
-            tmp_prog.parameters.itemByName("nc_program_openInEditor").value.value = False
+            _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps via direct PostProcessInput...")
+            post_input = adsk.cam.PostProcessInput.create(
+                b_prefix,
+                constDumperScript,
+                tmp_dir,
+                units,
+            )
+            post_input.isOpenInEditor = False
 
-            _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps...")
-            post_ok = bool(tmp_prog.postProcess(opts))
+            if len(op_list) == 1:
+                target_ops = op_list[0]
+            else:
+                target_ops = adsk.core.ObjectCollection.create()
+                for op in op_list:
+                    target_ops.add(op)
+
+            post_ok = False
+            try:
+                post_ok = bool(cam.postProcess(target_ops, post_input))
+            except Exception as pp_exc:
+                _dbg(f"Pass 1: cam.postProcess exception for batch {b_idx}: {pp_exc}")
+                post_ok = False
+
             time.sleep(constPostLoopDelay)
 
             if not os.path.isfile(b_json):
@@ -2582,11 +2570,6 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         return f"PostProcess pipeline error: {str(exc)}"
     finally:
         _ClearDumperConfig()
-        if tmp_prog is not None:
-            try:
-                tmp_prog.deleteMe()
-            except Exception:
-                pass
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
