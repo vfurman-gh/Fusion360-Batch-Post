@@ -49,6 +49,27 @@ def _dbg_global(msg):
     except Exception:
         pass
 
+_INVALID_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_DEVICE_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10))
+}
+
+def _SanitizePathSegment(segment: str) -> str:
+    """Sanitize a file or folder segment for cross-platform compatibility (Windows/POSIX)."""
+    if not segment:
+        return "unnamed"
+    clean = _INVALID_PATH_CHARS.sub("_", segment).strip()
+    clean = re.sub(r"_+", "_", clean)
+    clean = clean.strip("._ ")
+    if not clean:
+        clean = "unnamed"
+    stem = clean.split(".")[0].upper()
+    if stem in _RESERVED_DEVICE_NAMES:
+        clean = f"_{clean}"
+    return clean
+
 # Tool tip text
 toolTip = (
     "Post process all setups into G-code for your machine.\n\n"
@@ -129,18 +150,14 @@ class SettingsManager:
         # Document does not have valid settings, get defaults
         if not self.default:
             # Haven't read the settings file yet
-            file = None
             try:
-                file = open(self.GetPath())
-                self.default = json.load(file)
+                with open(self.GetPath(), "r", encoding="utf-8") as file:
+                    self.default = json.load(file)
                 if self.default["version"] != version:
                     self.UpdateSettings(defaultSettings, self.default)
             except Exception:
                 self.default = dict(defaultSettings)
                 self.fMustSave = True
-            finally:
-                if file:
-                    file.close
         
         if not docSettings:
             docSettings = dict(self.default)
@@ -153,9 +170,8 @@ class SettingsManager:
         self.default = dict(docSettings)
         try:
             strSettings = json.dumps(docSettings)
-            file = open(self.GetPath(), "w")
-            file.write(strSettings)
-            file.close
+            with open(self.GetPath(), "w", encoding="utf-8") as file:
+                file.write(strSettings)
         except Exception:
             pass
 
@@ -726,13 +742,19 @@ def PerformPostProcess(docSettings, setups=None):
         if outputFolder[0:2] == "//":
             outputFolder = "\\\\" + outputFolder[2:]
         try:
-            pathlib.Path(outputFolder).mkdir(exist_ok=True)
-        except Exception as exc:
+            pathlib.Path(outputFolder).mkdir(parents=True, exist_ok=True)
+        except Exception:
             # see if we can map it to folder with compressed user
-            compressedName = program.attributes.itemByName(constAttrGroup, constAttrCompressedName).value
-            if compressedName[0] == "~" and compressedName[1:] == outputFolder[-(len(compressedName) - 1):]:
-                # yes, it matches
-                outputFolder = ExpandFileName(compressedName)
+            attr = program.attributes.itemByName(constAttrGroup, constAttrCompressedName)
+            if attr and attr.value:
+                compressedName = attr.value
+                if compressedName and compressedName[0] == "~" and compressedName[1:] == outputFolder[-(len(compressedName) - 1):]:
+                    # yes, it matches
+                    outputFolder = ExpandFileName(compressedName)
+            try:
+                pathlib.Path(outputFolder).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
 
         compressedName = CompressFileName(outputFolder)
         program.attributes.add(constAttrGroup, constAttrCompressedName, compressedName)
@@ -758,14 +780,12 @@ def PerformPostProcess(docSettings, setups=None):
                 if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
                     continue
 
-                nameList = setup.name.split(':')
-                sFolder = outputFolder
-                cnt = len(nameList) - 1
-                i = 0
-                while i < cnt:
-                    sFolder += "/" + nameList[i].strip()
-                    i += 1
-                sFname = nameList[i].strip()
+                raw_segments = [s.strip() for s in setup.name.split(':')]
+                clean_segments = [_SanitizePathSegment(s) for s in raw_segments if s]
+                if not clean_segments:
+                    clean_segments = ["unnamed"]
+                sFolder = os.path.join(outputFolder, *clean_segments[:-1]) if len(clean_segments) > 1 else outputFolder
+                sFname = clean_segments[-1]
                 target_path = os.path.join(sFolder, sFname + fileExt)
                 if os.path.isfile(target_path):
                     existing_files.append(target_path)
@@ -846,15 +866,12 @@ def PerformPostProcess(docSettings, setups=None):
                     if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
                         continue
 
-                    nameList = setup.name.split(':')    # folder separator
-                    setupFolder = outputFolder
-                    cnt = len(nameList) - 1
-                    i = 0
-                    while i < cnt:
-                        setupFolder += "/" + nameList[i].strip()
-                        i += 1
-
-                    fname = nameList[i].strip()
+                    raw_segments = [s.strip() for s in setup.name.split(':')]
+                    clean_segments = [_SanitizePathSegment(s) for s in raw_segments if s]
+                    if not clean_segments:
+                        clean_segments = ["unnamed"]
+                    setupFolder = os.path.join(outputFolder, *clean_segments[:-1]) if len(clean_segments) > 1 else outputFolder
+                    fname = clean_segments[-1]
 
                     setup_cb = make_setup_progress_cb(cntSetups, setup.name)
                     setup_cb("Starting setup...", 0.0)
@@ -989,20 +1006,24 @@ def _IsInternalHelperPost(post_cfg) -> bool:
 def _GetPostSearchDirs():
     """Return all directories on this machine where Autodesk Fusion and user post processors live."""
     dirs = []
+
+    def _add_dir(path):
+        if not path:
+            return
+        norm = os.path.normpath(os.path.abspath(path))
+        if os.path.isdir(norm) and norm not in dirs:
+            dirs.append(norm)
+
     try:
         from pipeline import find_autodesk_apt_cps, find_autodesk_post_binary
         apt_p = find_autodesk_apt_cps()
         if apt_p:
-            d = os.path.dirname(apt_p)
-            if os.path.isdir(d) and d not in dirs:
-                dirs.append(d)
+            _add_dir(os.path.dirname(apt_p))
         post_b = find_autodesk_post_binary()
         if post_b:
             cam_dir = os.path.dirname(post_b)
             for sub in ("Data/Posts", "Posts"):
-                c = os.path.join(cam_dir, sub).replace("\\", "/")
-                if os.path.isdir(c) and c not in dirs:
-                    dirs.append(c)
+                _add_dir(os.path.join(cam_dir, sub))
     except Exception as exc:
         _dbg_global(f"_GetPostSearchDirs pipeline search exception: {exc}")
 
@@ -1021,9 +1042,7 @@ def _GetPostSearchDirs():
         std_dirs.append(os.path.join(localappdata, "Autodesk", "Autodesk Fusion 360", "CAM", "cache", "posts"))
 
     for d in std_dirs:
-        norm_d = d.replace("\\", "/")
-        if os.path.isdir(norm_d) and norm_d not in dirs:
-            dirs.append(norm_d)
+        _add_dir(d)
 
     for pattern in (
         os.path.expanduser("~/Library/Application Support/Autodesk/Autodesk Fusion 360/*/W.login/*/CAMPosts"),
@@ -1031,9 +1050,7 @@ def _GetPostSearchDirs():
     ):
         if pattern:
             for cd in glob.glob(pattern):
-                cd_norm = cd.replace("\\", "/")
-                if os.path.isdir(cd_norm) and cd_norm not in dirs:
-                    dirs.append(cd_norm)
+                _add_dir(cd)
 
     return dirs
 
@@ -1584,8 +1601,10 @@ def RunLatheVerifier(cncPath, setup, docSettings, base_post=None):
         else:
             # Subprocess execution via isolated venv Python (bypasses macOS hardened runtime Team ID restriction)
             venvCandidates = [
+                os.path.join(constAddonDir, ".venv", "Scripts", "python.exe"),
                 os.path.join(constAddonDir, ".venv", "bin", "python"),
                 os.path.join(constAddonDir, ".venv", "bin", "python3"),
+                os.path.expanduser("~/Documents/.lathe_venv/Scripts/python.exe"),
                 os.path.expanduser("~/Documents/.lathe_venv/bin/python"),
             ]
             venvPy = next((p for p in venvCandidates if os.path.isfile(p)), None)
@@ -2233,9 +2252,13 @@ def _OpenFile(path):
     """Open a file in the OS viewer. Returns None on success or an error string."""
     _dbg_global(f"_OpenFile: requested for '{path}' (exists={os.path.exists(path)})")
     try:
-        if os.name != "posix":
+        if hasattr(os, "startfile"):
             os.startfile(path)
             _dbg_global(f"_OpenFile: os.startfile succeeded for '{path}'")
+            return None
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "start", "", path], check=True)
+            _dbg_global(f"_OpenFile: cmd start succeeded for '{path}'")
             return None
         # Strip Fusion's embedded-Python/dyld variables so LaunchServices helpers start cleanly
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "DYLD_"))}

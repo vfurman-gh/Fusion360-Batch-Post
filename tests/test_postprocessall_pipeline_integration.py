@@ -1290,6 +1290,67 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             PostProcessAll._ClearDumperConfig()
             self.assertFalse(os.path.isfile(dumper_cfg_path))
 
+    def test_w8_sanitize_path_segment(self):
+        """Verify _SanitizePathSegment strips invalid Windows/POSIX filesystem characters and handles reserved names."""
+        import PostProcessAll
+
+        self.assertEqual(PostProcessAll._SanitizePathSegment("normal_folder"), "normal_folder")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("Setup:Op1"), "Setup_Op1")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("Bad<Folder>Name?*"), "Bad_Folder_Name")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("TrailingDot."), "TrailingDot")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("TrailingSpace   "), "TrailingSpace")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("CON"), "_CON")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("nul.txt"), "_nul.txt")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("aux"), "_aux")
+        self.assertEqual(PostProcessAll._SanitizePathSegment(""), "unnamed")
+        self.assertEqual(PostProcessAll._SanitizePathSegment("   ...   "), "unnamed")
+
+    def test_b9_recursive_output_folder_creation(self):
+        """Verify PerformPostProcess creates nested output directory structure with parents=True."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            nested_out = os.path.join(tmp_dir, "deeply", "nested", "output_dir")
+            mock_cam = MagicMock()
+            mock_cam.allOperations.count = 0
+            mock_program = MagicMock()
+            mock_out_param = MagicMock(value=MagicMock(value=nested_out))
+            mock_program.parameters.itemByName.return_value = mock_out_param
+            mock_program.attributes.itemByName.return_value = None
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+            mock_app.userInterface = None
+            mock_docSettings = dict(PostProcessAll.defaultSettings)
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.GetNcProgram", return_value=mock_program), \
+                 patch("PostProcessAll.GetNcProgramSetupsAndOperations", return_value=([], {})), \
+                 patch("PostProcessAll.settingsMgr", MagicMock()):
+                res = PostProcessAll.PerformPostProcess(
+                    mock_docSettings,
+                    setups=[],
+                )
+                self.assertIsNone(res)
+                self.assertTrue(os.path.isdir(nested_out))
+
+    def test_w3_installer_platform_detection(self):
+        """Verify install_packages platform tag detection logic."""
+        import install_packages
+        from unittest.mock import patch
+
+        with patch("platform.system", return_value="Windows"), patch("platform.machine", return_value="AMD64"):
+            self.assertEqual(install_packages.get_default_platform_tag(), "win_amd64")
+
+        with patch("platform.system", return_value="Darwin"), patch("platform.machine", return_value="arm64"):
+            self.assertEqual(install_packages.get_default_platform_tag(), "macosx_11_0_arm64")
+
+        with patch("platform.system", return_value="Darwin"), patch("platform.machine", return_value="x86_64"):
+            self.assertEqual(install_packages.get_default_platform_tag(), "macosx_10_9_x86_64")
+
 
 if __name__ == "__main__":
     unittest.main()
