@@ -1,8 +1,30 @@
 #Author-Tim Paterson
 #Description-Post process all CAM setups, using the setup name as the output file name.
 
-import adsk.core, adsk.fusion, adsk.cam, sys, traceback, shutil, json, os, os.path, time, re, pathlib, enum, tempfile, subprocess, io, glob, math, datetime, importlib, collections, html, urllib.parse
+import collections
+import datetime
+import enum
+import glob
+import html
+import importlib
+import io
+import json
+import math
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import urllib.parse
 from typing import Any, Dict, List, Optional, Sequence, Union
+
+import adsk.cam
+import adsk.core
+import adsk.fusion
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes

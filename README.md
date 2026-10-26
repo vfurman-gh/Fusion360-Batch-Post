@@ -88,13 +88,17 @@ moves. This analysis is experimental and should be reviewed
 before use (comments are included where the G-code is changed).
 You are responsible for ensuring a tool crash does not occur.
 
-### Lathe G-Code Verification, Collision-Free Rapid Promotion & MRR Analysis
-For **Turning** setups posted with the included [`centroid_turning.cps`](centroid_turning.cps) post processor:
-- **2D In-Process Workpiece (IPW) Simulation & Collision Detection (`geometry/lathe_engine.py`)**: Tracks the exact 2D revolved stock cross-section using `shapely` and checks every move for rapid-into-stock (`RAPID_STOCK`), holder-into-stock (`HOLDER_STOCK`), and rapid-near-stock (`RAPID_CLEARANCE`) collisions.
-- **Two-Pass Collision-Free `G1 -> G0` Rapid Promotion**: When **Restore rapid moves** is checked in `Post Process All`, Pass 1 identifies `G1` moves whose swept tool + holder envelopes maintain at least the safety clearance margin (`0.020"`) from the current IPW with zero material removal, promotes them to `G0` (`; PROMOTED G1->G0`), and immediately re-runs Pass 2 verification to guarantee zero collisions and zero IPW discrepancy.
-- **Material Removal Rate (MRR) Time-Series & Operation Spans**: Exports `<Setup>_mrr.csv` and renders `<Setup>_verification.png` with both the 2D IPW/toolpath plot and the MRR time-series (`in³/min` and `cm³/min`) annotated with operation spans and automatic `MRR_SPIKE` detection.
-- **Milling Safety Guard**: Automatically skips milling setups (`setup.operationType != TurningOperation`, `G17`/`G19`, or non-zero `Y` moves).
-- **Installing Verifier Dependencies**: Run `./install_packages.sh` once to install the Python 3.14 (`cp314`) wheels into `packages/` (for native in-process execution inside Fusion 360) and `.venv/` (for standalone CLI usage).
+### Unified Toolpath Verification, Collision-Free Rapid Promotion & Diagnostics
+`Post Process All` includes a complete In-Process Workpiece (IPW) simulation and toolpath verifier for both **Milling** and **Turning** setups using a clean 2-pass architecture:
+- **Pass 1 (Direct Context Dump)**: Emits per-operation kinematic events and section data via `universal_dumper.cps` inside Fusion without modifying or registering in the user's Post Library.
+- **Unified Verification Simulation**:
+  - **Milling (`geometry/heightfield_engine.py`)**: 3D Heightfield grid simulation tracking material removal, gouges, shank rubs, holder strikes, and rapids into stock.
+  - **Turning (`geometry/lathe_engine.py`)**: Exact 2D axisymmetric IPW polygon simulation using `shapely`, tracking swept inserts and holders with fixture/chuck guard monitoring.
+  - **Universal Collision Detection**: Detects `RAPID_INTO_STOCK`, `HOLDER_STRIKE`, `FIXTURE_COLLISION`, and `SHANK_RUB`, logging detailed diagnostics while continuing final NC code generation.
+- **Collision-Free Rapid Promotion**: When **Restore rapid moves** is enabled, verified air moves with zero material removal and safe clearances are promoted to `G0`. Promoted moves are strictly filtered to guarantee they do not cause or contribute to collisions.
+- **Pass 2 (Single-Pass Vendor Replay)**: Emits final machine-dialect NC code by executing the user's unmodified vendor post processor (`universal_replayer.cps`) once across all merged sections, natively preserving tool changes and modal states.
+- **Diagnostics & High-Resolution Reports**: For each setup, generates a comprehensive markdown report (`<Setup>_report.md`) detailing operation metrics, MRR spikes, and collision breakdowns, accompanied by a high-resolution visual verification plot (`<Setup>.png`).
+- **Installing Verifier Dependencies**: Run `python install_packages.py` once to install required dependencies (`shapely`, `numpy`, `matplotlib`) for Windows (`win_amd64`), macOS (`arm64`/`x86_64`), or Linux.
 
 ### Rename Setups
 `Post Process All` can perform a search-and-replace on setup names.
