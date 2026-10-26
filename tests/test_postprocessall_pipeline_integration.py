@@ -1317,8 +1317,35 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 self.assertEqual(args[7], 220)
 
 
+    def test_a2_post_capabilities_parsing_and_compatibility(self):
+        """Verify _GetPostCapabilities parses .cps capabilities and filters correctly."""
+        import PostProcessAll
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turning_cps = os.path.join(tmp_dir, "custom_lathe.cps")
+            with open(turning_cps, "w", encoding="utf-8") as f:
+                f.write('description = "Custom Lathe";\ncapabilities = CAPABILITY_TURNING;\n')
+
+            milling_cps = os.path.join(tmp_dir, "custom_mill.cps")
+            with open(milling_cps, "w", encoding="utf-8") as f:
+                f.write('description = "Custom Mill";\ncapabilities = CAPABILITY_MILLING;\n')
+
+            millturn_cps = os.path.join(tmp_dir, "custom_millturn.cps")
+            with open(millturn_cps, "w", encoding="utf-8") as f:
+                f.write('description = "Custom MillTurn";\ncapabilities = CAPABILITY_MILLING | CAPABILITY_TURNING;\n')
+
+            self.assertTrue(PostProcessAll._IsPostCompatible(turning_cps, is_turning=True))
+            self.assertFalse(PostProcessAll._IsPostCompatible(turning_cps, is_turning=False))
+
+            self.assertFalse(PostProcessAll._IsPostCompatible(milling_cps, is_turning=True))
+            self.assertTrue(PostProcessAll._IsPostCompatible(milling_cps, is_turning=False))
+
+            self.assertTrue(PostProcessAll._IsPostCompatible(millturn_cps, is_turning=True))
+            self.assertTrue(PostProcessAll._IsPostCompatible(millturn_cps, is_turning=False))
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

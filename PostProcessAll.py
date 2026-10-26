@@ -1068,6 +1068,41 @@ def _GetPostSearchDirs():
     return dirs
 
 
+def _GetPostCapabilities(cps_path: str) -> Optional[Dict[str, bool]]:
+    """Parse capabilities declared in a .cps post processor file."""
+    if not cps_path or not os.path.isfile(cps_path):
+        return None
+    try:
+        with open(cps_path, "r", encoding="utf-8", errors="ignore") as f:
+            for _ in range(60):
+                line = f.readline()
+                if not line:
+                    break
+                m = re.search(r"\bcapabilities\s*=\s*([^;]+);", line)
+                if m:
+                    expr = m.group(1)
+                    return {
+                        "turning": "CAPABILITY_TURNING" in expr,
+                        "milling": "CAPABILITY_MILLING" in expr or "CAPABILITY_ROUTER" in expr,
+                    }
+    except Exception:
+        pass
+    return None
+
+
+def _IsPostCompatible(cps_path: str, is_turning: Optional[bool] = None) -> bool:
+    """Check whether a post processor's declared capabilities match setup operation type."""
+    if is_turning is None:
+        return True
+    caps = _GetPostCapabilities(cps_path)
+    if not caps:
+        return True  # If capabilities not declared or readable, allow
+    if is_turning:
+        return caps["turning"]
+    else:
+        return caps["milling"]
+
+
 def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str:
     """Resolve target machine post processor path from NCProgram without mutating user settings."""
     search_dirs = _GetPostSearchDirs()
@@ -1080,10 +1115,7 @@ def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str
                 val = getattr(post_cfg, attr, None)
                 if val and isinstance(val, str):
                     if os.path.isfile(val):
-                        # Verify turning/milling compatibility
-                        if is_turning is False and "centroid_turning" in os.path.basename(val).lower():
-                            pass
-                        else:
+                        if _IsPostCompatible(val, is_turning):
                             _dbg_global(f"_ResolveBasePostPath: resolved directly via postConfiguration.{attr} -> {val}")
                             return os.path.abspath(val)
                     candidates.append(val)
@@ -1095,7 +1127,7 @@ def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str
                             import urllib.parse
                             f_path = urllib.parse.unquote(u_str[len("file://"):])
                             if os.path.isfile(f_path):
-                                if not (is_turning is False and "centroid_turning" in os.path.basename(f_path).lower()):
+                                if _IsPostCompatible(f_path, is_turning):
                                     _dbg_global(f"_ResolveBasePostPath: resolved via url file:// -> {f_path}")
                                     return os.path.abspath(f_path)
                         candidates.append(os.path.basename(u_str))
@@ -1107,15 +1139,13 @@ def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str
                 bname = os.path.basename(cand).split("?")[0].strip()
                 if not bname:
                     continue
-                if is_turning is False and "centroid_turning" in bname.lower():
-                    continue
                 names_to_try = [bname]
                 if not bname.lower().endswith(".cps"):
                     names_to_try.append(bname + ".cps")
                 for name_try in names_to_try:
                     for sdir in search_dirs:
                         p_try = os.path.join(sdir, name_try)
-                        if os.path.isfile(p_try):
+                        if os.path.isfile(p_try) and _IsPostCompatible(p_try, is_turning):
                             _dbg_global(f"_ResolveBasePostPath: matched {name_try} in {sdir} -> {p_try}")
                             return os.path.abspath(p_try)
 
@@ -1131,7 +1161,7 @@ def _ResolveBasePostPath(program=None, is_turning: Optional[bool] = None) -> str
                         for entry in os.listdir(sdir):
                             if entry.lower().endswith(".cps"):
                                 entry_path = os.path.join(sdir, entry)
-                                if is_turning is False and "centroid_turning" in entry.lower():
+                                if not _IsPostCompatible(entry_path, is_turning):
                                     continue
                                 try:
                                     with open(entry_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -2019,18 +2049,22 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         post_cfg = getattr(program, "postConfiguration", None)
         post_name = getattr(post_cfg, "name", None) or getattr(post_cfg, "description", None) or "None"
         setup_type = "Turning" if is_turning else "Milling"
-        if is_turning is False and "centroid_turning" in str(post_name).lower():
-            return (
-                f"NC Program '{prog_name}' is configured with turning post '{post_name}', "
-                f"which does not support milling toolpaths. "
-                f"Please select or configure a milling NC Program for setup '{setup.name}'."
-            )
-        if is_turning is True and any(m in str(post_name).lower() for m in ("tormach", "mill", "router")):
-            return (
-                f"NC Program '{prog_name}' is configured with milling post '{post_name}', "
-                f"which does not support turning toolpaths. "
-                f"Please select or configure a turning NC Program for setup '{setup.name}'."
-            )
+        raw_post = _ResolveBasePostPath(program, is_turning=None)
+        if raw_post and os.path.isfile(raw_post):
+            caps = _GetPostCapabilities(raw_post)
+            if caps:
+                if is_turning and not caps.get("turning", False) and caps.get("milling", False):
+                    return (
+                        f"NC Program '{prog_name}' is configured with milling post '{post_name}', "
+                        f"which does not support turning toolpaths. "
+                        f"Please select or configure a turning NC Program for setup '{setup.name}'."
+                    )
+                elif not is_turning and not caps.get("milling", False) and caps.get("turning", False):
+                    return (
+                        f"NC Program '{prog_name}' is configured with turning post '{post_name}', "
+                        f"which does not support milling toolpaths. "
+                        f"Please select or configure a milling NC Program for setup '{setup.name}'."
+                    )
         return (
             f"Could not locate machine post processor for {setup_type} setup '{setup.name}' "
             f"(NC Program '{prog_name}', post '{post_name}'). "
