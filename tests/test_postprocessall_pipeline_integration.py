@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Test Suite: PostProcessAll.py Integration with 6-Stage Pipeline.
+Test Suite: PostProcessAll.py Integration with Unified 2-Pass Pipeline.
 
 Validates:
-1. RunLatheVerifier correctly extracts workpiece and tools from initial post pass.
-2. Locates intermediate Compact-NCI toolpath (.cnc).
-3. Executes 6-stage PipelineOrchestrator and Lathe2DIPWVerifier.
-4. Restores native G0 rapid moves via universal_wrapper.cps.
-5. Populates verifyResults with structured metrics (material removed, G0 restored, zero collisions).
+1. Pass 1 context extraction via universal_dumper.cps with zero Post Library mutation.
+2. Direct execution of PipelineOrchestrator and IPW verifiers (Lathe2DIPWVerifier, MillHeightfieldVerifier).
+3. Single-pass replay of vendor post processors via universal_replayer.cps.
+4. Populates verifyResults with structured metrics (material removed, G0 restored, zero collisions).
 """
 
 import os
@@ -1343,8 +1342,31 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertTrue(PostProcessAll._IsPostCompatible(millturn_cps, is_turning=False))
 
 
+    def test_path_helpers_extension_and_folder_resolution(self):
+        """Verify _NormalizeFileExtension and _ResolveSetupFolderAndFilename."""
+        import PostProcessAll
+        # Extension normalization
+        self.assertEqual(PostProcessAll._NormalizeFileExtension(".nc"), ".nc")
+        self.assertEqual(PostProcessAll._NormalizeFileExtension("nc"), ".nc")
+        self.assertEqual(PostProcessAll._NormalizeFileExtension("json"), ".cnc")
+        self.assertEqual(PostProcessAll._NormalizeFileExtension(".json"), ".cnc")
+        self.assertEqual(PostProcessAll._NormalizeFileExtension(""), ".cnc")
+        self.assertEqual(PostProcessAll._NormalizeFileExtension(None), ".cnc")
+
+        # Setup folder & filename splitting
+        out_root = "/base/output"
+        folder, fname = PostProcessAll._ResolveSetupFolderAndFilename(out_root, "SimpleSetup")
+        self.assertEqual(folder, out_root)
+        self.assertEqual(fname, "SimpleSetup")
+
+        folder, fname = PostProcessAll._ResolveSetupFolderAndFilename(out_root, "SubFolder:NestedFolder:PartSetup")
+        self.assertEqual(folder, os.path.join(out_root, "SubFolder", "NestedFolder"))
+        self.assertEqual(fname, "PartSetup")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

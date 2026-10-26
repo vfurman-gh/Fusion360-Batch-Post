@@ -3,8 +3,8 @@
 Test Suite: End-to-End Pipeline Integration with Mock Verification Engine.
 
 Tests:
-1. Full 6-stage pipeline execution:
-   Intermediate .cnc -> apt.cps -> APTParser -> MockEngine -> promoted.json -> universal_wrapper.cps -> final .cnc + report.md.
+1. Unified 2-pass pipeline execution:
+   Intermediate .cnc -> universal_dumper.cps -> ContextParser -> MockEngine -> universal_replayer.cps -> final .cnc + report.md.
 2. Verified restoration of G0 rapid retracts and re-arming of G1 and feedrates in final output.
 3. Verification report generation and metric accuracy.
 """

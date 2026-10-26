@@ -20,7 +20,7 @@ import tempfile
 import time
 import traceback
 import urllib.parse
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import adsk.cam
 import adsk.core
@@ -89,6 +89,29 @@ def _SanitizePathSegment(segment: str) -> str:
     if stem in _RESERVED_DEVICE_NAMES:
         clean = f"_{clean}"
     return clean
+
+
+def _NormalizeFileExtension(ext: Optional[str]) -> str:
+    """Normalize file extension ensuring leading dot and replacing .json with .cnc."""
+    if not ext:
+        return ".cnc"
+    clean = ext.strip()
+    if clean.lower().lstrip(".") == "json":
+        clean = ".cnc"
+    if not clean.startswith("."):
+        clean = "." + clean
+    return clean
+
+
+def _ResolveSetupFolderAndFilename(outputFolder: str, setup_name: str) -> Tuple[str, str]:
+    """Split and sanitize setup name (supporting ':' subfolders) into (setupFolder, filename)."""
+    raw_segments = [s.strip() for s in setup_name.split(':')]
+    clean_segments = [_SanitizePathSegment(s) for s in raw_segments if s]
+    if not clean_segments:
+        clean_segments = ["unnamed"]
+    sFolder = os.path.join(outputFolder, *clean_segments[:-1]) if len(clean_segments) > 1 else outputFolder
+    sFname = clean_segments[-1]
+    return sFolder, sFname
 
 # Tool tip text
 toolTip = (
@@ -781,11 +804,7 @@ def PerformPostProcess(docSettings, setups=None):
         if len(setups) != 0 and cam.allOperations.count != 0:
             # Check upfront if any final output file already exists.
             # When the final output file already exists, modally ask user if to overwrite it (Yes/No, No aborts).
-            fileExt = parameters.itemByName("nc_program_nc_extension").value.value
-            if fileExt and fileExt.lower().lstrip(".") == "json":
-                fileExt = ".cnc"
-            if not fileExt.startswith("."):
-                fileExt = "." + fileExt
+            fileExt = _NormalizeFileExtension(parameters.itemByName("nc_program_nc_extension").value.value)
 
             existing_files = []
             for setup in setups:
@@ -795,12 +814,7 @@ def PerformPostProcess(docSettings, setups=None):
                 if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
                     continue
 
-                raw_segments = [s.strip() for s in setup.name.split(':')]
-                clean_segments = [_SanitizePathSegment(s) for s in raw_segments if s]
-                if not clean_segments:
-                    clean_segments = ["unnamed"]
-                sFolder = os.path.join(outputFolder, *clean_segments[:-1]) if len(clean_segments) > 1 else outputFolder
-                sFname = clean_segments[-1]
+                sFolder, sFname = _ResolveSetupFolderAndFilename(outputFolder, setup.name)
                 target_path = os.path.join(sFolder, sFname + fileExt)
                 if os.path.isfile(target_path):
                     existing_files.append(target_path)
@@ -881,12 +895,7 @@ def PerformPostProcess(docSettings, setups=None):
                     if getattr(setup, "allOperations", None) is not None and getattr(setup.allOperations, "count", 1) == 0:
                         continue
 
-                    raw_segments = [s.strip() for s in setup.name.split(':')]
-                    clean_segments = [_SanitizePathSegment(s) for s in raw_segments if s]
-                    if not clean_segments:
-                        clean_segments = ["unnamed"]
-                    setupFolder = os.path.join(outputFolder, *clean_segments[:-1]) if len(clean_segments) > 1 else outputFolder
-                    fname = clean_segments[-1]
+                    setupFolder, fname = _ResolveSetupFolderAndFilename(outputFolder, setup.name)
 
                     setup_cb = make_setup_progress_cb(cntSetups, setup.name)
                     setup_cb("Starting setup...", 0.0)
@@ -982,7 +991,10 @@ def _RecordVerifyResult(setup, cncPath, reportText, reportPath=None, pngPath=Non
         "warning": warning,
     })
     try:
-        adsk.core.Application.get().log(f"[PostProcessAll] {setup.name}:\n{reportText}")
+        col_count = len(collisions or [])
+        adsk.core.Application.get().log(
+            f"[PostProcessAll] Verified '{setup.name}': {promoted} rapid moves restored, {col_count} collision(s) | Report: {reportPath}"
+        )
     except Exception:
         pass
 
@@ -2073,12 +2085,10 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     post_props = _ExtractPostProperties(program)
     _dbg(f"_PostProcessUnifiedPipeline: base_post_path={base_post_path}, post_props={post_props}")
 
-    # Ensure output path never uses .json extension
+    # Ensure output path uses normalized extension (never .json)
+    fileExt = _NormalizeFileExtension(fileExt)
     if path.lower().endswith(".json"):
-        ext_fix = fileExt if (fileExt and fileExt.lower().lstrip(".") != "json") else ".cnc"
-        if not ext_fix.startswith("."):
-            ext_fix = "." + ext_fix
-        path = os.path.splitext(path)[0] + ext_fix
+        path = os.path.splitext(path)[0] + fileExt
 
     # 2. Partition setup operations into single-tool batches (mandatory for Personal Edition compatibility)
     cand_ops = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
@@ -2307,10 +2317,8 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         parameters = program.parameters
 
         # Verify file name is valid by creating it now
-        fileExt = parameters.itemByName("nc_program_nc_extension").value.value
-        if fileExt and fileExt.lower().lstrip(".") == "json":
-            fileExt = ".cnc"
-        path = setupFolder + "/" + fname + fileExt
+        fileExt = _NormalizeFileExtension(parameters.itemByName("nc_program_nc_extension").value.value)
+        path = os.path.join(setupFolder, fname + fileExt)
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
             if os.path.exists(path):
