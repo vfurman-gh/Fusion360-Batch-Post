@@ -1270,7 +1270,7 @@ def _EnsureLocalModulesLoaded(force=False):
                 _dbg_global(f"Reload of {mod_name} failed: {exc}")
 
 
-def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None):
+def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None, stock_mode=None):
     """Write sidecar config for universal_dumper.cps when spawned by Fusion 360's C++ host process."""
     cfg = {}
     if base_post_path and os.path.isfile(base_post_path):
@@ -1279,6 +1279,8 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
         cfg["targetIntermediateCnc"] = os.path.abspath(target_cnc_path)
     if post_properties and isinstance(post_properties, dict):
         cfg["postProperties"] = post_properties
+    if stock_mode:
+        cfg["stockMode"] = str(stock_mode)
 
     cfg_dirs = []
     if target_dir and os.path.isdir(target_dir):
@@ -1326,10 +1328,80 @@ def _ClearDumperConfig(target_dir=None):
     os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
 
 
+def _GetSetupStockMode(setup) -> str:
+    """Detect the stock definition mode from a Fusion CAM Setup."""
+    if not setup or not hasattr(setup, "parameters") or setup.parameters is None:
+        return ""
+
+    modes = []
+
+    # 1. Inspect setup parameters
+    for p_name in (
+        "job_stockMode",
+        "stockMode",
+        "job_stockType",
+        "stockType",
+        "job_stock_mode",
+        "job_stock_type",
+    ):
+        try:
+            p = setup.parameters.itemByName(p_name)
+            if p is not None:
+                # Extract concrete string or numeric value, ignoring mock objects that default to MagicMock
+                for attr in ("value", "expression"):
+                    val = getattr(p, attr, None)
+                    if val is not None:
+                        v_sub = getattr(val, "value", val)
+                        if isinstance(v_sub, (str, int)) and not hasattr(v_sub, "_mock_return_value"):
+                            modes.append(str(v_sub).lower().strip())
+        except Exception:
+            pass
+
+    for p_name in (
+        "job_stockFromPreviousSetup",
+        "job_previousSetup",
+        "job_continueRestMachining",
+        "continueRestMachining",
+    ):
+        try:
+            p = setup.parameters.itemByName(p_name)
+            if p is not None:
+                val = getattr(p, "value", None)
+                v_sub = getattr(val, "value", val)
+                if not hasattr(v_sub, "_mock_return_value"):
+                    if v_sub is True or str(v_sub).lower() in ("true", "1", "yes"):
+                        modes.append("previous-setup")
+                    elif isinstance(v_sub, str) and v_sub.strip():
+                        modes.append(f"previous-setup:{v_sub.lower().strip()}")
+        except Exception:
+            pass
+
+    # 2. Inspect setup attributes (e.g. previousSetup, stockSolids)
+    for attr in ("previousSetup", "precedingSetup"):
+        val = getattr(setup, attr, None)
+        if val is not None and not hasattr(val, "_mock_return_value"):
+            modes.append("previous-setup")
+
+    try:
+        solids = getattr(setup, "stockSolids", None)
+        if solids and hasattr(solids, "count"):
+            count = getattr(solids, "count", 0)
+            if isinstance(count, int) and count > 0:
+                modes.append("solid")
+    except Exception:
+        pass
+
+    return " ".join(modes)
+
 
 def _ExtractWorkpieceFromSetup(setup):
     """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
     try:
+        stock_mode = _GetSetupStockMode(setup)
+        if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest", "solid", "body")):
+            _dbg_global(f"_ExtractWorkpieceFromSetup: setup uses unsupported stock mode '{stock_mode}'; returning None")
+            return None
+
         if not hasattr(setup, "parameters"):
             return None
         params = setup.parameters
@@ -2052,6 +2124,54 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     if path.lower().endswith(".json"):
         path = os.path.splitext(path)[0] + fileExt
 
+    base_no_ext = os.path.splitext(path)[0]
+    report_path = base_no_ext + "_report.md"
+    plot_path = base_no_ext + ".png"
+
+    # Reject unsupported stock modes early with explicit error
+    stock_mode = _GetSetupStockMode(setup)
+    if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
+        err_msg = (
+            f"Setup '{setup.name}' uses 'From Previous Setup' stock, "
+            "which is currently unsupported for toolpath verification."
+        )
+        _dbg(f"_PostProcessUnifiedPipeline: {err_msg}")
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath=path,
+            reportText=f"# Verification Failed\n\nError: {err_msg}",
+            reportPath=report_path,
+            pngPath=plot_path,
+            promoted=0,
+            spikes=0,
+            volume_mm3=0.0,
+            collisions=[],
+            error=err_msg,
+            warning=None,
+        )
+        return err_msg
+
+    if any(k in stock_mode for k in ("solid", "body")):
+        err_msg = (
+            f"Setup '{setup.name}' uses 'From Solid' stock, "
+            "which is currently unsupported for toolpath verification."
+        )
+        _dbg(f"_PostProcessUnifiedPipeline: {err_msg}")
+        _RecordVerifyResult(
+            setup=setup,
+            cncPath=path,
+            reportText=f"# Verification Failed\n\nError: {err_msg}",
+            reportPath=report_path,
+            pngPath=plot_path,
+            promoted=0,
+            spikes=0,
+            volume_mm3=0.0,
+            collisions=[],
+            error=err_msg,
+            warning=None,
+        )
+        return err_msg
+
     # 2. Partition setup operations into single-tool batches (mandatory for Personal Edition compatibility)
     cand_ops = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
     cand_list = _extract_cam_collection(cand_ops)
@@ -2110,6 +2230,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     target_cnc_path=bootstrap_cnc,
                     post_properties=post_props,
                     target_dir=tmp_dir,
+                    stock_mode=stock_mode,
                 )
             else:
                 os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
@@ -2118,6 +2239,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     target_cnc_path=None,
                     post_properties=post_props,
                     target_dir=tmp_dir,
+                    stock_mode=stock_mode,
                 )
 
             _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps via direct PostProcessInput...")

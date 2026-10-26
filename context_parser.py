@@ -447,6 +447,15 @@ def extract_workpiece_from_context(
         WorkpieceDefinition,
     )
 
+    stock_mode = str(
+        context_data.get("stockMode")
+        or context_data.get("globalParams", {}).get("job:stockMode")
+        or context_data.get("globalParams", {}).get("stockMode")
+        or ""
+    ).lower()
+    if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest", "solid", "body")):
+        return None
+
     wp = context_data.get("workpiece")
     if not wp or not isinstance(wp, dict):
         stock_data = context_data.get("stock")

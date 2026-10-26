@@ -303,6 +303,25 @@ class PipelineOrchestrator:
                     s.get("type", 0) == 1 or bool(s.get("tool", {}).get("_isTurningTool", False))
                     for s in combined_ctx.get("sections", [])
                 )
+            stock_mode = str(
+                combined_ctx.get("stockMode")
+                or combined_ctx.get("globalParams", {}).get("job:stockMode")
+                or combined_ctx.get("globalParams", {}).get("stockMode")
+                or ""
+            ).lower()
+
+            setup_label = f"'{program_name}'" if program_name else "this setup"
+            if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
+                raise ValueError(
+                    f"Setup {setup_label} uses 'From Previous Setup' stock, "
+                    "which is currently unsupported for toolpath verification."
+                )
+            if any(k in stock_mode for k in ("solid", "body")):
+                raise ValueError(
+                    f"Setup {setup_label} uses 'From Solid' stock, "
+                    "which is currently unsupported for toolpath verification."
+                )
+
             if workpiece is None:
                 workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_workpiece, is_turning=is_turning)
 

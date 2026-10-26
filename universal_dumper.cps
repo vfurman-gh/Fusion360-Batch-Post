@@ -185,8 +185,33 @@ onOpen = function() {
   dumpData.highFeedrate = (typeof highFeedrate === "number") ? highFeedrate : 0;
   dumpData.programName = programName;
   dumpData.programComment = programComment;
+  dumpData.stockMode = "";
   try {
-    dumpData.workpiece = serializeBox(getWorkpiece());
+    var cfg = _getDumperConfig();
+    if (cfg && cfg.stockMode) {
+      dumpData.stockMode = cfg.stockMode;
+    }
+  } catch (e) {}
+  if (!dumpData.stockMode) {
+    try {
+      if (hasParameter("job:stockMode")) {
+        dumpData.stockMode = getParameter("job:stockMode");
+      } else if (hasGlobalParameter("job:stockMode")) {
+        dumpData.stockMode = getGlobalParameter("job:stockMode");
+      }
+    } catch (e) {}
+  }
+  try {
+    var sMode = (dumpData.stockMode || "").toLowerCase();
+    var isUnsupported = sMode.indexOf("previous") !== -1 ||
+                        sMode.indexOf("preceding") !== -1 ||
+                        sMode.indexOf("solid") !== -1 ||
+                        sMode.indexOf("body") !== -1;
+    if (!isUnsupported) {
+      dumpData.workpiece = serializeBox(getWorkpiece());
+    } else {
+      dumpData.workpiece = null;
+    }
   } catch (e) {}
 };
 

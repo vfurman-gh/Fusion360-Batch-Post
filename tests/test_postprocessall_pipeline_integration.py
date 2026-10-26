@@ -1513,6 +1513,110 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 self.assertIsNotNone(res)
                 self.assertIn("No stock detected or defined", res)
 
+    def test_unsupported_previous_setup_and_solid_stock_modes_return_explicit_error(self):
+        """Verify that 'From Previous Setup' and 'From Solid' stock modes report explicit errors to user."""
+        import json
+        import PostProcessAll
+        from context_parser import extract_workpiece_from_context
+        from pipeline import PipelineOrchestrator
+        from unittest.mock import MagicMock, patch
+
+        # 1. extract_workpiece_from_context returns None when stockMode indicates previous-setup or solid
+        ctx_prev = {
+            "unit": 1,
+            "stockMode": "previous-setup",
+            "workpiece": {"lower": {"x": -50, "y": -50, "z": -20}, "upper": {"x": 50, "y": 50, "z": 0}},
+            "sections": [],
+        }
+        self.assertIsNone(extract_workpiece_from_context(ctx_prev))
+
+        ctx_solid = {
+            "unit": 1,
+            "stockMode": "solid",
+            "workpiece": {"lower": {"x": -50, "y": -50, "z": -20}, "upper": {"x": 50, "y": 50, "z": 0}},
+            "sections": [],
+        }
+        self.assertIsNone(extract_workpiece_from_context(ctx_solid))
+
+        # 2. PipelineOrchestrator raises explicit ValueError
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ctx_p = os.path.join(tmp_dir, "batch_prev.json")
+            with open(ctx_p, "w", encoding="utf-8") as f:
+                json.dump(ctx_prev, f)
+            dummy_cps = os.path.join(tmp_dir, "dummy.cps")
+            with open(dummy_cps, "w", encoding="utf-8") as f:
+                f.write('description = "Dummy Post";\ncapabilities = CAPABILITY_MILLING;\n')
+
+            orchestrator = PipelineOrchestrator(
+                dumper_cps=PostProcessAll.constDumperScript,
+                replayer_cps=PostProcessAll.constReplayerScript,
+            )
+            with self.assertRaises(ValueError) as err_ctx:
+                orchestrator.run(
+                    context_dump_paths=[ctx_p],
+                    base_post_path=dummy_cps,
+                    program_name="SetupFromPreviousOp",
+                )
+            self.assertIn("uses 'From Previous Setup' stock", str(err_ctx.exception))
+
+            # 3. _PostProcessUnifiedPipeline catches previous setup and solid setups early
+            mock_setup_prev = MagicMock()
+            mock_setup_prev.name = "Op2RestMachining"
+            mock_setup_prev.operationType = 0  # Milling
+            p_mode = MagicMock()
+            p_mode.value.value = "previous-setup"
+            p_mode.expression = "previous-setup"
+            mock_setup_prev.parameters.itemByName.side_effect = lambda n: p_mode if n in ("job_stockMode", "stockMode") else None
+            mock_setup_prev.stockSolids.count = 0
+            mock_setup_prev.models.count = 0
+
+            # _ExtractWorkpieceFromSetup returns None
+            self.assertIsNone(PostProcessAll._ExtractWorkpieceFromSetup(mock_setup_prev))
+
+            mock_prog = MagicMock()
+            mock_prog.parameters.itemByName.return_value = MagicMock(value=MagicMock(value="tormach"))
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=MagicMock()), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=dummy_cps):
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="Op2RestMachining",
+                    setup=mock_setup_prev,
+                    setupFolder=tmp_dir,
+                    docSettings={},
+                    program=mock_prog,
+                    path=os.path.join(tmp_dir, "op2.nc"),
+                    fileExt=".nc",
+                )
+                self.assertIsNotNone(res)
+                self.assertIn("From Previous Setup", res)
+
+            # 4. Same for Solid stock
+            mock_setup_solid = MagicMock()
+            mock_setup_solid.name = "OpSolid"
+            mock_setup_solid.operationType = 0  # Milling
+            p_solid = MagicMock()
+            p_solid.value.value = "solid"
+            p_solid.expression = "solid"
+            mock_setup_solid.parameters.itemByName.side_effect = lambda n: p_solid if n in ("job_stockMode", "stockMode") else None
+            mock_setup_solid.stockSolids.count = 1
+            mock_setup_solid.models.count = 0
+
+            self.assertIsNone(PostProcessAll._ExtractWorkpieceFromSetup(mock_setup_solid))
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=MagicMock()), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=dummy_cps):
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="OpSolid",
+                    setup=mock_setup_solid,
+                    setupFolder=tmp_dir,
+                    docSettings={},
+                    program=mock_prog,
+                    path=os.path.join(tmp_dir, "solid.nc"),
+                    fileExt=".nc",
+                )
+                self.assertIsNotNone(res)
+                self.assertIn("From Solid", res)
+
 
 if __name__ == "__main__":
     unittest.main()
