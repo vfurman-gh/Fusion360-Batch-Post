@@ -1196,7 +1196,45 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertEqual(install_packages.get_default_platform_tag(), "macosx_10_9_x86_64")
 
 
+    def test_a5_isolated_dumper_config_and_pipeline_unification(self):
+        """Verify _WriteDumperConfig isolates config to target_dir and _ClearDumperConfig cleans env vars."""
+        import json
+        import PostProcessAll
+        with tempfile.TemporaryDirectory() as target_dir:
+            base_post = os.path.join(target_dir, "fake.cps")
+            with open(base_post, "w") as f:
+                f.write("// post")
+            cnc_path = os.path.join(target_dir, "fake.cnc")
+            PostProcessAll._WriteDumperConfig(
+                base_post_path=base_post,
+                target_cnc_path=cnc_path,
+                post_properties={"prop1": "val1"},
+                target_dir=target_dir,
+            )
+
+            cfg_file = os.path.join(target_dir, "universal_dumper_config.json")
+            self.assertTrue(os.path.isfile(cfg_file))
+            self.assertEqual(os.environ.get("DUMPER_CONFIG_PATH"), cfg_file)
+
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg["basePost"], os.path.abspath(base_post))
+            self.assertEqual(cfg["targetIntermediateCnc"], os.path.abspath(cnc_path))
+            self.assertEqual(cfg["postProperties"], {"prop1": "val1"})
+
+            # Test cleanup
+            os.environ["BASE_POST"] = os.path.abspath(base_post)
+            os.environ["TARGET_INTERMEDIATE_CNC"] = os.path.abspath(cnc_path)
+            PostProcessAll._ClearDumperConfig(target_dir=target_dir)
+
+            self.assertFalse(os.path.isfile(cfg_file))
+            self.assertNotIn("DUMPER_CONFIG_PATH", os.environ)
+            self.assertNotIn("BASE_POST", os.environ)
+            self.assertNotIn("TARGET_INTERMEDIATE_CNC", os.environ)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

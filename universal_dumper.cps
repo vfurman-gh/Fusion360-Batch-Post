@@ -26,13 +26,30 @@ var _dumperCfg = null;
 function _getDumperConfig() {
   if (_dumperCfg !== null) return _dumperCfg;
   _dumperCfg = {};
-  var cfgCandidates = ["/tmp/universal_dumper_config.json"];
+  var cfgCandidates = [];
+  try {
+    var cfgEnv = getEnvironmentVariable("DUMPER_CONFIG_PATH");
+    if (cfgEnv) {
+      cfgCandidates.push(cfgEnv);
+    }
+  } catch (e) {}
+  try {
+    var outP = getOutputPath();
+    if (outP) {
+      var folder = FileSystem.getFolderPath(outP);
+      if (folder) {
+        cfgCandidates.push(FileSystem.getCombinedPath(folder, "universal_dumper_config.json"));
+      }
+    }
+  } catch (e) {}
   try {
     var tf = FileSystem.getTemporaryFolder();
     if (tf) {
-      cfgCandidates.unshift(FileSystem.getCombinedPath(tf, "universal_dumper_config.json"));
+      cfgCandidates.push(FileSystem.getCombinedPath(tf, "universal_dumper_config.json"));
     }
   } catch (e) {}
+  cfgCandidates.push("/tmp/universal_dumper_config.json");
+
   for (var i = 0; i < cfgCandidates.length; ++i) {
     try {
       if (FileSystem.isFile(cfgCandidates[i])) {
@@ -46,14 +63,14 @@ function _getDumperConfig() {
 
 var basePostPath = "";
 try {
-  basePostPath = getEnvironmentVariable("BASE_POST");
+  var cfg = _getDumperConfig();
+  if (cfg && cfg.basePost) {
+    basePostPath = cfg.basePost;
+  }
 } catch (e) {}
 if (!basePostPath) {
   try {
-    var cfg = _getDumperConfig();
-    if (cfg && cfg.basePost) {
-      basePostPath = cfg.basePost;
-    }
+    basePostPath = getEnvironmentVariable("BASE_POST");
   } catch (e) {}
 }
 var vendorExtension = "nc";
@@ -474,14 +491,14 @@ onClose = function() {
   // Optionally copy the binary Compact-NCI intermediate file for bootstrap replay
   var targetCnc = "";
   try {
-    targetCnc = getEnvironmentVariable("TARGET_INTERMEDIATE_CNC");
+    var cfg = _getDumperConfig();
+    if (cfg && cfg.targetIntermediateCnc) {
+      targetCnc = cfg.targetIntermediateCnc;
+    }
   } catch (e) {}
   if (!targetCnc) {
     try {
-      var cfg = _getDumperConfig();
-      if (cfg && cfg.targetIntermediateCnc) {
-        targetCnc = cfg.targetIntermediateCnc;
-      }
+      targetCnc = getEnvironmentVariable("TARGET_INTERMEDIATE_CNC");
     } catch (e) {}
   }
   if (!targetCnc) {

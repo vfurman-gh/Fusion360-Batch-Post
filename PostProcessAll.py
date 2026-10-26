@@ -1194,7 +1194,7 @@ def _EnsureLocalModulesLoaded():
                 _dbg_global(f"Reload of {mod_name} failed: {exc}")
 
 
-def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None):
+def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None):
     """Write sidecar config for universal_dumper.cps when spawned by Fusion 360's C++ host process."""
     cfg = {}
     if base_post_path and os.path.isfile(base_post_path):
@@ -1203,9 +1203,19 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
         cfg["targetIntermediateCnc"] = os.path.abspath(target_cnc_path)
     if post_properties and isinstance(post_properties, dict):
         cfg["postProperties"] = post_properties
-    cfg_dirs = [tempfile.gettempdir()]
+
+    cfg_dirs = []
+    if target_dir and os.path.isdir(target_dir):
+        cfg_dirs.append(target_dir)
+        cfg_path_target = os.path.join(target_dir, "universal_dumper_config.json")
+        os.environ["DUMPER_CONFIG_PATH"] = cfg_path_target
+
+    temp_dir = tempfile.gettempdir()
+    if temp_dir not in cfg_dirs:
+        cfg_dirs.append(temp_dir)
     if os.path.isdir("/tmp") and "/tmp" not in cfg_dirs:
         cfg_dirs.append("/tmp")
+
     for cfg_dir in cfg_dirs:
         try:
             if os.path.isdir(cfg_dir):
@@ -1216,11 +1226,17 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
             pass
 
 
-def _ClearDumperConfig():
-    """Remove temporary sidecar config for universal_dumper.cps."""
-    cfg_dirs = [tempfile.gettempdir()]
+def _ClearDumperConfig(target_dir=None):
+    """Remove temporary sidecar config and clean environment variables for universal_dumper.cps."""
+    cfg_dirs = []
+    if target_dir and os.path.isdir(target_dir):
+        cfg_dirs.append(target_dir)
+    temp_dir = tempfile.gettempdir()
+    if temp_dir not in cfg_dirs:
+        cfg_dirs.append(temp_dir)
     if os.path.isdir("/tmp") and "/tmp" not in cfg_dirs:
         cfg_dirs.append("/tmp")
+
     for cfg_dir in cfg_dirs:
         try:
             cfg_path = os.path.join(cfg_dir, "universal_dumper_config.json")
@@ -1228,6 +1244,10 @@ def _ClearDumperConfig():
                 os.remove(cfg_path)
         except Exception:
             pass
+
+    os.environ.pop("DUMPER_CONFIG_PATH", None)
+    os.environ.pop("BASE_POST", None)
+    os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
 
 
 
@@ -2015,6 +2035,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     base_post_path=base_post_path,
                     target_cnc_path=bootstrap_cnc,
                     post_properties=post_props,
+                    target_dir=tmp_dir,
                 )
             else:
                 os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
@@ -2022,6 +2043,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     base_post_path=base_post_path,
                     target_cnc_path=None,
                     post_properties=post_props,
+                    target_dir=tmp_dir,
                 )
 
             _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps via direct PostProcessInput...")
@@ -2068,86 +2090,36 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         # -------------------------------------------------------------
         # PASS 2: Merge Contexts, Universal Domain Extraction & Single-Pass Replay
+        # Delegated directly to PipelineOrchestrator to eliminate duplication between Fusion and CLI/test
         # -------------------------------------------------------------
-        if not _notify_p("Pass 2: Merging toolpath context...", 0.42):
-            return "Operation cancelled by user."
-        from context_parser import (
-            merge_context_dumps,
-            parse_context_dump,
-            apply_promotions_to_context,
-            extract_workpiece_from_context,
-            extract_tools_from_context,
-        )
-        from geometry import CollisionKind
         from pipeline import PipelineOrchestrator
-
-        combined_ctx = merge_context_dumps(batch_json_files)
-        # Override programName with target setup filename and forward custom post properties
-        combined_ctx["programName"] = str(fname)
-        if post_props:
-            combined_ctx["postProperties"] = post_props
-
-        # Universal domain extraction: WorkpieceDefinition & Tools
-        fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
-        workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_wp, is_turning=is_turning)
-        tools_by_op = extract_tools_from_context(combined_ctx, is_turning=is_turning)
-        if is_turning and not tools_by_op:
-            return "No lathe operations with valid tools found in context dump."
-
-        combined_segments = parse_context_dump(combined_ctx)
-        _dbg(f"Pass 2: Combined {len(combined_segments)} motion segments across {len(batches)} batches.")
+        from geometry import CollisionKind
 
         base_no_ext = os.path.splitext(path)[0]
         report_path = base_no_ext + "_report.md"
         plot_path = base_no_ext + ".png"
 
-        # Instantiate verification engine based on setup operation type
-        if not _notify_p(f"Pass 2: Simulating stock & collisions ({'turning' if is_turning else 'milling'})...", 0.50):
-            return "Operation cancelled by user."
-        if is_turning:
-            from geometry import Lathe2DIPWVerifier
-            verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
-        else:
-            from geometry import MillHeightfieldVerifier
-            verifier = MillHeightfieldVerifier()
-
-        report = verifier.verify_toolpath(combined_segments, tools_by_op, workpiece)
-
-        # Generate verification plot (.png)
-        if plot_path:
-            if not _notify_p("Pass 2: Generating verification plot & report...", 0.70):
-                return "Operation cancelled by user."
-            try:
-                from geometry.plotter import generate_verification_plot, generate_mill_verification_plot
-                is_inch = (combined_ctx.get("unit", 1) == 0)
-                if is_turning:
-                    generate_verification_plot(
-                        workpiece=workpiece,
-                        final_ipw=getattr(verifier, "ipw", None),
-                        chuck_obstacle=getattr(verifier, "chuck_obstacle", None),
-                        segments=combined_segments,
-                        report=report,
-                        tools_by_op=tools_by_op,
-                        out_png_path=plot_path,
-                        unit_is_inch=is_inch,
-                    )
-                else:
-                    generate_mill_verification_plot(
-                        workpiece=workpiece,
-                        grid=getattr(verifier, "grid", None),
-                        segments=combined_segments,
-                        report=report,
-                        tools_by_op=tools_by_op,
-                        out_png_path=plot_path,
-                        unit_is_inch=is_inch,
-                    )
-                _dbg(f"Pass 2: Generated verification plot: {plot_path}")
-            except Exception as pl_exc:
-                _dbg(f"Pass 2: generate verification plot exception: {pl_exc}")
+        fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
+        do_promote = bool(docSettings.get("restore_rapid", True))
 
         orchestrator = PipelineOrchestrator(
             dumper_cps=constDumperScript,
             replayer_cps=constReplayerScript,
+        )
+
+        report, final_gcode = orchestrator.run(
+            context_dump_paths=batch_json_files,
+            base_post_path=base_post_path,
+            bootstrap_cnc_path=bootstrap_cnc,
+            final_cnc_path=path,
+            report_output_path=report_path,
+            plot_output_path=plot_path,
+            promote=do_promote,
+            progress_cb=_notify_p,
+            post_properties=post_props,
+            program_name=str(fname),
+            fallback_workpiece=fallback_wp,
+            is_turning=is_turning,
         )
 
         # Universal collision check: issue warnings and record collision metrics while continuing NC generation
@@ -2164,51 +2136,23 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             except Exception:
                 pass
 
-        # Stamp promoted rapid flags directly onto merged context
-        do_promote = bool(docSettings.get("restore_rapid", True))
-        promoted_total = 0
-
-        # Safety-critical stock check (S1 & S2): Do not promote air moves if stock is unknown or unshaped
-        if not workpiece or not getattr(workpiece, "stock", None):
-            _dbg("Pass 2: No valid workpiece/stock definition available; rapid air-move promotion disabled for safety.")
-            do_promote = False
-
-        if do_promote and report.promoted_vectors:
-            # S3: Sometimes toolpath collisions exist in CAM setups (e.g. minor holder touches
-            # or benign fixture/stock skim contacts that are difficult or impractical to eliminate
-            # in complex parts). We permit rapid promotion of verified air moves even when
-            # collisions are detected elsewhere in the setup, as long as the collisions do not
-            # result from the promoted moves themselves (i.e. every promoted move is strictly
-            # verified to be collision-free with zero stock removal and safe clearance).
-            collision_vector_keys = {c.vector_key for c in report.collisions if c.vector_key}
-            safe_promoted_vectors = {
-                v_key: rule for v_key, rule in report.promoted_vectors.items()
-                if v_key not in collision_vector_keys
-            }
-            if safe_promoted_vectors:
-                promoted_total = apply_promotions_to_context(
-                    combined_ctx, safe_promoted_vectors
-                )
-
-        # Single-pass replay of unmodified vendor post across all merged sections
-        if not _notify_p("Pass 2: Emitting final NC program...", 0.85):
-            return "Operation cancelled by user."
-        _dbg(f"Pass 2: Replaying merged context ({len(combined_ctx.get('sections', []))} sections, {promoted_total} promoted moves) with universal_replayer.cps...")
-        final_gcode = orchestrator.replay_combined_context(
-            combined_context=combined_ctx,
-            base_post_path=base_post_path,
-            bootstrap_cnc_path=bootstrap_cnc,
-            final_cnc_path=path,
-        )
-        _dbg(f"Pass 2: Successfully emitted combined NC program at {path}")
-
-        summary_md = orchestrator._format_summary_report(
-            report, final_gcode=final_gcode, base_post_path=base_post_path, restored_count=promoted_total
-        )
-        with open(report_path, "w", encoding="utf-8") as rf:
-            rf.write(summary_md)
-
         _notify_p("Setup completed.", 1.0)
+
+        collision_vector_keys = {c.vector_key for c in report.collisions if c.vector_key}
+        promoted_total = (
+            len([k for k in report.promoted_vectors if k not in collision_vector_keys])
+            if (do_promote and getattr(report, "promoted_vectors", None))
+            else 0
+        )
+
+        summary_md = ""
+        if os.path.isfile(report_path):
+            with open(report_path, "r", encoding="utf-8") as rf:
+                summary_md = rf.read()
+        else:
+            summary_md = orchestrator.format_summary_report(
+                report, final_gcode=final_gcode, base_post_path=base_post_path, restored_count=promoted_total
+            )
 
         _RecordVerifyResult(
             setup=setup,
@@ -2230,7 +2174,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         _dbg(f"_PostProcessUnifiedPipeline exception: {traceback.format_exc()}")
         return f"PostProcess pipeline error: {str(exc)}"
     finally:
-        _ClearDumperConfig()
+        _ClearDumperConfig(target_dir=tmp_dir)
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:

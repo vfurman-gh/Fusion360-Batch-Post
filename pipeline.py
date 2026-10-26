@@ -24,7 +24,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from geometry.models import (
     MotionSegment,
@@ -37,6 +37,8 @@ from context_parser import (
     merge_context_dumps,
     parse_context_dump,
     apply_promotions_to_context,
+    extract_workpiece_from_context,
+    extract_tools_from_context,
 )
 
 
@@ -118,8 +120,8 @@ class PipelineOrchestrator:
         post_bin: Optional[str] = None,
         dumper_cps: Optional[str] = None,
         replayer_cps: Optional[str] = None,
-        apt_cps: Optional[str] = None,
-        wrapper_cps: Optional[str] = None,
+        *args,
+        **kwargs,
     ):
         self.post_bin = post_bin or find_autodesk_post_binary()
         if not self.post_bin or not os.path.isfile(self.post_bin):
@@ -134,9 +136,6 @@ class PipelineOrchestrator:
         self.replayer_cps = replayer_cps or os.path.join(repo_root, "universal_replayer.cps")
         if not os.path.isfile(self.replayer_cps):
             raise FileNotFoundError(f"universal_replayer.cps not found: {self.replayer_cps}")
-
-        self.apt_cps = apt_cps
-        self.wrapper_cps = wrapper_cps
 
     def dump_intermediate_to_json(
         self,
@@ -203,8 +202,8 @@ class PipelineOrchestrator:
 
     def run(
         self,
-        intermediate_cnc_path: Union[str, Sequence[str]],
-        base_post_path: str,
+        intermediate_cnc_path: Optional[Union[str, Sequence[str]]] = None,
+        base_post_path: str = "",
         workpiece: Optional[WorkpieceDefinition] = None,
         tools_by_op: Optional[Dict[str, ToolAssembly]] = None,
         verifier: Optional[IVerificationEngine] = None,
@@ -213,6 +212,12 @@ class PipelineOrchestrator:
         plot_output_path: Optional[str] = None,
         context_dump_paths: Optional[Sequence[str]] = None,
         promote: bool = True,
+        bootstrap_cnc_path: Optional[str] = None,
+        progress_cb: Optional[Any] = None,
+        post_properties: Optional[dict] = None,
+        program_name: Optional[str] = None,
+        fallback_workpiece: Optional[WorkpieceDefinition] = None,
+        is_turning: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[VerificationReport, str]:
         """
@@ -220,18 +225,29 @@ class PipelineOrchestrator:
         intermediate `.cnc` files (or pre-extracted `context_dump_paths`).
         Returns `(VerificationReport, final_gcode_content)`.
         """
-        if isinstance(intermediate_cnc_path, str):
-            cnc_paths = [intermediate_cnc_path]
-        else:
-            cnc_paths = list(intermediate_cnc_path)
+        def _notify(msg: str, frac: float):
+            if progress_cb and not progress_cb(msg, frac):
+                raise RuntimeError("Operation cancelled by user.")
 
-        if not cnc_paths or not os.path.isfile(cnc_paths[0]):
-            raise FileNotFoundError(f"Intermediate NC file not found: {intermediate_cnc_path}")
-        if not os.path.isfile(base_post_path):
+        if context_dump_paths:
+            dump_files = list(context_dump_paths)
+            bootstrap_cnc = bootstrap_cnc_path or ""
+        elif intermediate_cnc_path:
+            if isinstance(intermediate_cnc_path, str):
+                cnc_paths = [intermediate_cnc_path]
+            else:
+                cnc_paths = list(intermediate_cnc_path)
+            if not cnc_paths or not os.path.isfile(cnc_paths[0]):
+                raise FileNotFoundError(f"Intermediate NC file not found: {intermediate_cnc_path}")
+            dump_files = []
+            bootstrap_cnc = bootstrap_cnc_path or cnc_paths[0]
+        else:
+            raise ValueError("Either context_dump_paths or intermediate_cnc_path must be provided")
+
+        if not base_post_path or not os.path.isfile(base_post_path):
             raise FileNotFoundError(f"Base machine post not found: {base_post_path}")
 
-        bootstrap_cnc = cnc_paths[0]
-        tools_by_op = tools_by_op or {}
+        tools_by_op = dict(tools_by_op) if tools_by_op else {}
 
         for out_p in (final_cnc_path, report_output_path, plot_output_path):
             if out_p:
@@ -243,28 +259,41 @@ class PipelineOrchestrator:
             # -----------------------------------------------------------------
             # Step 1: Dump each intermediate .cnc to JSON (if not pre-dumped)
             # -----------------------------------------------------------------
-            if context_dump_paths:
-                dump_files = list(context_dump_paths)
-            else:
-                dump_files = []
+            if not context_dump_paths:
                 for idx, cnc_p in enumerate(cnc_paths):
                     dmp_p = os.path.join(tmp_dir, f"batch_{idx}.json")
                     self.dump_intermediate_to_json(cnc_p, base_post_path, dmp_p)
                     dump_files.append(dmp_p)
 
             # -----------------------------------------------------------------
-            # Step 2: Merge JSON Contexts & Normalize Metric MotionSegments
+            # Step 2: Merge JSON Contexts & Domain Extraction
             # -----------------------------------------------------------------
+            _notify("Pass 2: Merging toolpath context...", 0.42)
             combined_ctx = merge_context_dumps(dump_files)
+            if program_name:
+                combined_ctx["programName"] = str(program_name)
+            if post_properties:
+                combined_ctx["postProperties"] = post_properties
+
+            if is_turning is None:
+                is_turning = any(
+                    s.get("type", 0) == 1 or bool(s.get("tool", {}).get("_isTurningTool", False))
+                    for s in combined_ctx.get("sections", [])
+                )
+            if workpiece is None:
+                workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_workpiece, is_turning=is_turning)
+            if not tools_by_op:
+                tools_by_op = extract_tools_from_context(combined_ctx, is_turning=is_turning)
+            if is_turning and not tools_by_op:
+                raise ValueError("No lathe operations with valid tools found in context dump.")
+
             segments = parse_context_dump(combined_ctx)
-            if not segments:
-                raise ValueError("Parsed context dump yielded 0 kinematic segments")
 
             # -----------------------------------------------------------------
             # Step 3: Run Unified Verification Engine on Combined Setup
             # -----------------------------------------------------------------
+            _notify(f"Pass 2: Simulating stock & collisions ({'turning' if is_turning else 'milling'})...", 0.50)
             if verifier is None:
-                is_turning = any(s.get("type", 0) == 1 for s in combined_ctx.get("sections", []))
                 if is_turning:
                     from geometry.lathe_engine import Lathe2DIPWVerifier
                     verifier = Lathe2DIPWVerifier(tool_scale_to_mm=1.0)
@@ -305,6 +334,12 @@ class PipelineOrchestrator:
             # -----------------------------------------------------------------
             # Step 5: Execute Single-Pass Vendor Post Replay
             # -----------------------------------------------------------------
+            _notify("Pass 2: Emitting final NC program...", 0.85)
+            if not bootstrap_cnc or not os.path.isfile(bootstrap_cnc):
+                bootstrap_cnc = os.path.join(tmp_dir, "bootstrap.intermediate.cnc")
+                with open(bootstrap_cnc, "wb") as bf:
+                    bf.write(b"")
+
             effective_final_cnc = final_cnc_path or os.path.join(tmp_dir, "replayed_output.cnc")
             final_gcode = self.replay_combined_context(
                 combined_context=combined_ctx,
@@ -318,9 +353,10 @@ class PipelineOrchestrator:
             # Step 6: Generate Summary Report & Verification Plot
             # -----------------------------------------------------------------
             if plot_output_path:
+                _notify("Pass 2: Generating verification plot & report...", 0.70)
                 try:
                     is_inch = (combined_ctx.get("unit", 0) == 0)
-                    if getattr(verifier, "ipw", None) is not None:
+                    if is_turning:
                         from geometry.plotter import generate_verification_plot
                         final_ipw = getattr(verifier, "ipw", None)
                         chuck_obs = getattr(verifier, "chuck_obstacle", None)
@@ -334,7 +370,7 @@ class PipelineOrchestrator:
                             out_png_path=plot_output_path,
                             unit_is_inch=is_inch,
                         )
-                    elif getattr(verifier, "grid", None) is not None:
+                    else:
                         from geometry.plotter import generate_mill_verification_plot
                         generate_mill_verification_plot(
                             workpiece=workpiece,
@@ -348,7 +384,7 @@ class PipelineOrchestrator:
                 except Exception as exc:
                     print(f"WARNING: Verification plot generation failed: {exc}", file=sys.stderr)
 
-            report_summary = self._format_summary_report(
+            report_summary = self.format_summary_report(
                 report, final_gcode, base_post_path, restored_count=restored_count
             )
             if report_output_path:
@@ -357,7 +393,7 @@ class PipelineOrchestrator:
 
             return report, final_gcode
 
-    def _format_summary_report(
+    def format_summary_report(
         self,
         report: VerificationReport,
         final_gcode: str,
@@ -452,3 +488,5 @@ class PipelineOrchestrator:
                 lines.append("")
 
         return "\n".join(lines)
+
+    _format_summary_report = format_summary_report
