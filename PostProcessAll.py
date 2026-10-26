@@ -1328,9 +1328,11 @@ def _ExtractWorkpieceFromSetup(setup):
                 _dbg_global(f"Bounding box stock fallback threw: {b_exc}")
 
         if d_outer_mm is None or math.isnan(d_outer_mm) or d_outer_mm <= 0.0:
-            d_outer_mm = 50.0  # Defensible default
+            _dbg_global("_ExtractWorkpieceFromSetup: stock diameter is missing or non-positive; returning None")
+            return None
         if length_mm is None or math.isnan(length_mm) or length_mm <= 0.0:
-            length_mm = 100.0  # Defensible default
+            _dbg_global("_ExtractWorkpieceFromSetup: stock length is missing or non-positive; returning None")
+            return None
 
         d_inner_mm = _get_float_param(["job_stockDiameterInner", "stockDiameterInner"], default=0.0)
         if d_inner_mm is None or math.isnan(d_inner_mm) or d_inner_mm < 0.0:
@@ -2525,10 +2527,28 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         # Stamp promoted rapid flags directly onto merged context
         do_promote = bool(docSettings.get("restore_rapid", True))
         promoted_total = 0
+
+        # Safety-critical stock check (S1 & S2): Do not promote air moves if stock is unknown or unshaped
+        if not workpiece or not getattr(workpiece, "stock", None):
+            _dbg("Pass 2: No valid workpiece/stock definition available; rapid air-move promotion disabled for safety.")
+            do_promote = False
+
         if do_promote and report.promoted_vectors:
-            promoted_total = apply_promotions_to_context(
-                combined_ctx, report.promoted_vectors
-            )
+            # S3: Sometimes toolpath collisions exist in CAM setups (e.g. minor holder touches
+            # or benign fixture/stock skim contacts that are difficult or impractical to eliminate
+            # in complex parts). We permit rapid promotion of verified air moves even when
+            # collisions are detected elsewhere in the setup, as long as the collisions do not
+            # result from the promoted moves themselves (i.e. every promoted move is strictly
+            # verified to be collision-free with zero stock removal and safe clearance).
+            collision_vector_keys = {c.vector_key for c in report.collisions if c.vector_key}
+            safe_promoted_vectors = {
+                v_key: rule for v_key, rule in report.promoted_vectors.items()
+                if v_key not in collision_vector_keys
+            }
+            if safe_promoted_vectors:
+                promoted_total = apply_promotions_to_context(
+                    combined_ctx, safe_promoted_vectors
+                )
 
         # Single-pass replay of unmodified vendor post across all merged sections
         _notify_p("Pass 2: Emitting final NC program...", 0.85)

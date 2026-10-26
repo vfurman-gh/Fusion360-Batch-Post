@@ -238,22 +238,28 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
         self._reset_base_state(workpiece)
         self._sec_clearance_mm.clear()
 
+        self.has_valid_stock = False
         stock = getattr(workpiece, "stock", None)
-        if isinstance(stock, BoxStock3D):
+        if isinstance(stock, BoxStock3D) and stock.x_max > stock.x_min and stock.y_max > stock.y_min and stock.z_max > stock.z_min:
             self.grid.reset(stock)
+            self.has_valid_stock = True
         elif hasattr(stock, "x_min") and hasattr(stock, "z_max"):
-            box_stock = BoxStock3D(
-                x_min=float(stock.x_min),
-                x_max=float(stock.x_max),
-                y_min=float(stock.y_min),
-                y_max=float(stock.y_max),
-                z_min=float(stock.z_min),
-                z_max=float(stock.z_max),
-            )
-            self.grid.reset(box_stock)
+            x_min, x_max = float(stock.x_min), float(stock.x_max)
+            y_min, y_max = float(stock.y_min), float(stock.y_max)
+            z_min, z_max = float(stock.z_min), float(stock.z_max)
+            if x_max > x_min and y_max > y_min and z_max > z_min:
+                box_stock = BoxStock3D(
+                    x_min=x_min,
+                    x_max=x_max,
+                    y_min=y_min,
+                    y_max=y_max,
+                    z_min=z_min,
+                    z_max=z_max,
+                )
+                self.grid.reset(box_stock)
+                self.has_valid_stock = True
         else:
-            # Conservative default 100x100x25 stock if workpiece is unshaped
-            self.grid.reset(BoxStock3D(-50.0, 50.0, -50.0, 50.0, -25.0, 0.0))
+            self.has_valid_stock = False
 
     def reset_workpiece(self, workpiece: WorkpieceDefinition) -> None:
         """Backwards compatibility alias for reset()."""
@@ -570,7 +576,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                 if np.any(margin_cut_depth > 0.0):
                     cutter_margin_clear = False
 
-            if holder_margin_clear and cutter_margin_clear:
+            if holder_margin_clear and cutter_margin_clear and self.has_valid_stock:
                 is_air_move = True
 
         seen = self.record_vector_occurrence(v_key_str, is_air_move=is_air_move)

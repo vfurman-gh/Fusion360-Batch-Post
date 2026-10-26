@@ -1050,6 +1050,104 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             if os.path.isdir(local_posts_dir):
                 self.assertFalse(os.path.isfile(os.path.join(local_posts_dir, "universal_dumper.cps")))
 
+    def test_s1_s2_extract_workpiece_missing_stock_returns_none(self):
+        """Verify _ExtractWorkpieceFromSetup and extract_workpiece_from_context return None when stock is absent."""
+        import PostProcessAll
+        from context_parser import extract_workpiece_from_context
+
+        # Mock setup with no stock parameters
+        class EmptyParams:
+            def itemByName(self, name):
+                return None
+
+        class EmptySetup:
+            parameters = EmptyParams()
+            stockSolids = None
+            models = None
+
+        self.assertIsNone(PostProcessAll._ExtractWorkpieceFromSetup(EmptySetup()))
+
+        # Context with zero/negative volume
+        ctx_empty_milling = {
+            "unit": 1,
+            "workpiece": {"lower": {"x": 0, "y": 0, "z": 0}, "upper": {"x": 0, "y": 0, "z": 0}},
+            "sections": [{"type": 0}],
+        }
+        self.assertIsNone(extract_workpiece_from_context(ctx_empty_milling, fallback_workpiece=None, is_turning=False))
+
+    def test_s3_benign_collision_promotion_filtering(self):
+        """Verify that promoted moves in collision are excluded while independent air moves are promoted."""
+        from geometry.models import (
+            VerificationReport,
+            CollisionRecord,
+            CollisionKind,
+            PromotedVectorRule,
+            Vector3D,
+        )
+        from context_parser import apply_promotions_to_context
+
+        # Context with two linear moves
+        ctx = {
+            "unit": 1,
+            "sections": [
+                {
+                    "events": [
+                        {
+                            "type": "onLinear",
+                            "sx": 10.0, "sy": 0.0, "sz": 5.0,
+                            "x": 5.0, "y": 0.0, "z": 5.0,
+                        },
+                        {
+                            "type": "onLinear",
+                            "sx": 0.0, "sy": 0.0, "sz": 0.0,
+                            "x": -10.0, "y": 0.0, "z": 0.0,
+                        },
+                    ]
+                }
+            ],
+        }
+
+        from geometry.models import VectorKey
+        key_safe = VectorKey.from_floats(0, Vector3D(10.0, 0.0, 5.0), Vector3D(5.0, 0.0, 5.0)).to_wrapper_str()
+        key_collided = VectorKey.from_floats(0, Vector3D(0.0, 0.0, 0.0), Vector3D(-10.0, 0.0, 0.0)).to_wrapper_str()
+
+        report = VerificationReport(
+            total_machining_time_sec=10.0,
+            total_volume_removed_mm3=50.0,
+            collisions=[
+                CollisionRecord(
+                    segment_id=1,
+                    vector_key=key_collided,
+                    kind=CollisionKind.HOLDER_STRIKE,
+                    timestamp_sec=5.0,
+                    contact_point=Vector3D(0, 0, 0),
+                    penetration_volume_mm3=10.0,
+                    description="Holder collided with fixture",
+                )
+            ],
+            promoted_vectors={
+                key_safe: PromotedVectorRule(min_occur=1),
+                key_collided: PromotedVectorRule(min_occur=1),
+            },
+            mrr_timeline=[],
+            mrr_spikes=[],
+        )
+
+        collision_vector_keys = {c.vector_key for c in report.collisions if c.vector_key}
+        safe_promoted_vectors = {
+            k: v for k, v in report.promoted_vectors.items()
+            if k not in collision_vector_keys
+        }
+
+        # key_collided should be filtered out, key_safe retained
+        self.assertIn(key_safe, safe_promoted_vectors)
+        self.assertNotIn(key_collided, safe_promoted_vectors)
+
+        promoted_count = apply_promotions_to_context(ctx, safe_promoted_vectors)
+        self.assertEqual(promoted_count, 1)
+        self.assertTrue(ctx["sections"][0]["events"][0].get("promote"))
+        self.assertFalse(ctx["sections"][0]["events"][1].get("promote", False))
+
 
 if __name__ == "__main__":
     unittest.main()

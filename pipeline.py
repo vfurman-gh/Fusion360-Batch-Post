@@ -233,15 +233,28 @@ class PipelineOrchestrator:
             # -----------------------------------------------------------------
             promoted_json_path = None
             restored_count = 0
-            if promote:
-                restored_count = apply_promotions_to_context(combined_ctx, report.promoted_vectors)
-                promoted_json_path = os.path.join(tmp_dir, "promoted_vectors.json")
-                json_payload = {
-                    key: {"minOccur": rule.min_occur}
-                    for key, rule in report.promoted_vectors.items()
+            has_stock = (workpiece is not None and getattr(workpiece, "stock", None) is not None)
+            if promote and has_stock and report.promoted_vectors:
+                # S3: Sometimes toolpath collisions exist in CAM setups (e.g. minor holder touches
+                # or benign fixture/stock skim contacts that are difficult or impractical to eliminate
+                # in complex parts). We permit rapid promotion of verified air moves even when
+                # collisions are detected elsewhere in the setup, as long as the collisions do not
+                # result from the promoted moves themselves (i.e. every promoted move is strictly
+                # verified to be collision-free with zero stock removal and safe clearance).
+                collision_vector_keys = {c.vector_key for c in report.collisions if c.vector_key}
+                safe_promoted_vectors = {
+                    key: rule for key, rule in report.promoted_vectors.items()
+                    if key not in collision_vector_keys
                 }
-                with open(promoted_json_path, "w", encoding="utf-8") as f:
-                    json.dump(json_payload, f, indent=2)
+                if safe_promoted_vectors:
+                    restored_count = apply_promotions_to_context(combined_ctx, safe_promoted_vectors)
+                    promoted_json_path = os.path.join(tmp_dir, "promoted_vectors.json")
+                    json_payload = {
+                        key: {"minOccur": rule.min_occur}
+                        for key, rule in safe_promoted_vectors.items()
+                    }
+                    with open(promoted_json_path, "w", encoding="utf-8") as f:
+                        json.dump(json_payload, f, indent=2)
 
             # -----------------------------------------------------------------
             # Step 5: Execute Single-Pass Vendor Post Replay

@@ -488,6 +488,8 @@ def extract_workpiece_from_context(
         y_max = float(upper.get("y", 0.0)) * scale
         z_min = float(lower.get("z", 0.0)) * scale
         z_max = float(upper.get("z", 0.0)) * scale
+        if x_max <= x_min + 1e-6 or y_max <= y_min + 1e-6 or z_max <= z_min + 1e-6:
+            return fallback_workpiece
         return WorkpieceDefinition(
             stock=BoxStock3D(
                 x_min=x_min,
