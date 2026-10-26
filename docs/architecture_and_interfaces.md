@@ -1,7 +1,6 @@
 # Context-Dump, Unified Verification & Single-Pass Replay Architecture
 
-> [!IMPORTANT]
-> This document defines the authoritative architecture and tool interfaces for the **Fusion 360 Batch Post & Lathe IPW Verification Pipeline**. It supersedes the earlier per-batch wrapper + G-code text stitching designs documented in [`docs/verification_interface_proposal.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/verification_interface_proposal.md) and [`docs/universal_wrapper.md`](file:///Users/vadimf/Documents/Fusion360-Batch-Post-master/docs/universal_wrapper.md).
+> This document defines the authoritative architecture and tool interfaces for the **Fusion 360 Batch Post & Lathe IPW Verification Pipeline**, superseding earlier per-batch wrapper and G-code text stitching prototypes.
 
 ---
 

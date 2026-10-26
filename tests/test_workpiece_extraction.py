@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
 Test Suite: Extraction and Validation of WorkpieceDefinition (Stock & Fixtures)
-via Fusion 360 Setup API, Analytical Models, and apt_extractor_wrapper.cps.
+via Fusion 360 Setup API and Analytical Models.
 
 Proves:
-1. apt_extractor_wrapper.cps generates ISO 4343 .apt output and captures .intermediate.cnc in a single pass.
-2. Analytical WorkpieceDefinition construction and validation (AxisymmetricStock2D and AxisymmetricChuckObstacle).
-3. _ExtractWorkpieceFromSetup accurately extracts stock diameter, length, ID, and clamping fixtures from native Fusion 360 setup parameters.
-4. _ResolveBasePostPath safely resolves the machine post configuration.
+1. Analytical WorkpieceDefinition construction and validation (AxisymmetricStock2D and AxisymmetricChuckObstacle).
+2. _ExtractWorkpieceFromSetup accurately extracts stock diameter, length, ID, and clamping fixtures from native Fusion 360 setup parameters.
+3. _ResolveBasePostPath safely resolves the machine post configuration.
 """
 
 import glob
@@ -47,47 +46,16 @@ if "adsk" not in sys.modules:
     sys.modules["adsk.core"] = adsk.core
     sys.modules["adsk.fusion"] = adsk.fusion
 
-from pipeline import find_autodesk_post_binary, find_autodesk_apt_cps
+from pipeline import find_autodesk_post_binary
 
 
 class TestWorkpieceExtraction(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cls.post_bin = find_autodesk_post_binary()
-        cls.system_apt = find_autodesk_apt_cps()
-        cls.apt_wrapper = os.path.join(cls.repo_root, "apt_extractor_wrapper.cps")
         cls.fixture_cnc = os.path.join(cls.repo_root, "tests", "fixtures", "roughing_test.cnc")
 
-    def test_01_apt_extractor_wrapper_single_pass(self):
-        """Prove apt_extractor_wrapper.cps produces both .apt and intermediate .cnc in one step."""
-        if not self.post_bin or not os.path.isfile(self.post_bin) or not os.path.isfile(self.fixture_cnc):
-            raise unittest.SkipTest("Autodesk post binary or test fixture not found.")
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            apt_out = os.path.join(tmp_dir, "output.apt")
-            captured_cnc = os.path.join(tmp_dir, "captured.intermediate.cnc")
-
-            env = dict(os.environ)
-            if self.system_apt:
-                env["SYSTEM_APT_CPS"] = self.system_apt
-            env["TARGET_INTERMEDIATE_CNC"] = captured_cnc
-
-            cmd = [self.post_bin, "--quiet", self.apt_wrapper, self.fixture_cnc, apt_out]
-            res = subprocess.run(cmd, env=env, capture_output=True, text=True)
-            self.assertEqual(res.returncode, 0, f"APT extractor failed: {res.stdout}\n{res.stderr}")
-
-            # Verify .apt file exists and contains ISO 4343 APT statements
-            self.assertTrue(os.path.isfile(apt_out), "Output .apt file was not created")
-            with open(apt_out, "r", encoding="utf8", errors="replace") as f:
-                apt_content = f.read()
-            self.assertIn("GOTO/", apt_content, "Missing GOTO statements in APT output")
-
-            # Verify captured intermediate Compact-NCI file exists and is non-empty
-            self.assertTrue(os.path.isfile(captured_cnc), "Intermediate .cnc was not captured by onClose()")
-            self.assertGreater(os.path.getsize(captured_cnc), 1000, "Captured intermediate .cnc is too small")
-
-    def test_02_analytical_stock_and_chuck_geometry(self):
+    def test_01_analytical_stock_and_chuck_geometry(self):
         """Construct and validate analytical WorkpieceDefinition (stock + chuck)."""
         stock = AxisymmetricStock2D(
             z_min=-63.5,
@@ -118,7 +86,7 @@ class TestWorkpieceExtraction(unittest.TestCase):
         # Chuck should be strictly outside or abutting clamping radius
         self.assertAlmostEqual(chuck_poly.bounds[1], 15.875, places=3)
 
-    def test_03_mock_fusion_setup_workpiece_extraction(self):
+    def test_02_mock_fusion_setup_workpiece_extraction(self):
         """Prove _ExtractWorkpieceFromSetup parses parameters accurately from native Setup."""
         class MockParamValue:
             def __init__(self, val):
@@ -159,7 +127,7 @@ class TestWorkpieceExtraction(unittest.TestCase):
         self.assertAlmostEqual(wp.stock.z_min, -62.5, places=3)
         self.assertEqual(len(wp.fixtures), 1)
 
-    def test_04_resolve_base_post_path(self):
+    def test_03_resolve_base_post_path(self):
         """Prove _ResolveBasePostPath safely returns existing vendor post for both turning and milling."""
         from PostProcessAll import _ResolveBasePostPath
 

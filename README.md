@@ -90,7 +90,7 @@ You are responsible for ensuring a tool crash does not occur.
 
 ### Lathe G-Code Verification, Collision-Free Rapid Promotion & MRR Analysis
 For **Turning** setups posted with the included [`centroid_turning.cps`](centroid_turning.cps) post processor:
-- **2D In-Process Workpiece (IPW) Simulation & Collision Detection (`verify_lathe_gcode.py`)**: Tracks the exact 2D revolved stock cross-section using `shapely` and checks every move for rapid-into-stock (`RAPID_STOCK`), holder-into-stock (`HOLDER_STOCK`), and rapid-near-stock (`RAPID_CLEARANCE`) collisions.
+- **2D In-Process Workpiece (IPW) Simulation & Collision Detection (`geometry/lathe_engine.py`)**: Tracks the exact 2D revolved stock cross-section using `shapely` and checks every move for rapid-into-stock (`RAPID_STOCK`), holder-into-stock (`HOLDER_STOCK`), and rapid-near-stock (`RAPID_CLEARANCE`) collisions.
 - **Two-Pass Collision-Free `G1 -> G0` Rapid Promotion**: When **Restore rapid moves** is checked in `Post Process All`, Pass 1 identifies `G1` moves whose swept tool + holder envelopes maintain at least the safety clearance margin (`0.020"`) from the current IPW with zero material removal, promotes them to `G0` (`; PROMOTED G1->G0`), and immediately re-runs Pass 2 verification to guarantee zero collisions and zero IPW discrepancy.
 - **Material Removal Rate (MRR) Time-Series & Operation Spans**: Exports `<Setup>_mrr.csv` and renders `<Setup>_verification.png` with both the 2D IPW/toolpath plot and the MRR time-series (`in³/min` and `cm³/min`) annotated with operation spans and automatic `MRR_SPIKE` detection.
 - **Milling Safety Guard**: Automatically skips milling setups (`setup.operationType != TurningOperation`, `G17`/`G19`, or non-zero `Y` moves).
