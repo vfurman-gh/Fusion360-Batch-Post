@@ -1,27 +1,18 @@
 """
-Legacy Adapter: Parsing and Validation of Autodesk CAM Post Metadata.
+SVG Tool Geometry Adapter: Parsing and transformation of Autodesk CAM tool SVG paths.
 
-Provides backward-compatible ingestion of legacy ;META_STOCK and ;META_OP comments,
-and SVG path parsing to serve as ground-truth fixtures for parity testing.
+Provides conversion of SVG paths ('M ... L ... A ... Z') into 2D Shapely Polygons
+and transforms them into the lathe (Z, R) frame for cutting simulation and verification.
 """
 
-import json
 import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 try:
     from shapely.geometry import Polygon
 except (ImportError, OSError):
     Polygon = Any
-
-
-from .models import (
-    AxisymmetricStock2D,
-    LatheToolGeometry,
-    ToolCompensationQuadrant,
-    WorkpieceDefinition,
-)
 
 
 def parse_svg_polygon(svg_path: str, arc_steps: int = 16) -> Polygon:
@@ -106,38 +97,3 @@ def transform_tool_svg(
         return (x_rot - comp_x, r_sign * (y_rot - comp_y))
 
     return Polygon([map_pt(p) for p in raw_poly.exterior.coords]).buffer(0)
-
-
-def parse_legacy_stock(meta_stock_line: str) -> WorkpieceDefinition:
-    """Parse ;META_STOCK: JSON payload into WorkpieceDefinition."""
-    payload = json.loads(meta_stock_line.split(":", 1)[1])
-    stock = AxisymmetricStock2D(
-        z_min=payload["zLower"],
-        z_max=payload["zUpper"],
-        outer_radius=payload["rOuter"],
-        inner_radius=payload.get("rInner", 0.0),
-    )
-    return WorkpieceDefinition(stock=stock)
-
-
-def parse_legacy_tool_op(meta_op_line: str) -> LatheToolGeometry:
-    """Parse ;META_OP: JSON payload into LatheToolGeometry."""
-    payload = json.loads(meta_op_line.split(":", 1)[1])
-    comp = (payload["comp"][0], payload["comp"][1])
-    ttype = payload.get("toolType", "")
-    cutter = transform_tool_svg(
-        payload["cutterSVG"], payload["orientDeg"], comp, payload["post"], tool_type=ttype
-    )
-    holder = transform_tool_svg(
-        payload["holderSVG"], payload["orientDeg"], comp, payload["post"], tool_type=ttype
-    )
-    holder_clean = holder.difference(cutter.buffer(0.0015))
-
-    return LatheToolGeometry(
-        insert_shape=ttype,
-        nose_radius=payload.get("noseR", 0.0),
-        hand=payload.get("hand", "R"),
-        quadrant=ToolCompensationQuadrant.P3,
-        cutter_polygon=cutter,
-        holder_polygon=holder_clean,
-    )

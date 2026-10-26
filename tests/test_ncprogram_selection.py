@@ -39,7 +39,6 @@ if "adsk" not in sys.modules:
 
 from PostProcessAll import (
     GetNcProgramSetupsAndOperations,
-    GetSetups,
     GetNcProgram,
 )
 

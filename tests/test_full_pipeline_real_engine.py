@@ -19,7 +19,9 @@ from geometry import (
     AxisymmetricStock2D,
     WorkpieceDefinition,
     ToolAssembly,
-    parse_legacy_tool_op,
+    LatheToolGeometry,
+    ToolCompensationQuadrant,
+    transform_tool_svg,
 )
 from pipeline import PipelineOrchestrator
 
@@ -35,13 +37,28 @@ class TestFullPipelineRealEngine(unittest.TestCase):
             raise unittest.SkipTest("Prerequisites not found for real pipeline test")
 
         # Load tool 6 (Profile Boring Tool) geometry
-        meta_op_tool6 = (
-            ';META_OP: {"id":0,"name":"Profile Roughing8","tool":6,"post":"REAR","orientDeg":0,'
-            '"insertOrient":"left","hand":"R","noseR":0.008,"comp":[-0.008,0.008],"toolType":"boring turning",'
-            '"cutterSVG":"M0.000697246 0.00796956 A0.008 0.008 0 0 1 -0.00796956 -0.000697246 L0.023802 -0.363848 A0.008 0.008 0 0 1 0.0310743 -0.371121 L0.394225 -0.402892 A0.008 0.008 0 0 1 0.402892 -0.394225 L0.371121 -0.0310743 A0.008 0.008 0 0 1 0.363848 -0.023802 L0.000697246 0.00796956 Z",'
-            '"holderSVG":"M0.553699 -0.0565425 L0.0080831 -0.00809344 L0.0536995 -0.491199 L0.0536995 -4.9912 L0.553699 -4.9912 L0.553699 -0.0565425 Z"}'
+        cutter_svg = (
+            "M0.000697246 0.00796956 A0.008 0.008 0 0 1 -0.00796956 -0.000697246 "
+            "L0.023802 -0.363848 A0.008 0.008 0 0 1 0.0310743 -0.371121 "
+            "L0.394225 -0.402892 A0.008 0.008 0 0 1 0.402892 -0.394225 "
+            "L0.371121 -0.0310743 A0.008 0.008 0 0 1 0.363848 -0.023802 "
+            "L0.000697246 0.00796956 Z"
         )
-        geom = parse_legacy_tool_op(meta_op_tool6)
+        holder_svg = (
+            "M0.553699 -0.0565425 L0.0080831 -0.00809344 L0.0536995 -0.491199 "
+            "L0.0536995 -4.9912 L0.553699 -4.9912 L0.553699 -0.0565425 Z"
+        )
+        comp = (-0.008, 0.008)
+        cutter = transform_tool_svg(cutter_svg, 0, comp, "REAR", tool_type="boring turning")
+        holder = transform_tool_svg(holder_svg, 0, comp, "REAR", tool_type="boring turning")
+        geom = LatheToolGeometry(
+            insert_shape="boring turning",
+            nose_radius=0.008,
+            hand="R",
+            quadrant=ToolCompensationQuadrant.P3,
+            cutter_polygon=cutter,
+            holder_polygon=holder.difference(cutter.buffer(0.0015)),
+        )
         cls.tool6 = ToolAssembly(tool_id=6, name="Profile Roughing8", geometry=geom)
         cls.tools_by_op = {
             "Profile Roughing8": cls.tool6,

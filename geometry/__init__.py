@@ -97,14 +97,10 @@ except (ImportError, OSError):
 
 try:
     from .legacy_adapter import (
-        parse_legacy_stock,
-        parse_legacy_tool_op,
         parse_svg_polygon,
         transform_tool_svg,
     )
 except (ImportError, OSError):
-    parse_legacy_stock = None
-    parse_legacy_tool_op = None
     parse_svg_polygon = None
     transform_tool_svg = None
 
@@ -148,8 +144,6 @@ __all__ = [
     "generate_turning_holder",
     "generate_axisymmetric_stock_polygon",
     "generate_chuck_obstacle_polygon",
-    "parse_legacy_stock",
-    "parse_legacy_tool_op",
     "parse_svg_polygon",
     "transform_tool_svg",
     "generate_verification_plot",
