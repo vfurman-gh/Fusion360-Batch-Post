@@ -26,6 +26,19 @@ import adsk.cam
 import adsk.core
 import adsk.fusion
 
+if not hasattr(adsk.cam, "SetupStockModes"):
+    class SetupStockModes:
+        FixedBoxStock = 0
+        RelativeBoxStock = 1
+        FixedCylinderStock = 2
+        RelativeCylinderStock = 3
+        FixedTubeStock = 4
+        RelativeTubeStock = 5
+        SolidStock = 6
+        PreviousSetupStock = 7
+    adsk.cam.SetupStockModes = SetupStockModes
+
+
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
 version = 16
@@ -1330,68 +1343,61 @@ def _ClearDumperConfig(target_dir=None):
 
 def _GetSetupStockMode(setup) -> str:
     """Detect the stock definition mode from a Fusion CAM Setup."""
-    if not setup or not hasattr(setup, "parameters") or setup.parameters is None:
+    if not setup:
         return ""
 
-    modes = []
+    # 1. Primary check: setup.stockMode enum property (Autodesk Fusion typed API)
+    val = getattr(setup, "stockMode", None)
+    if val is not None and not hasattr(val, "_mock_return_value"):
+        v = getattr(val, "value", val)
+        if isinstance(v, int):
+            modes_enum = getattr(adsk.cam, "SetupStockModes", None)
+            if modes_enum:
+                if v == getattr(modes_enum, "PreviousSetupStock", 7):
+                    return "previous-setup"
+                elif v == getattr(modes_enum, "SolidStock", 6):
+                    return "solid"
+                elif v == getattr(modes_enum, "FixedBoxStock", 0):
+                    return "fixed-box"
+                elif v == getattr(modes_enum, "RelativeBoxStock", 1):
+                    return "relative-box"
+                elif v == getattr(modes_enum, "FixedCylinderStock", 2):
+                    return "fixed-cylinder"
+                elif v == getattr(modes_enum, "RelativeCylinderStock", 3):
+                    return "relative-cylinder"
+                elif v == getattr(modes_enum, "FixedTubeStock", 4):
+                    return "fixed-tube"
+                elif v == getattr(modes_enum, "RelativeTubeStock", 5):
+                    return "relative-tube"
+        elif isinstance(v, str):
+            s = v.lower().strip()
+            if "previous" in s or "preceding" in s or "rest" in s:
+                return "previous-setup"
+            if "solid" in s or "body" in s:
+                return "solid"
+            return s
 
-    # 1. Inspect setup parameters
-    for p_name in (
-        "job_stockMode",
-        "stockMode",
-        "job_stockType",
-        "stockType",
-        "job_stock_mode",
-        "job_stock_type",
-    ):
-        try:
-            p = setup.parameters.itemByName(p_name)
-            if p is not None:
-                # Extract concrete string or numeric value, ignoring mock objects that default to MagicMock
-                for attr in ("value", "expression"):
-                    val = getattr(p, attr, None)
-                    if val is not None:
-                        v_sub = getattr(val, "value", val)
-                        if isinstance(v_sub, (str, int)) and not hasattr(v_sub, "_mock_return_value"):
-                            modes.append(str(v_sub).lower().strip())
-        except Exception:
-            pass
+    # 2. Fallback check for headless test setups or mock objects
+    if hasattr(setup, "parameters") and setup.parameters is not None:
+        for p_name in ("job_stockMode", "stockMode", "job_stockType", "stockType"):
+            try:
+                p = setup.parameters.itemByName(p_name)
+                if p is not None:
+                    for attr in ("value", "expression"):
+                        pv = getattr(p, attr, None)
+                        if pv is not None:
+                            pv_sub = getattr(pv, "value", pv)
+                            if isinstance(pv_sub, (str, int)) and not hasattr(pv_sub, "_mock_return_value"):
+                                s = str(pv_sub).lower().strip()
+                                if "previous" in s or "preceding" in s or "rest" in s:
+                                    return "previous-setup"
+                                if "solid" in s or "body" in s:
+                                    return "solid"
+                                return s
+            except Exception:
+                pass
 
-    for p_name in (
-        "job_stockFromPreviousSetup",
-        "job_previousSetup",
-        "job_continueRestMachining",
-        "continueRestMachining",
-    ):
-        try:
-            p = setup.parameters.itemByName(p_name)
-            if p is not None:
-                val = getattr(p, "value", None)
-                v_sub = getattr(val, "value", val)
-                if not hasattr(v_sub, "_mock_return_value"):
-                    if v_sub is True or str(v_sub).lower() in ("true", "1", "yes"):
-                        modes.append("previous-setup")
-                    elif isinstance(v_sub, str) and v_sub.strip():
-                        modes.append(f"previous-setup:{v_sub.lower().strip()}")
-        except Exception:
-            pass
-
-    # 2. Inspect setup attributes (e.g. previousSetup, stockSolids)
-    for attr in ("previousSetup", "precedingSetup"):
-        val = getattr(setup, attr, None)
-        if val is not None and not hasattr(val, "_mock_return_value"):
-            modes.append("previous-setup")
-
-    try:
-        solids = getattr(setup, "stockSolids", None)
-        if solids and hasattr(solids, "count"):
-            count = getattr(solids, "count", 0)
-            if isinstance(count, int) and count > 0:
-                modes.append("solid")
-    except Exception:
-        pass
-
-    return " ".join(modes)
+    return ""
 
 
 def _ExtractWorkpieceFromSetup(setup):

@@ -65,6 +65,17 @@ if not hasattr(adsk.core, "ObjectCollection"):
             self.append(item)
     adsk.core.ObjectCollection = MockObjectCollection
 
+if not hasattr(adsk.cam, "SetupStockModes"):
+    adsk.cam.SetupStockModes = types.SimpleNamespace(
+        FixedBoxStock=0,
+        RelativeBoxStock=1,
+        FixedCylinderStock=2,
+        RelativeCylinderStock=3,
+        FixedTubeStock=4,
+        RelativeTubeStock=5,
+        SolidStock=6,
+        PreviousSetupStock=7,
+    )
 if not hasattr(adsk.cam, "PostOutputUnitOptions"):
     adsk.cam.PostOutputUnitOptions = types.SimpleNamespace(
         DocumentUnitsOutput=0,
@@ -1559,16 +1570,16 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 )
             self.assertIn("uses 'From Previous Setup' stock", str(err_ctx.exception))
 
-            # 3. _PostProcessUnifiedPipeline catches previous setup and solid setups early
+            # 3. _PostProcessUnifiedPipeline catches previous setup and solid setups early via setup.stockMode enum
             mock_setup_prev = MagicMock()
             mock_setup_prev.name = "Op2RestMachining"
             mock_setup_prev.operationType = 0  # Milling
-            p_mode = MagicMock()
-            p_mode.value.value = "previous-setup"
-            p_mode.expression = "previous-setup"
-            mock_setup_prev.parameters.itemByName.side_effect = lambda n: p_mode if n in ("job_stockMode", "stockMode") else None
+            mock_setup_prev.stockMode = adsk.cam.SetupStockModes.PreviousSetupStock
             mock_setup_prev.stockSolids.count = 0
             mock_setup_prev.models.count = 0
+
+            # _GetSetupStockMode correctly resolves to "previous-setup"
+            self.assertEqual(PostProcessAll._GetSetupStockMode(mock_setup_prev), "previous-setup")
 
             # _ExtractWorkpieceFromSetup returns None
             self.assertIsNone(PostProcessAll._ExtractWorkpieceFromSetup(mock_setup_prev))
@@ -1590,17 +1601,15 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 self.assertIsNotNone(res)
                 self.assertIn("From Previous Setup", res)
 
-            # 4. Same for Solid stock
+            # 4. Same for Solid stock via setup.stockMode
             mock_setup_solid = MagicMock()
             mock_setup_solid.name = "OpSolid"
             mock_setup_solid.operationType = 0  # Milling
-            p_solid = MagicMock()
-            p_solid.value.value = "solid"
-            p_solid.expression = "solid"
-            mock_setup_solid.parameters.itemByName.side_effect = lambda n: p_solid if n in ("job_stockMode", "stockMode") else None
+            mock_setup_solid.stockMode = adsk.cam.SetupStockModes.SolidStock
             mock_setup_solid.stockSolids.count = 1
             mock_setup_solid.models.count = 0
 
+            self.assertEqual(PostProcessAll._GetSetupStockMode(mock_setup_solid), "solid")
             self.assertIsNone(PostProcessAll._ExtractWorkpieceFromSetup(mock_setup_solid))
 
             with patch("PostProcessAll.adsk.core.Application.get", return_value=MagicMock()), \
@@ -1616,6 +1625,29 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 )
                 self.assertIsNotNone(res)
                 self.assertIn("From Solid", res)
+
+            # 5. Box setup with STALE stockSolids (count > 0) is NOT rejected as solid!
+            mock_setup_box = MagicMock()
+            mock_setup_box.name = "OpBoxWithStaleSolids"
+            mock_setup_box.stockMode = adsk.cam.SetupStockModes.FixedBoxStock
+            mock_setup_box.stockSolids.count = 5  # stale solid selection
+            self.assertEqual(PostProcessAll._GetSetupStockMode(mock_setup_box), "fixed-box")
+
+            # 6. Verify all SetupStockModes enum mappings in _GetSetupStockMode
+            expected_modes = {
+                adsk.cam.SetupStockModes.FixedBoxStock: "fixed-box",
+                adsk.cam.SetupStockModes.RelativeBoxStock: "relative-box",
+                adsk.cam.SetupStockModes.FixedCylinderStock: "fixed-cylinder",
+                adsk.cam.SetupStockModes.RelativeCylinderStock: "relative-cylinder",
+                adsk.cam.SetupStockModes.FixedTubeStock: "fixed-tube",
+                adsk.cam.SetupStockModes.RelativeTubeStock: "relative-tube",
+                adsk.cam.SetupStockModes.SolidStock: "solid",
+                adsk.cam.SetupStockModes.PreviousSetupStock: "previous-setup",
+            }
+            for enum_val, expected_str in expected_modes.items():
+                s = MagicMock()
+                s.stockMode = enum_val
+                self.assertEqual(PostProcessAll._GetSetupStockMode(s), expected_str)
 
 
 if __name__ == "__main__":
