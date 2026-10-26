@@ -1246,8 +1246,54 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertIsNone(pattern.match("batch_100.json"))
 
 
+    def test_s4_s5_stock_extraction_units_and_wcs_centering(self):
+        """Verify parameter unit parsing (S5) and bbox WCS axis centering check (S4)."""
+        import PostProcessAll
+        from unittest.mock import MagicMock
+
+        # 1. Parameter expression with 'in', 'mm', 'cm', 'ft'
+        mock_setup = MagicMock()
+        mock_p_dia = MagicMock()
+        mock_p_dia.value.value = None
+        mock_p_dia.expression = "2.0 in"
+        mock_p_len = MagicMock()
+        mock_p_len.value.value = None
+        mock_p_len.expression = "100 mm"
+
+        def itemByName(name):
+            if name == "job_stockDiameter":
+                return mock_p_dia
+            if name == "job_stockLength":
+                return mock_p_len
+            return None
+
+        mock_setup.parameters.itemByName.side_effect = itemByName
+        mock_setup.stockSolids.count = 0
+        mock_setup.models.count = 0
+
+        wp = PostProcessAll._ExtractWorkpieceFromSetup(mock_setup)
+        self.assertIsNotNone(wp)
+        self.assertAlmostEqual(wp.stock.outer_radius, 25.4, places=2)  # 2.0 in diameter -> 1.0 in radius = 25.4 mm
+        self.assertAlmostEqual(wp.stock.z_max - wp.stock.z_min, 100.0, places=2)
+
+        # 2. Off-center bbox fallback rejected (S4)
+        mock_setup_offcenter = MagicMock()
+        mock_setup_offcenter.parameters.itemByName.return_value = None
+        mock_body = MagicMock()
+        # Bounding box entirely on positive X (5.0 to 15.0 cm), not centered on Z
+        mock_body.boundingBox.minPoint = MagicMock(x=5.0, y=-2.0, z=-10.0)
+        mock_body.boundingBox.maxPoint = MagicMock(x=15.0, y=2.0, z=0.0)
+        mock_setup_offcenter.stockSolids.count = 1
+        mock_setup_offcenter.stockSolids.item.return_value = mock_body
+        mock_setup_offcenter.models.count = 0
+
+        wp_off = PostProcessAll._ExtractWorkpieceFromSetup(mock_setup_offcenter)
+        self.assertIsNone(wp_off)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

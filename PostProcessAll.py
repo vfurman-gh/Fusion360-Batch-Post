@@ -1262,21 +1262,48 @@ def _ExtractWorkpieceFromSetup(setup):
                 try:
                     p = params.itemByName(n)
                     if p is not None:
-                        val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else p
+                        expr = None
+                        if hasattr(p, "expression") and p.expression:
+                            expr = str(p.expression).strip()
+                        val = p.value.value if hasattr(p, "value") and hasattr(p.value, "value") else getattr(p, "value", p)
                         if isinstance(val, (int, float)):
-                            if math.isnan(val) or math.isinf(val):
-                                continue
-                            return float(val) * 10.0  # Fusion internal length unit (cm) to mm
-                        elif isinstance(val, str):
-                            s = val.strip().lower()
-                            if s.endswith("in"):
-                                fval = float(s[:-2].strip()) * 25.4
-                            elif s.endswith("mm"):
-                                fval = float(s[:-2].strip())
-                            else:
-                                fval = float(s) * 10.0
-                            if not math.isnan(fval) and not math.isinf(fval):
-                                return fval
+                            if not math.isnan(val) and not math.isinf(val):
+                                return float(val) * 10.0  # Fusion internal length unit (cm) to mm
+
+                        s = expr or (str(val).strip() if val is not None else "")
+                        if s:
+                            # 1. Try Fusion native unitsManager expression evaluation if in Fusion process
+                            try:
+                                app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+                                doc = getattr(app, "activeDocument", None) if app else None
+                                units_mgr = getattr(doc, "unitsManager", None)
+                                if units_mgr and hasattr(units_mgr, "evaluateExpression"):
+                                    fval = units_mgr.evaluateExpression(s, "mm")
+                                    if not math.isnan(fval) and not math.isinf(fval):
+                                        return float(fval)
+                            except Exception:
+                                pass
+
+                            # 2. Robust unit regex parsing (S5)
+                            s_clean = s.lower().strip()
+                            m = re.match(r"^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*([a-z'\"]*)$", s_clean)
+                            if m:
+                                num = float(m.group(1))
+                                unit = m.group(2)
+                                if unit in ("in", "inch", "inches", '"'):
+                                    fval = num * 25.4
+                                elif unit in ("ft", "feet", "'"):
+                                    fval = num * 304.8
+                                elif unit in ("cm",):
+                                    fval = num * 10.0
+                                elif unit in ("mm",):
+                                    fval = num
+                                elif unit == "":
+                                    fval = num * 10.0
+                                else:
+                                    fval = None
+                                if fval is not None and not math.isnan(fval) and not math.isinf(fval):
+                                    return fval
                 except Exception:
                     pass
             return default
@@ -1288,7 +1315,7 @@ def _ExtractWorkpieceFromSetup(setup):
             z_max_mm = 0.0
 
         if d_outer_mm is None or length_mm is None or d_outer_mm <= 0.0 or length_mm <= 0.0:
-            # Fallback: inspect stockSolids or models bounding boxes
+            # Fallback: inspect stockSolids or models bounding boxes ONLY if centered on world Z axis (S4)
             try:
                 for col_name in ("stockSolids", "models"):
                     col = getattr(setup, col_name, None)
@@ -1297,13 +1324,20 @@ def _ExtractWorkpieceFromSetup(setup):
                             item = col.item(c_idx)
                             bb = getattr(item, "boundingBox", None)
                             if bb:
+                                # S4: Verify that bounding box straddles the Z axis (spindle axis).
+                                # If the part or stock does not encompass origin in X and Y,
+                                # world coordinates cannot be assumed to be turning spindle aligned.
+                                if bb.minPoint.x > 0.05 or bb.maxPoint.x < -0.05 or bb.minPoint.y > 0.05 or bb.maxPoint.y < -0.05:
+                                    _dbg_global(f"_ExtractWorkpieceFromSetup: {col_name}[{c_idx}] is not centered on world Z axis; skipping world bbox")
+                                    continue
+
                                 z_min_c = bb.minPoint.z * 10.0
                                 z_max_c = bb.maxPoint.z * 10.0
                                 r_c = max(
-                                    math.hypot(bb.minPoint.x, bb.minPoint.y),
-                                    math.hypot(bb.maxPoint.x, bb.maxPoint.y),
-                                    math.hypot(bb.minPoint.x, bb.maxPoint.y),
-                                    math.hypot(bb.maxPoint.x, bb.minPoint.y),
+                                    abs(bb.minPoint.x),
+                                    abs(bb.maxPoint.x),
+                                    abs(bb.minPoint.y),
+                                    abs(bb.maxPoint.y),
                                 ) * 10.0
                                 if col_name == "models":
                                     r_c += 1.0  # radial stock margin
