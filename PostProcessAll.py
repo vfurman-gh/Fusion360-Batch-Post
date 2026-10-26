@@ -1230,43 +1230,6 @@ def _ClearDumperConfig():
             pass
 
 
-def _GetPostConfigObj(post_script_path):
-    """Obtain adsk.cam.PostConfiguration object for a .cps script."""
-
-    if hasattr(adsk.cam.PostConfiguration, "createFromContent"):
-        try:
-            with open(post_script_path, "r", encoding="utf-8") as f:
-                return adsk.cam.PostConfiguration.createFromContent(f.read())
-        except Exception as exc:
-            _dbg_global(f"createFromContent({post_script_path}) failed: {exc}")
-    try:
-        camMgr = adsk.cam.CAMManager.get()
-        if camMgr and camMgr.libraryManager and camMgr.libraryManager.postLibrary:
-            postLib = camMgr.libraryManager.postLibrary
-            query = postLib.createQuery(adsk.cam.LibraryLocations.LocalLibraryLocation)
-            base_name = os.path.basename(post_script_path).lower()
-            base_stem = os.path.splitext(base_name)[0]
-            for p in query.execute():
-                p_name = getattr(p, "name", "").lower()
-                p_desc = getattr(p, "description", "").lower()
-                p_url = ""
-                try:
-                    p_url = p.url.toString().lower() if hasattr(p, "url") and hasattr(p.url, "toString") else str(getattr(p, "url", "")).lower()
-                except Exception:
-                    pass
-                if (
-                    base_name == p_name
-                    or base_stem == p_name
-                    or base_name in p_name
-                    or base_name in p_url
-                    or (base_stem == "universal_dumper" and "universal context & event dumper" in p_desc)
-                    or (base_stem == "universal_replayer" and "universal context replayer" in p_desc)
-                ):
-                    return p
-    except Exception as exc2:
-        _dbg_global(f"postLibrary query failed: {exc2}")
-    return post_script_path
-
 
 def _ExtractWorkpieceFromSetup(setup):
     """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
