@@ -1785,18 +1785,32 @@ def _NotifyPostProcessResult(ui, cntFiles, cntSkipped, lstSkipped, outputFolder,
         target_x = 940
         target_y = 680
 
-        # Position notification palette in lower-right of active viewport
-        app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
-        if app and hasattr(app, "activeViewport") and app.activeViewport:
-            vp = app.activeViewport
+        # Query macOS Fusion window bounds for pixel-perfect lower-right placement
+        if sys.platform == "darwin":
             try:
-                if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
-                    pt = vp.viewToScreen(adsk.core.Point2D.create(vp.width, vp.height))
-                    if pt:
-                        target_x = max(50, int(pt.x) - palette_w - 20)
-                        target_y = max(50, int(pt.y) - palette_h - 20)
-            except Exception as pt_exc:
-                _dbg_global(f"_NotifyPostProcessResult: viewToScreen note: {pt_exc}")
+                import subprocess
+                cmd = 'tell application "System Events" to tell process "Autodesk Fusion" to repeat with w in windows\nif name of w contains "Autodesk Fusion" then\nreturn {position of w, size of w}\nend if\nend repeat'
+                raw = subprocess.check_output(['osascript', '-e', cmd], timeout=0.4).decode().strip()
+                parts = [int(p.strip()) for p in raw.split(',') if p.strip().lstrip('-').isdigit()]
+                if len(parts) >= 4:
+                    win_x, win_y, win_w, win_h = parts[0], parts[1], parts[2], parts[3]
+                    target_x = max(20, win_x + win_w - palette_w - 24)
+                    target_y = max(20, win_y + win_h - palette_h - 45)
+                    _dbg_global(f"_NotifyPostProcessResult: macOS window bounds ({win_x},{win_y},{win_w},{win_h}) -> target ({target_x}, {target_y})")
+            except Exception as e_mac:
+                _dbg_global(f"_NotifyPostProcessResult: mac window query note: {e_mac}")
+        else:
+            app = adsk.core.Application.get() if ("adsk" in sys.modules and hasattr(adsk, "core")) else None
+            if app and hasattr(app, "activeViewport") and app.activeViewport:
+                vp = app.activeViewport
+                try:
+                    if hasattr(adsk.core, "Point2D") and hasattr(adsk.core.Point2D, "create"):
+                        pt = vp.viewToScreen(adsk.core.Point2D.create(vp.width, vp.height))
+                        if pt:
+                            target_x = max(50, int(pt.x) - palette_w - 20)
+                            target_y = max(50, int(pt.y) - palette_h - 20)
+                except Exception as pt_exc:
+                    _dbg_global(f"_NotifyPostProcessResult: viewToScreen note: {pt_exc}")
 
         palette = None
 

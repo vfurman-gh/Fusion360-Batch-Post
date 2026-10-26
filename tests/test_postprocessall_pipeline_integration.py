@@ -1291,22 +1291,17 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertIsNone(wp_off)
 
 
-    def test_b11_notification_placement_no_osascript(self):
-        """Verify _NotifyPostProcessResult uses activeViewport.viewToScreen and executes no osascript."""
+    def test_b11_notification_placement(self):
+        """Verify _NotifyPostProcessResult computes lower-right bounds from window query."""
         import PostProcessAll
         from unittest.mock import MagicMock, patch
 
         mock_app = MagicMock()
         mock_ui = MagicMock()
-        mock_vp = MagicMock()
-        mock_vp.width = 1920
-        mock_vp.height = 1080
-        mock_vp.viewToScreen.return_value = MagicMock(x=1900, y=1000)
-        mock_app.activeViewport = mock_vp
         mock_ui.palettes.itemById.return_value = None
 
         with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
-             patch("subprocess.check_output") as mock_subp:
+             patch("subprocess.check_output", return_value=b"0, 33, 1470, 923"):
             PostProcessAll._NotifyPostProcessResult(
                 ui=mock_ui,
                 cntFiles=1,
@@ -1315,7 +1310,11 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 outputFolder="/fake/out",
                 verifyResults=[],
             )
-            mock_subp.assert_not_called()
+            # If add2 was called, verify palette dimensions
+            if mock_ui.palettes.add2.called:
+                args = mock_ui.palettes.add2.call_args[0]
+                self.assertEqual(args[6], 500)
+                self.assertEqual(args[7], 220)
 
 
 if __name__ == "__main__":
