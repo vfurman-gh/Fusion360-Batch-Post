@@ -38,10 +38,12 @@ constDumperScript = os.path.join(constAddonDir, "universal_dumper.cps")
 constReplayerScript = os.path.join(constAddonDir, "universal_replayer.cps")
 constPackagesDir = os.path.join(constAddonDir, "packages")
 
+_LOG_PATH = os.path.join(tempfile.gettempdir(), "postprocess_debug.log")
+
 def _dbg_global(msg):
     try:
         t = time.strftime('%H:%M:%S')
-        with open("/tmp/postprocess_debug.log", "a", encoding="utf8") as f:
+        with open(_LOG_PATH, "a", encoding="utf8") as f:
             f.write(f"[{t}] {msg}\n")
             f.flush()
     except Exception:
@@ -1192,7 +1194,10 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
         cfg["targetIntermediateCnc"] = os.path.abspath(target_cnc_path)
     if post_properties and isinstance(post_properties, dict):
         cfg["postProperties"] = post_properties
-    for cfg_dir in (tempfile.gettempdir(), "/tmp"):
+    cfg_dirs = [tempfile.gettempdir()]
+    if os.path.isdir("/tmp") and "/tmp" not in cfg_dirs:
+        cfg_dirs.append("/tmp")
+    for cfg_dir in cfg_dirs:
         try:
             if os.path.isdir(cfg_dir):
                 cfg_path = os.path.join(cfg_dir, "universal_dumper_config.json")
@@ -1204,7 +1209,10 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
 
 def _ClearDumperConfig():
     """Remove temporary sidecar config for universal_dumper.cps."""
-    for cfg_dir in (tempfile.gettempdir(), "/tmp"):
+    cfg_dirs = [tempfile.gettempdir()]
+    if os.path.isdir("/tmp") and "/tmp" not in cfg_dirs:
+        cfg_dirs.append("/tmp")
+    for cfg_dir in cfg_dirs:
         try:
             cfg_path = os.path.join(cfg_dir, "universal_dumper_config.json")
             if os.path.isfile(cfg_path):

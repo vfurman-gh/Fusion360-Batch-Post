@@ -1259,6 +1259,37 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 found = find_autodesk_post_binary()
                 self.assertEqual(found, post_v2)
 
+    def test_w2_temporary_directory_logging_and_sidecar(self):
+        """Verify debug logging and sidecar configs use platform tempfile dir and tolerate missing /tmp."""
+        import json
+        import PostProcessAll
+        from unittest.mock import patch
+
+        self.assertTrue(PostProcessAll._LOG_PATH.startswith(tempfile.gettempdir()))
+
+        # Test _dbg_global writes to _LOG_PATH without throwing
+        PostProcessAll._dbg_global("Test log entry")
+        self.assertTrue(os.path.isfile(PostProcessAll._LOG_PATH))
+
+        # Test _WriteDumperConfig and _ClearDumperConfig with simulated non-existent /tmp
+        orig_isdir = os.path.isdir
+        def fake_isdir(path):
+            if path == "/tmp":
+                return False
+            return orig_isdir(path)
+
+        with patch("os.path.isdir", side_effect=fake_isdir), \
+             tempfile.NamedTemporaryFile(suffix=".cps") as tmp_cps:
+            PostProcessAll._WriteDumperConfig(base_post_path=tmp_cps.name)
+            dumper_cfg_path = os.path.join(tempfile.gettempdir(), "universal_dumper_config.json")
+            self.assertTrue(os.path.isfile(dumper_cfg_path))
+            with open(dumper_cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg.get("basePost"), os.path.abspath(tmp_cps.name))
+
+            PostProcessAll._ClearDumperConfig()
+            self.assertFalse(os.path.isfile(dumper_cfg_path))
+
 
 if __name__ == "__main__":
     unittest.main()
