@@ -292,7 +292,6 @@ class TestNCProgramSelection(unittest.TestCase):
         ]
         batches = []
         i = 0
-        docSettings = {"combineTool": True}
         while i < len(active_ops):
             op = active_ops[i]
             curTool = op.tool.parameters.itemByName("tool_number").value.value
@@ -301,7 +300,7 @@ class TestNCProgramSelection(unittest.TestCase):
             while i < len(active_ops):
                 next_op = active_ops[i]
                 t_num = next_op.tool.parameters.itemByName("tool_number").value.value
-                if not docSettings.get("combineTool", True) or t_num != curTool:
+                if t_num != curTool:
                     break
                 opList.append(next_op)
                 i += 1

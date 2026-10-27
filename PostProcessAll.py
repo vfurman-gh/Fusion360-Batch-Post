@@ -48,7 +48,6 @@ defaultSettings = {
     "version" : version,
     "ncProgram": "",
     "output" : "",
-    "combineTool" : True,
     "restore_rapid" : True,
     # Groups are expanded or not
     "groupPersonal" : True
@@ -242,7 +241,7 @@ class SettingsManager:
         for k in (
             "verifyGcode", "splitSetup", "fastZ", "fastZHeuristic", "toolChange", "endCodes", "homeEndsOp",
             "sequence", "twoDigits", "onlySelected", "groupRename", "groupPost", "numericName",
-            "groupAdvanced", "initialDelay", "postRetries", "delFiles", "delFolder"
+            "groupAdvanced", "initialDelay", "postRetries", "delFiles", "delFolder", "combineTool"
         ):
             dst.pop(k, None)
         for item in src:
@@ -683,41 +682,19 @@ class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
             # Add inputs that will appear in a dialog
             inputs = cmd.commandInputs
 
-            # text box as a label for NC Program
-            input = inputs.addTextBoxCommandInput("ncProgramLabel", 
-                                                   "", 
-                                                   "NC Program:",
-                                                   1,
-                                                   True)
-            input.isFullWidth = True
-            label = input
-
             input = inputs.addDropDownCommandInput("ncProgram", 
                                                    "NC Program",
                                                    adsk.core.DropDownStyles.TextListDropDownStyle)
             for listItem in programs:
                 input.listItems.add(listItem.name, listItem.name == program.name)
-            #input.isFullWidth = True
+            input.isFullWidth = True
             input.tooltip = "NC Program to Use"
             input.tooltipDescription = (
                 "Post processing will use the settings from the selected NC Program."
             )
-            label.tooltip = input.tooltip
-            label.tooltipDescription = input.tooltipDescription
 
-            # "Personal Use" version
+            # Optimization & Verification group
             inputGroup = inputs.addGroupCommandInput("groupPersonal", "Optimization & Verification")
-
-            # check box to combine operation that use the same tool
-            input = inputGroup.children.addBoolValueInput("combineTool",
-                                                          "Combine operations using same tool",
-                                                          True,
-                                                          "",
-                                                          docSettings.get("combineTool", True))
-            input.tooltip = "Combine Consecutive Operations That Use the Same Tool"
-            input.tooltipDescription = (
-                "If consecutive operations use the same tool, group them into the same batch. "
-                "This optimizes tool changes across all setups.")
 
             # check box to restore rapid moves
             input = inputGroup.children.addBoolValueInput("restore_rapid",
@@ -833,7 +810,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                         self.docSettings[key] = inp.selectedItem.name
                 elif hasattr(inp, "value"):
                     self.docSettings[key] = inp.value
-        _dbg_global(f"CommandExecuteHandler execute: combineTool={self.docSettings.get('combineTool')}, restore_rapid={self.docSettings.get('restore_rapid')}")
+        _dbg_global(f"CommandExecuteHandler execute: restore_rapid={self.docSettings.get('restore_rapid')}")
         PerformPostProcess(self.docSettings)
 
 
@@ -2338,7 +2315,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         while i < len(active_ops):
             next_op = active_ops[i]
             t_num = next_op.tool.parameters.itemByName("tool_number").value.value
-            if not docSettings.get("combineTool", True) or t_num != curTool:
+            if t_num != curTool:
                 break
             opList.append(next_op)
             i += 1
