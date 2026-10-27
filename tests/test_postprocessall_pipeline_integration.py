@@ -776,6 +776,225 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             self.assertEqual(len(msgbox_calls), 0, "No modal messageBox should be shown when file does not exist")
             self.assertEqual(len(post_setup_calls), 1, "Must proceed directly to PostProcessSetup")
 
+    def test_perform_post_process_empty_toolpath_modal_abort_on_no(self):
+        """Verify PerformPostProcess aborts without posting when user clicks No on empty toolpath prompt."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            params_dict = {
+                "nc_program_output_folder": MagicMock(value=MagicMock(value=tmp_dir)),
+                "nc_program_nc_extension": MagicMock(value=MagicMock(value=".nc")),
+                "nc_program_name": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_filename": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_openInEditor": MagicMock(value=MagicMock(value=False)),
+            }
+            mock_params = MagicMock()
+            mock_params.itemByName.side_effect = lambda k: params_dict.get(k)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters = mock_params
+            mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+            valid_op = MagicMock()
+            valid_op.name = "ValidOp"
+            valid_op.isSuppressed = False
+            valid_op.hasToolpath = True
+            valid_op.isToolpathValid = True
+
+            empty_op = MagicMock()
+            empty_op.name = "EmptyOp"
+            empty_op.isSuppressed = False
+            empty_op.hasToolpath = False
+
+            mock_setup = MagicMock()
+            mock_setup.name = "OilLidSetup"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([valid_op, empty_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([valid_op, empty_op])
+            mock_cam.setups = MockCamCollection([mock_setup])
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+            mock_cam.checkToolpath.side_effect = lambda op: getattr(op, "hasToolpath", True)
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            msgbox_calls = []
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = lambda prompt, title, btn_type, icon_type: (
+                msgbox_calls.append((prompt, title, btn_type, icon_type)) or PostProcessAll.adsk.core.DialogResults.DialogNo
+            )
+
+            mock_app = MagicMock()
+            mock_app.userInterface = mock_ui
+            mock_app.activeDocument = mock_doc
+
+            post_setup_calls = []
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append(args)):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup])
+
+            self.assertEqual(len(msgbox_calls), 1, "Must prompt user with modal messageBox")
+            prompt, title, btn_type, icon_type = msgbox_calls[0]
+            self.assertIn("empty or invalid toolpaths", prompt)
+            self.assertIn("OilLidSetup", prompt)
+            self.assertIn("EmptyOp", prompt)
+            self.assertEqual(btn_type, PostProcessAll.adsk.core.MessageBoxButtonTypes.YesNoButtonType)
+            self.assertEqual(len(post_setup_calls), 0, "Must NOT call PostProcessSetup when aborted on No")
+
+    def test_perform_post_process_empty_toolpath_modal_proceed_on_yes(self):
+        """Verify PerformPostProcess posts ONLY valid operations when user clicks Yes on empty toolpath prompt."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            params_dict = {
+                "nc_program_output_folder": MagicMock(value=MagicMock(value=tmp_dir)),
+                "nc_program_nc_extension": MagicMock(value=MagicMock(value=".nc")),
+                "nc_program_name": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_filename": MagicMock(value=MagicMock(value="Prog")),
+                "nc_program_openInEditor": MagicMock(value=MagicMock(value=False)),
+            }
+            mock_params = MagicMock()
+            mock_params.itemByName.side_effect = lambda k: params_dict.get(k)
+
+            mock_prog = MagicMock()
+            mock_prog.parameters = mock_params
+            mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+            valid_op = MagicMock()
+            valid_op.name = "ValidOp"
+            valid_op.isSuppressed = False
+            valid_op.hasToolpath = True
+            valid_op.isToolpathValid = True
+
+            empty_op = MagicMock()
+            empty_op.name = "EmptyOp"
+            empty_op.isSuppressed = False
+            empty_op.hasToolpath = False
+
+            mock_setup = MagicMock()
+            mock_setup.name = "OilLidSetup"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([valid_op, empty_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([valid_op, empty_op])
+            mock_cam.setups = MockCamCollection([mock_setup])
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+            mock_cam.checkToolpath.side_effect = lambda op: getattr(op, "hasToolpath", True)
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            msgbox_calls = []
+            mock_progress = MagicMock()
+            mock_progress.wasCancelled = False
+
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = lambda prompt, title, btn_type, icon_type: (
+                msgbox_calls.append((prompt, title, btn_type, icon_type)) or PostProcessAll.adsk.core.DialogResults.DialogYes
+            )
+            mock_ui.createProgressDialog.return_value = mock_progress
+
+            mock_app = MagicMock()
+            mock_app.userInterface = mock_ui
+            mock_app.activeDocument = mock_doc
+
+            post_setup_calls = []
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append((args, kwargs))), \
+                 patch("PostProcessAll._NotifyPostProcessResult"):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup])
+
+            self.assertEqual(len(msgbox_calls), 1)
+            self.assertEqual(len(post_setup_calls), 1, "Must proceed to PostProcessSetup on Yes")
+            # Verify target_operations passed to PostProcessSetup contains only valid_op
+            passed_kwargs = post_setup_calls[0][1]
+            target_ops = passed_kwargs.get("target_operations")
+            self.assertEqual(target_ops, [valid_op])
+
+    def test_standalone_postprocess_setup_empty_toolpath_modal(self):
+        """Verify PostProcessSetup prompts user when called standalone without prior confirmation."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        class MockCamCollection(list):
+            @property
+            def count(self):
+                return len(self)
+            def item(self, idx):
+                return self[idx]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            valid_op = MagicMock()
+            valid_op.name = "ValidOp"
+            valid_op.isSuppressed = False
+            valid_op.hasToolpath = True
+            valid_op.isToolpathValid = True
+
+            empty_op = MagicMock()
+            empty_op.name = "EmptyOp"
+            empty_op.isSuppressed = False
+            empty_op.hasToolpath = False
+
+            mock_setup = MagicMock()
+            mock_setup.name = "StandaloneSetup"
+            mock_setup.isSuppressed = False
+            mock_setup.allOperations = MockCamCollection([valid_op, empty_op])
+
+            mock_cam = MagicMock()
+            mock_cam.allOperations = MockCamCollection([valid_op, empty_op])
+            mock_cam.checkToolpath.side_effect = lambda op: getattr(op, "hasToolpath", True)
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_doc.attributes.itemByName.return_value = None
+
+            mock_prog = MagicMock()
+            mock_prog.parameters.itemByName.side_effect = lambda k: MagicMock(value=MagicMock(value=".nc"))
+
+            # Test 1: User selects No -> returns 'Operation cancelled by user.'
+            msgbox_calls = []
+            mock_ui = MagicMock()
+            mock_ui.messageBox.side_effect = lambda prompt, title, btn_type, icon_type: (
+                msgbox_calls.append((prompt, title, btn_type, icon_type)) or PostProcessAll.adsk.core.DialogResults.DialogNo
+            )
+            mock_app = MagicMock(userInterface=mock_ui, activeDocument=mock_doc)
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app):
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll.PostProcessSetup(
+                    "StandaloneSetup", mock_setup, tmp_dir, doc_settings, mock_prog,
+                    target_operations=[valid_op, empty_op]
+                )
+                self.assertEqual(res, "Operation cancelled by user.")
+                self.assertEqual(len(msgbox_calls), 1)
+                self.assertIn("StandaloneSetup", msgbox_calls[0][0])
+                self.assertIn("EmptyOp", msgbox_calls[0][0])
+
     def test_post_process_setup_non_destructive_writeability_check(self):
         """Verify PostProcessSetup does not destroy/truncate existing file during initial write check."""
         import PostProcessAll

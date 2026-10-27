@@ -395,6 +395,10 @@ def _resolve_setup_for_object(obj, cam=None):
 
 class SetupOperationsMap(dict):
     """Dictionary mapping Setup to operations list, safe for unhashable adsk.cam.Setup objects."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.empty_or_invalid_ops = []
+
     def __setitem__(self, key, value):
         k = getattr(key, "name", key) if not isinstance(key, str) else key
         super().__setitem__(k, value)
@@ -444,6 +448,67 @@ def _lookup_setup_ops(setup, setup_operations_map):
     if hasattr(setup_operations_map, "get"):
         return setup_operations_map.get(setup, None)
     return None
+
+
+def _check_operation_toolpath_status(op, cam=None):
+    """
+    Check if a CAM operation has an empty or invalid toolpath.
+
+    Returns:
+        (is_empty_or_invalid: bool, reason: str)
+        where reason is 'Empty toolpath', 'Invalid toolpath', or '' if valid.
+    """
+    if getattr(op, "isSuppressed", False):
+        return False, ""
+
+    # 1. Check hasToolpath
+    has_tp = getattr(op, "hasToolpath", None)
+    if has_tp is not None:
+        try:
+            if not bool(has_tp):
+                return True, "Empty toolpath"
+        except Exception:
+            pass
+
+    # 2. Check operationState if available
+    op_state = getattr(op, "operationState", None)
+    if op_state is not None:
+        try:
+            val = getattr(op_state, "value", op_state)
+            if val == 3:
+                return True, "Empty toolpath"
+            if val == 1:
+                return True, "Invalid toolpath"
+            cam_mod = sys.modules.get("adsk.cam")
+            states_enum = getattr(cam_mod, "OperationStates", None)
+            if states_enum is not None:
+                if op_state == getattr(states_enum, "NoToolpathOperationState", None):
+                    return True, "Empty toolpath"
+                if op_state == getattr(states_enum, "IsInvalidOperationState", None):
+                    return True, "Invalid toolpath"
+        except Exception:
+            pass
+
+    # 3. Check isToolpathValid
+    tp_valid = getattr(op, "isToolpathValid", None)
+    if tp_valid is not None:
+        try:
+            if not bool(tp_valid):
+                return True, "Invalid toolpath"
+        except Exception:
+            pass
+
+    # 4. Check cam.checkToolpath(op) if available
+    if cam is not None and hasattr(cam, "checkToolpath"):
+        try:
+            if not cam.checkToolpath(op):
+                if has_tp is False:
+                    return True, "Empty toolpath"
+                return True, "Invalid toolpath"
+        except Exception:
+            pass
+
+    return False, ""
 
 
 def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
@@ -515,6 +580,8 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
     target_setups = list(nc_prog_setups)
 
     setup_operations_map = SetupOperationsMap()
+    all_empty_or_invalid = []
+
     for s in target_setups:
         all_s_ops = getattr(s, "allOperations", [])
         all_s_ops_list = _extract_cam_collection(all_s_ops)
@@ -524,14 +591,13 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
             for ws in whole_setups
         )
         if is_whole:
-            valid_ops = [
+            cand_ops = [
                 op for op in all_s_ops_list
-                if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)
+                if not getattr(op, "isSuppressed", False)
             ]
         else:
             chosen_ops = selected_ops_by_setup.get(s, [])
-
-            valid_ops = []
+            cand_ops = []
             for op in all_s_ops_list:
                 is_match = any(
                     op == c_op or
@@ -539,11 +605,20 @@ def GetNcProgramSetupsAndOperations(cam, settings, setups=None, program=None):
                     (getattr(op, "name", None) is not None and getattr(op, "name", None) == getattr(c_op, "name", None))
                     for c_op in chosen_ops
                 )
-                if is_match and not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True):
-                    valid_ops.append(op)
+                if is_match and not getattr(op, "isSuppressed", False):
+                    cand_ops.append(op)
+
+        valid_ops = []
+        for op in cand_ops:
+            is_bad, reason = _check_operation_toolpath_status(op, cam=cam)
+            if is_bad:
+                all_empty_or_invalid.append((s, op, reason))
+            else:
+                valid_ops.append(op)
 
         setup_operations_map[s] = valid_ops
 
+    setup_operations_map.empty_or_invalid_ops = all_empty_or_invalid
     return target_setups, setup_operations_map
 
 
@@ -813,6 +888,33 @@ def PerformPostProcess(docSettings, setups=None):
 
         # Save settings in document attributes
         settingsMgr.SaveSettings(doc.attributes, docSettings)
+
+        # Check upfront if any operations have empty or invalid toolpaths
+        empty_invalid = getattr(setup_operations_map, "empty_or_invalid_ops", [])
+        if empty_invalid and ui:
+            lines = []
+            for s, op, reason in empty_invalid:
+                s_name = getattr(s, "name", "Setup")
+                op_name = getattr(op, "name", "Operation")
+                lines.append(f"• Setup '{s_name}' -> Operation '{op_name}' ({reason})")
+
+            op_list_str = "\n".join(lines)
+            prompt = (
+                f"The following operation(s) have empty or invalid toolpaths:\n\n"
+                f"{op_list_str}\n\n"
+                f"Do you want to proceed?"
+            )
+            res = ui.messageBox(
+                prompt,
+                constCmdName,
+                adsk.core.MessageBoxButtonTypes.YesNoButtonType,
+                adsk.core.MessageBoxIconTypes.WarningIconType
+            )
+            if res != adsk.core.DialogResults.DialogYes:
+                _dbg_global("PerformPostProcess: user chose not to proceed with empty/invalid toolpaths; aborting.")
+                return  # abort!
+
+        docSettings["_empty_toolpaths_confirmed"] = True
 
         if len(setups) != 0 and cam.allOperations.count != 0:
             # Check upfront if any final output file already exists.
@@ -2224,7 +2326,9 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
     active_ops = [
         op for op in cand_list
-        if not getattr(op, "isSuppressed", False) and getattr(op, "hasToolpath", True)
+        if not getattr(op, "isSuppressed", False)
+        and getattr(op, "hasToolpath", True)
+        and getattr(op, "isToolpathValid", True)
     ]
     batches = []
     i = 0
@@ -2483,6 +2587,38 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
         
+        # Check toolpaths if called standalone without PerformPostProcess
+        if not docSettings.get("_empty_toolpaths_confirmed", False):
+            cand_ops = target_operations if target_operations is not None else _extract_cam_collection(getattr(setup, "allOperations", []))
+            direct_empty_invalid = []
+            for op in cand_ops:
+                is_bad, reason = _check_operation_toolpath_status(op, cam=cam)
+                if is_bad:
+                    direct_empty_invalid.append((setup, op, reason))
+            if direct_empty_invalid and ui:
+                lines = [f"• Setup '{getattr(s, 'name', 'Setup')}' -> Operation '{getattr(op, 'name', 'Operation')}' ({r})" for s, op, r in direct_empty_invalid]
+                prompt = (
+                    f"The following operation(s) have empty or invalid toolpaths:\n\n"
+                    f"{chr(10).join(lines)}\n\n"
+                    f"Do you want to proceed?"
+                )
+                res = ui.messageBox(
+                    prompt,
+                    constCmdName,
+                    adsk.core.MessageBoxButtonTypes.YesNoButtonType,
+                    adsk.core.MessageBoxIconTypes.WarningIconType
+                )
+                if res != adsk.core.DialogResults.DialogYes:
+                    _dbg_global("PostProcessSetup: user chose not to proceed with empty/invalid toolpaths; aborting.")
+                    return "Operation cancelled by user."
+            docSettings["_empty_toolpaths_confirmed"] = True
+
+        if target_operations is None:
+            cand_ops = _extract_cam_collection(getattr(setup, "allOperations", []))
+            target_operations = [op for op in cand_ops if not _check_operation_toolpath_status(op, cam=cam)[0]]
+        else:
+            target_operations = [op for op in target_operations if not _check_operation_toolpath_status(op, cam=cam)[0]]
+
         # Make sure toolpaths are valid
         ops_to_check = target_operations if target_operations is not None else [setup]
         for item in ops_to_check:

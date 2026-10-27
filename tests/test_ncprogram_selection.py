@@ -358,6 +358,70 @@ class TestNCProgramSelection(unittest.TestCase):
         self.assertEqual(selected_ops, [self.op1_1, self.op1_2])
         self.assertNotIn(self.op1_3, selected_ops)
 
+    def test_check_operation_toolpath_status(self):
+        """Verify _check_operation_toolpath_status correctly detects suppressed, empty, and invalid operations."""
+        from PostProcessAll import _check_operation_toolpath_status
+
+        # Suppressed op is not flagged
+        suppressed_op = MockOperation("SuppressedOp", 701, is_suppressed=True, has_toolpath=False)
+        self.assertEqual(_check_operation_toolpath_status(suppressed_op), (False, ""))
+
+        # Op with hasToolpath=False
+        empty_op = MockOperation("EmptyOp", 702, has_toolpath=False)
+        self.assertEqual(_check_operation_toolpath_status(empty_op), (True, "Empty toolpath"))
+
+        # Op with operationState=3 (NoToolpathOperationState)
+        no_tp_op = MockOperation("NoTpOp", 703)
+        no_tp_op.operationState = 3
+        self.assertEqual(_check_operation_toolpath_status(no_tp_op), (True, "Empty toolpath"))
+
+        # Op with operationState=1 (IsInvalidOperationState)
+        invalid_state_op = MockOperation("InvalidStateOp", 704)
+        invalid_state_op.operationState = 1
+        self.assertEqual(_check_operation_toolpath_status(invalid_state_op), (True, "Invalid toolpath"))
+
+        # Op with isToolpathValid=False
+        invalid_validity_op = MockOperation("InvalidValidityOp", 705)
+        invalid_validity_op.isToolpathValid = False
+        self.assertEqual(_check_operation_toolpath_status(invalid_validity_op), (True, "Invalid toolpath"))
+
+        # Op failing cam.checkToolpath
+        mock_cam = types.SimpleNamespace(checkToolpath=lambda op: False)
+        failing_check_op = MockOperation("FailingCheckOp", 706)
+        self.assertEqual(_check_operation_toolpath_status(failing_check_op, cam=mock_cam), (True, "Invalid toolpath"))
+
+        # Valid op
+        valid_op = MockOperation("ValidOp", 707)
+        mock_cam_valid = types.SimpleNamespace(checkToolpath=lambda op: True)
+        self.assertEqual(_check_operation_toolpath_status(valid_op, cam=mock_cam_valid), (False, ""))
+
+    def test_ncprogram_detects_empty_and_invalid_toolpaths(self):
+        """Verify GetNcProgramSetupsAndOperations collects empty/invalid ops and excludes them from valid ops."""
+        from PostProcessAll import GetNcProgramSetupsAndOperations
+
+        valid_op = MockOperation("Op1_Valid", 801)
+        empty_op = MockOperation("Op2_Empty", 802, has_toolpath=False)
+        invalid_op = MockOperation("Op3_Invalid", 803)
+        invalid_op.isToolpathValid = False
+        suppressed_op = MockOperation("Op4_Suppressed", 804, is_suppressed=True)
+
+        setup = MockSetup("OilLidSetup", operations=[valid_op, empty_op, invalid_op, suppressed_op])
+        self.cam.setups = [setup]
+
+        target_setups, op_map = GetNcProgramSetupsAndOperations(self.cam, self.settings, program=MockNCProgram(operations=[]))
+
+        self.assertIn(setup, target_setups)
+        # valid_ops must contain only the valid operation
+        self.assertEqual(op_map[setup], [valid_op])
+
+        # empty_or_invalid_ops must record empty and invalid operations, excluding suppressed
+        empty_invalid = getattr(op_map, "empty_or_invalid_ops", [])
+        self.assertEqual(len(empty_invalid), 2)
+        flagged_ops = [(s.name, op.name, reason) for s, op, reason in empty_invalid]
+        self.assertIn(("OilLidSetup", "Op2_Empty", "Empty toolpath"), flagged_ops)
+        self.assertIn(("OilLidSetup", "Op3_Invalid", "Invalid toolpath"), flagged_ops)
+
 
 if __name__ == "__main__":
     unittest.main()
+
