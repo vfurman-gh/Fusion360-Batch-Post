@@ -89,16 +89,13 @@ a test for this.
 
 ## 3. Phased plan
 
-### Phase 0 — Correct detection (deferred by decision 1; still the first step before Phase 1)
-- Replace `_GetSetupStockMode` with an enum check on `setup.stockMode`. Keep the explicit
-  user-facing error.
-- Remove `stockSolids`-count and parameter-name heuristics. Pass the enum name in the dumper
-  config. Remove the `getParameter("job:stockMode")` probe from the dumper.
-- Tests: mock `setup.stockMode` with each enum value. Check that stale `stockSolids` with a box
-  mode is *not* rejected.
-- Manual Fusion retest with a "From Preceding Setup" setup.
+### Phase 0 — Correct detection (COMPLETED in commit `decae38`)
+- Replaced `_GetSetupStockMode` with typed enum check on `setup.stockMode` (`adsk.cam.SetupStockModes`).
+- Eliminated `stockSolids`-count heuristic so setups with stale solid collections retain correct box/cylinder classification.
+- Removed `getParameter("job:stockMode")` fallback probe from `universal_dumper.cps`; stock mode is passed cleanly via sidecar configuration.
+- Added comprehensive unit tests in `tests/test_postprocessall_pipeline_integration.py`.
 
-### Phase 1 — "From Solid"
+### Phase 1 — "From Solid" (ACTIVE TARGET)
 - Read `setup.stockSolids` (BRep or Mesh). Tessellate BRep bodies with
   `meshManager.createMeshCalculator()`. Use mesh bodies directly.
 - Transform vertices to setup WCS with `setup.workCoordinateSystem` (inverted). Verify the
@@ -107,37 +104,25 @@ a test for this.
   tolerance. Set the floor to the solid's min Z.
 - Turning: R-Z outer envelope per Z slice, padded. Optionally an inner profile for bores.
   Error out if the solid isn't reasonably centered on the spindle axis.
-- This also enables Option B for preceding setups.
+- **Enables Option B for multi-setup parts**: Users with multi-setup parts can use *Simulation → Save Stock* on Op 1 and assign the saved body as "From Solid" in Op 2.
 
-### Phase 2 — "From Preceding Setup" (Option A, stored IPW)
-Predecessors are **never run implicitly** (decision 4). Every successful setup run stores its
-final IPW (§4). A child setup loads its predecessor's stored IPW. If it can't, the child stops.
+### Phase 2 — "From Preceding Setup" (Option A, stored IPW) — DEFERRED
+**Status: Deferred to a later stage.**
 
-1. **Resolve the predecessor** by browser order (`cam.setups`): the nearest earlier,
-   non-suppressed setup.
-2. **Load and validate** the predecessor's stored IPW (§4.3). If it is missing, stale, failed, or
-   unreadable, stop with **no output** and an error such as:
-   > Setup 'Op2' uses stock from preceding setup 'Op1', but no up-to-date stock result for
-   > 'Op1' was found. Post process these setups first, in this order: Op1. Then run 'Op2' again.
-
-   If the predecessor itself uses "From Preceding Setup" and its stored IPW is stale, list the
-   whole chain in order. The chain check comes for free from the hash chaining in §4.3.
-3. **Transfer** the IPW using `T = WCS_child⁻¹ · WCS_parent`:
-   - Translation only: exact.
-   - 180° flip about X or Y: conservative (the new bottom is full material) until `z_bottom`
-     exists.
-   - Any other rotation (decision 2): use a **coarse conservative envelope** and continue with
-     a **warning**. For milling, this is the axis-aligned bounding box of the transformed IPW
-     in the child frame (a superset). The warning recommends Option B (decision 3):
-     > Setup 'Op2' is rotated relative to 'Op1'. Stock was approximated by its bounding
-     > envelope, so some rapid moves may not be restored and extra collision warnings may
-     > appear. For exact results, use *Simulation → Save Stock* on 'Op1' in Fusion and set
-     > 'Op2' stock to *From Solid* using the saved body.
-4. **Lathe**: rigid (Z, R) transform of the polygon. Chuck obstacles come from the child
-   setup. A non-coaxial transfer (spindle axes not parallel) falls back to the envelope with
-   the same warning.
-5. Simulate the child's cuts with a slightly *undersized* tool so that the stored result never
-   under-estimates material (§2).
+#### Safety Guarantees vs. User Convenience Analysis:
+1. **Is "From Preceding Setup" needed for safety guarantees?**
+   - **No.** The pipeline currently detects `adsk.cam.SetupStockModes.PreviousSetupStock` and aborts immediately with an explicit, user-facing error dialog without writing any NC output. This is a fail-safe, 100% safe state.
+   - At no point is an unverified setup allowed to execute rapids based on unmodeled predecessor stock.
+2. **Safety of Option B (Phase 1) vs. Option A (Phase 2)**:
+   - **Option B (Phase 1) is actually safer than Option A**: Fusion's *Simulation → Save Stock* computes the exact in-process mesh using its internal solid simulation engine (preserving undercuts, exact 180° flips, radial features, and 5-axis cuts). When fed into our Phase 1 "From Solid" verifier, the starting stock for Op 2 is exact.
+   - In contrast, Option A attempts to pass our 2.5D top-only heightfield across setups. Flipped setups lose bottom-side cuts, arbitrary rotations require coarse bounding envelopes, and complex toolpath caching/hash-chaining is required.
+3. **What is "From Preceding Setup" actually for?**
+   - It is purely a **workflow automation convenience**: avoiding the need for the user to manually click *Simulate → Save Stock → Edit Op 2 Setup → Pick Solid*.
+   - Because Phase 1 ("From Solid") already solves the physical multi-setup verification capability safely via Option B, automating the transfer via sidecar `.npz` files can be safely deferred.
+4. **Deferred implementation details (for future reference)**:
+   - Resolve predecessor by browser order (`cam.setups`).
+   - Load and validate stored IPW sidecar (`.ipw.npz`) using Pass 1 toolpath hash validation.
+   - Transfer IPW via $T = WCS_{\text{child}}^{-1} \cdot WCS_{\text{parent}}$.
 
 ### Phase 3 — Optional fidelity upgrade
 - Add `z_bottom` to `HeightfieldGrid` for exact 3-axis flips.
@@ -215,11 +200,9 @@ Any mismatch triggers the stop-and-ask error from Phase 2, step 2.
 
 ---
 
-## 5. Decisions (review of Revision 2)
-1. **Stock-mode detection fix (Phase 0)**: not now. It remains the first step of the plan,
-   to be done before Phase 1.
-2. **Non-flip rotations**: coarse conservative estimate plus a warning.
-3. **Option B** (save stock in Fusion, then use *From Solid*): accepted. It is the workflow
-   recommended in the rotation warning, and in the unsupported-mode error once Phase 1 lands.
-4. **Missing or stale predecessor results**: never run predecessors implicitly. Tell the user
-   which setups to post, in order, and stop without output.
+## 5. Decisions
+1. **Stock-mode detection fix (Phase 0)**: COMPLETED and pushed (`decae38`).
+2. **Phase 2 ("From Preceding Setup")**: DEFERRED. Not required for safety guarantees (unsupported setups are safely rejected with zero NC output); Option B (*Simulation → Save Stock → From Solid*) serves multi-setup parts with exact 3D solid geometry once Phase 1 is in place.
+3. **Phase 1 ("From Solid")**: ACTIVE PRIORITY. Implements direct B-Rep and MeshBody extraction and rasterization/profiling.
+4. **Option B workflow**: Recommended in user-facing messaging when "From Preceding Setup" is encountered.
+
