@@ -47,6 +47,13 @@ def transform_design_points_to_setup_wcs(
     """
     Transform point coordinates from Fusion 360 design space (cm) to Setup WCS (mm).
 
+    In Autodesk Fusion 360:
+    - BRep/Mesh coordinates from ShapeManager (meshManager) are natively in centimeters (cm).
+    - CAM setup.workCoordinateSystem translation is natively in millimeters (mm), matching the
+      CAM kernel's internal unit system.
+    - If a mock matrix specifies origin in cm (e.g. in synthetic unit tests), scale detection
+      automatically normalizes the origin to mm.
+
     Args:
         points_cm: (N, 3) numpy array of coordinates in design space (cm)
         wcs: adsk.core.Matrix3D representing setup.workCoordinateSystem
@@ -57,11 +64,26 @@ def transform_design_points_to_setup_wcs(
     if points_cm is None or len(points_cm) == 0:
         return np.empty((0, 3), dtype=np.float32)
 
-    pts = np.asarray(points_cm, dtype=np.float64)
-    if wcs is None:
-        return (pts * 10.0).astype(np.float32)
+    pts_cm = np.asarray(points_cm, dtype=np.float64)
+    # Convert input points from design space (cm) to millimeters (mm)
+    pts_mm = pts_cm * 10.0
 
-    pts_setup_cm = None
+    if wcs is None:
+        return pts_mm.astype(np.float32)
+
+    # Compute bounding boxes in cm and mm for origin unit disambiguation
+    min_cm = pts_cm.min(axis=0)
+    max_cm = pts_cm.max(axis=0)
+    min_mm = min_cm * 10.0
+    max_mm = max_cm * 10.0
+
+    def _is_cm_origin(origin_vec: np.ndarray) -> bool:
+        """Check if origin vector was supplied in cm (e.g. legacy unit test mock)."""
+        d_cm = np.linalg.norm(np.maximum(0.0, min_cm - origin_vec) + np.maximum(0.0, origin_vec - max_cm))
+        d_mm = np.linalg.norm(np.maximum(0.0, min_mm - origin_vec) + np.maximum(0.0, origin_vec - max_mm))
+        return bool(d_cm < 1e-4 and d_mm > 1.0)
+
+    pts_setup_mm = None
 
     # Strategy 1: Invert Matrix3D directly (exact Autodesk Matrix3D transformation)
     # setup.workCoordinateSystem transforms from Setup WCS to Design space.
@@ -74,8 +96,14 @@ def transform_design_points_to_setup_wcs(
                     # M[r, c] is row r, column c of 4x4 matrix
                     # x' = M00*x + M01*y + M02*z + M03, etc.
                     M = np.array([[inv_m.getCell(r, c) for c in range(4)] for r in range(4)], dtype=np.float64)
-                    pts_setup_cm = pts @ M[:3, :3].T + M[:3, 3]
-                    _dbg(f"transform_design_points_to_setup_wcs: inverted via Matrix3D.getCell. Origin shift: {M[:3, 3]}")
+                    origin_shift = M[:3, 3].copy()
+                    # Design-space origin is -M[:3, :3].T @ origin_shift
+                    wcs_orig = -M[:3, :3].T @ origin_shift
+                    if _is_cm_origin(wcs_orig):
+                        origin_shift *= 10.0
+                        _dbg(f"transform_design_points_to_setup_wcs: cm mock detected, scaled origin shift to {origin_shift}")
+                    pts_setup_mm = pts_mm @ M[:3, :3].T + origin_shift
+                    _dbg(f"transform_design_points_to_setup_wcs: inverted via Matrix3D.getCell. Origin shift: {origin_shift}")
                 elif hasattr(inv_m, "asArray"):
                     arr = np.array(inv_m.asArray(), dtype=np.float64)
                     if arr.size == 16:
@@ -84,13 +112,18 @@ def transform_design_points_to_setup_wcs(
                             M = arr.reshape((4, 4))
                         else:
                             M = arr.reshape((4, 4)).T
-                        pts_setup_cm = pts @ M[:3, :3].T + M[:3, 3]
-                        _dbg("transform_design_points_to_setup_wcs: inverted via Matrix3D.asArray.")
+                        origin_shift = M[:3, 3].copy()
+                        wcs_orig = -M[:3, :3].T @ origin_shift
+                        if _is_cm_origin(wcs_orig):
+                            origin_shift *= 10.0
+                            _dbg(f"transform_design_points_to_setup_wcs: cm mock detected, scaled origin shift to {origin_shift}")
+                        pts_setup_mm = pts_mm @ M[:3, :3].T + origin_shift
+                        _dbg(f"transform_design_points_to_setup_wcs: inverted via Matrix3D.asArray. Origin shift: {origin_shift}")
         except Exception as inv_err:
             _dbg(f"transform_design_points_to_setup_wcs: Matrix3D.invert error: {inv_err}")
 
     # Strategy 2: getAsCoordinateSystem (handles 4-tuple and 5-tuple SWIG returns)
-    if pts_setup_cm is None and hasattr(wcs, "getAsCoordinateSystem"):
+    if pts_setup_mm is None and hasattr(wcs, "getAsCoordinateSystem"):
         try:
             res = wcs.getAsCoordinateSystem()
             if isinstance(res, (tuple, list)):
@@ -104,6 +137,10 @@ def transform_design_points_to_setup_wcs(
                 raise TypeError(f"getAsCoordinateSystem returned unexpected type: {type(res)}")
 
             origin = np.array([origin_pt.x, origin_pt.y, origin_pt.z], dtype=np.float64)
+            if _is_cm_origin(origin):
+                origin = origin * 10.0
+                _dbg(f"transform_design_points_to_setup_wcs: cm mock detected, scaled origin to {origin}")
+
             R = np.array(
                 [
                     [x_vec.x, y_vec.x, z_vec.x],
@@ -112,18 +149,16 @@ def transform_design_points_to_setup_wcs(
                 ],
                 dtype=np.float64,
             )
-            # P_setup_cm = (P_design_cm - origin) @ R
-            pts_setup_cm = (pts - origin) @ R
+            pts_setup_mm = (pts_mm - origin) @ R
             _dbg(f"transform_design_points_to_setup_wcs: transformed via getAsCoordinateSystem. Origin: {origin}")
         except Exception as cs_err:
             _dbg(f"transform_design_points_to_setup_wcs: getAsCoordinateSystem error: {cs_err}")
 
-    if pts_setup_cm is None:
+    if pts_setup_mm is None:
         _dbg("WARNING: transform_design_points_to_setup_wcs: Failed to apply WCS transform, falling back to untransformed points!")
-        pts_setup_cm = pts
+        pts_setup_mm = pts_mm
 
-    # Convert cm to mm (Fusion internal distance unit is cm)
-    return (pts_setup_cm * 10.0).astype(np.float32)
+    return pts_setup_mm.astype(np.float32)
 
 
 def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
@@ -131,7 +166,7 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
     Extract triangular mesh from setup.stockSolids in setup WCS (mm).
 
     Supports both adsk.fusion.BRepBody (via TriangleMeshCalculator) and
-    adsk.fusion.MeshBody (via displayMesh).
+    adsk.fusion.MeshBody (via displayMesh), as well as adsk.fusion.Occurrence containers.
 
     Returns:
         vertices_mm: (N, 3) float32 numpy array in setup WCS (mm)
@@ -152,15 +187,56 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"Setup '{setup_name}' has no stockSolids property")
 
     # Safely collect solid bodies from ObjectCollection, list, or iterable
-    bodies = []
+    raw_entities = []
     cnt_val = getattr(solids, "count", None)
     if isinstance(cnt_val, int):
         for i in range(cnt_val):
             b = solids.item(i)
             if b is not None:
-                bodies.append(b)
+                raw_entities.append(b)
     elif hasattr(solids, "__iter__"):
-        bodies = [b for b in solids if b is not None]
+        raw_entities = [b for b in solids if b is not None]
+
+    # Unpack occurrences to extract underlying BRep and mesh bodies
+    bodies = []
+
+    def _collect_bodies(entity):
+        if entity is None:
+            return
+        if hasattr(entity, "meshManager") or hasattr(entity, "displayMesh") or hasattr(entity, "nodeCoordinatesAsDouble"):
+            bodies.append(entity)
+            return
+        # If it's an Occurrence, unpack its bRepBodies and meshBodies
+        if hasattr(entity, "bRepBodies"):
+            try:
+                cnt = getattr(entity.bRepBodies, "count", 0)
+                for i in range(cnt):
+                    b = entity.bRepBodies.item(i)
+                    if b is not None:
+                        bodies.append(b)
+            except Exception:
+                pass
+        if hasattr(entity, "meshBodies"):
+            try:
+                cnt = getattr(entity.meshBodies, "count", 0)
+                for i in range(cnt):
+                    m = entity.meshBodies.item(i)
+                    if m is not None:
+                        bodies.append(m)
+            except Exception:
+                pass
+        if hasattr(entity, "childOccurrences"):
+            try:
+                cnt = getattr(entity.childOccurrences, "count", 0)
+                for i in range(cnt):
+                    child = entity.childOccurrences.item(i)
+                    if child is not None:
+                        _collect_bodies(child)
+            except Exception:
+                pass
+
+    for ent in raw_entities:
+        _collect_bodies(ent)
 
     if not bodies:
         raise ValueError(

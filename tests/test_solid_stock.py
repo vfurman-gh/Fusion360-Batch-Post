@@ -190,6 +190,78 @@ class TestSolidMeshStock(unittest.TestCase):
         np.testing.assert_allclose(pts_mat_mm[0], [0.0, 0.0, 0.0], atol=1e-5)
         np.testing.assert_allclose(pts_mat_mm[1], [20.0, -50.0, 30.0], atol=1e-5)
 
+    def test_transform_design_points_to_setup_wcs_native_fusion_cam_mm_origin(self):
+        """
+        Verify native Fusion 360 CAM WCS matrix where translation is in millimeters (e.g. OilLid).
+        Design coordinates (cm): X in [-5.45, 6.895], Y in [-1.58, 1.72], Z in [0.0, 1.27].
+        WCS Origin (mm): Top center at [7.224314, 0.721522, 12.7].
+        In setup WCS, stock must be centered at X=0, Y=0, with top surface at Z=0 and bottom at Z=-12.7 mm.
+        """
+        class MockFusionMatrix3D:
+            def __init__(self, m_cells):
+                self.m = np.array(m_cells, dtype=np.float64)
+            def copy(self):
+                return MockFusionMatrix3D(self.m.copy())
+            def invert(self):
+                self.m = np.linalg.inv(self.m)
+                return True
+            def getCell(self, r, c):
+                return float(self.m[r, c])
+
+        # Setup WCS -> Design Space matrix with mm translation
+        cam_wcs = MockFusionMatrix3D([
+            [1.0, 0.0, 0.0,  7.22431426],
+            [0.0, 1.0, 0.0,  0.72152152],
+            [0.0, 0.0, 1.0, 12.70000000],
+            [0.0, 0.0, 0.0,  1.0],
+        ])
+
+        # Design points in centimeters (cm)
+        pts_design_cm = np.array([
+            [-5.45021582, -1.57867205, 0.0],
+            [ 6.89507866,  1.72297633, 1.27],
+        ], dtype=np.float64)
+
+        pts_wcs_mm = transform_design_points_to_setup_wcs(pts_design_cm, cam_wcs)
+
+        # In mm:
+        # X: [-54.5021582 - 7.22431426, 68.9507866 - 7.22431426] = [-61.72647, +61.72647] (symmetric!)
+        np.testing.assert_allclose(pts_wcs_mm[0, 0], -61.72647, atol=1e-3)
+        np.testing.assert_allclose(pts_wcs_mm[1, 0],  61.72647, atol=1e-3)
+
+        # Y: [-15.78672 - 0.72152, 17.22976 - 0.72152] = [-16.50824, +16.50824] (symmetric!)
+        np.testing.assert_allclose(pts_wcs_mm[0, 1], -16.50824, atol=1e-3)
+        np.testing.assert_allclose(pts_wcs_mm[1, 1],  16.50824, atol=1e-3)
+
+        # Z: [0.0 - 12.7, 12.7 - 12.7] = [-12.7, 0.0] mm
+        np.testing.assert_allclose(pts_wcs_mm[0, 2], -12.7, atol=1e-3)
+        np.testing.assert_allclose(pts_wcs_mm[1, 2],   0.0, atol=1e-3)
+
+    def test_extract_mesh_from_fusion_setup_with_occurrence(self):
+        """Verify extraction from an Occurrence containing child BRepBody."""
+        mock_setup = MagicMock()
+        mock_setup.name = "OccurrenceSetup"
+        mock_setup.workCoordinateSystem = None
+
+        mock_body = MagicMock()
+        mock_calc = MagicMock()
+        mock_mesh = MagicMock()
+        mock_mesh.nodeCoordinatesAsDouble = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        mock_mesh.nodeIndices = [0, 1, 2]
+        mock_calc.calculate.return_value = mock_mesh
+        mock_body.meshManager.createMeshCalculator.return_value = mock_calc
+
+        mock_occ = MagicMock(spec=["bRepBodies", "meshBodies", "childOccurrences"])
+        mock_occ.bRepBodies.count = 1
+        mock_occ.bRepBodies.item.return_value = mock_body
+        mock_occ.meshBodies.count = 0
+        mock_occ.childOccurrences.count = 0
+
+        mock_setup.stockSolids = [mock_occ]
+        v_mm, idx = extract_mesh_from_fusion_setup(mock_setup)
+        self.assertEqual(len(v_mm), 3)
+        np.testing.assert_allclose(v_mm[1], [10.0, 0.0, 0.0])
+
     def test_solid_mesh_stock_3d_model(self):
         """Verify SolidMeshStock3D bounds and initialization."""
         verts = np.array([

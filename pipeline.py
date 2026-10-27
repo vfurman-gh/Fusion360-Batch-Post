@@ -364,6 +364,17 @@ class PipelineOrchestrator:
                         from geometry.mill_engine import MillClearanceVerifier
                         verifier = MillClearanceVerifier()
 
+            if segments:
+                all_x = [s.start.x for s in segments] + [s.end.x for s in segments]
+                all_y = [s.start.y for s in segments] + [s.end.y for s in segments]
+                all_z = [s.start.z for s in segments] + [s.end.z for s in segments]
+                _dbg_pipe(
+                    f"PipelineOrchestrator.run: toolpath bounds (mm) "
+                    f"X=[{min(all_x):.2f}, {max(all_x):.2f}], "
+                    f"Y=[{min(all_y):.2f}, {max(all_y):.2f}], "
+                    f"Z=[{min(all_z):.2f}, {max(all_z):.2f}]"
+                )
+
             report = verifier.verify_toolpath(segments, tools_by_op, workpiece)
             _dbg_pipe(
                 f"PipelineOrchestrator.run: report.volume={report.total_volume_removed_mm3:.3f} mm³, "
