@@ -203,6 +203,6 @@ Any mismatch triggers the stop-and-ask error from Phase 2, step 2.
 ## 5. Decisions
 1. **Stock-mode detection fix (Phase 0)**: COMPLETED and pushed (`decae38`).
 2. **Phase 2 ("From Preceding Setup")**: DEFERRED. Not required for safety guarantees (unsupported setups are safely rejected with zero NC output); Option B (*Simulation → Save Stock → From Solid*) serves multi-setup parts with exact 3D solid geometry once Phase 1 is in place.
-3. **Phase 1 ("From Solid")**: ACTIVE PRIORITY. Implements direct B-Rep and MeshBody extraction and rasterization/profiling.
-4. **Option B workflow**: Recommended in user-facing messaging when "From Preceding Setup" is encountered.
+3. **Phase 1 ("From Solid")**: COMPLETED and pushed (`3923614`). Implements direct B-Rep and MeshBody extraction, WCS transforms, 2.5D heightfield rasterization, and lathe spindle-axis centering profile extraction.
+4. **Option B workflow**: Active in production. When multi-setup parts require stock transfer, users save stock in Simulation and select it as "From Solid", which is verified with exact 3D geometry.
 
