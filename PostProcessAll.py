@@ -914,8 +914,6 @@ def PerformPostProcess(docSettings, setups=None):
                 _dbg_global("PerformPostProcess: user chose not to proceed with empty/invalid toolpaths; aborting.")
                 return  # abort!
 
-        docSettings["_empty_toolpaths_confirmed"] = True
-
         if len(setups) != 0 and cam.allOperations.count != 0:
             # Check upfront if any final output file already exists.
             # When the final output file already exists, modally ask user if to overwrite it (Yes/No, No aborts).
@@ -2561,7 +2559,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
 
 
-def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations=None, progress_cb=None):
+def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_operations, progress_cb=None):
     ui = None
     retVal = "Fusion reported an exception"
 
@@ -2571,6 +2569,9 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         doc = app.activeDocument
         cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
         parameters = program.parameters
+
+        if not target_operations:
+            return "No active operations specified to post process."
 
         # Verify file name is valid by creating it now
         fileExt = _NormalizeFileExtension(parameters.itemByName("nc_program_nc_extension").value.value)
@@ -2586,42 +2587,9 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
                 os.remove(path)
         except Exception as exc:
             return "Unable to create output file '" + path + "'. Make sure the setup name is valid as a file name."
-        
-        # Check toolpaths if called standalone without PerformPostProcess
-        if not docSettings.get("_empty_toolpaths_confirmed", False):
-            cand_ops = target_operations if target_operations is not None else _extract_cam_collection(getattr(setup, "allOperations", []))
-            direct_empty_invalid = []
-            for op in cand_ops:
-                is_bad, reason = _check_operation_toolpath_status(op, cam=cam)
-                if is_bad:
-                    direct_empty_invalid.append((setup, op, reason))
-            if direct_empty_invalid and ui:
-                lines = [f"• Setup '{getattr(s, 'name', 'Setup')}' -> Operation '{getattr(op, 'name', 'Operation')}' ({r})" for s, op, r in direct_empty_invalid]
-                prompt = (
-                    f"The following operation(s) have empty or invalid toolpaths:\n\n"
-                    f"{chr(10).join(lines)}\n\n"
-                    f"Do you want to proceed?"
-                )
-                res = ui.messageBox(
-                    prompt,
-                    constCmdName,
-                    adsk.core.MessageBoxButtonTypes.YesNoButtonType,
-                    adsk.core.MessageBoxIconTypes.WarningIconType
-                )
-                if res != adsk.core.DialogResults.DialogYes:
-                    _dbg_global("PostProcessSetup: user chose not to proceed with empty/invalid toolpaths; aborting.")
-                    return "Operation cancelled by user."
-            docSettings["_empty_toolpaths_confirmed"] = True
 
-        if target_operations is None:
-            cand_ops = _extract_cam_collection(getattr(setup, "allOperations", []))
-            target_operations = [op for op in cand_ops if not _check_operation_toolpath_status(op, cam=cam)[0]]
-        else:
-            target_operations = [op for op in target_operations if not _check_operation_toolpath_status(op, cam=cam)[0]]
-
-        # Make sure toolpaths are valid
-        ops_to_check = target_operations if target_operations is not None else [setup]
-        for item in ops_to_check:
+        # Ensure toolpaths are generated for active operations
+        for item in target_operations:
             if not cam.checkToolpath(item):
                 if progress_cb and not progress_cb("Generating missing toolpath...", 0.02):
                     return "Operation cancelled by user."
@@ -2640,7 +2608,7 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
                             pass
 
         _dbg = _dbg_global
-        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, target_ops_cnt={len(target_operations) if target_operations is not None else 'all'}")
+        _dbg(f"PostProcessSetup called: fname={fname}, setup={setup.name}, opType={setup.operationType}, target_ops_cnt={len(target_operations)}")
 
         # Unified 2-pass dump & single-pass replay pipeline for all setups
         return _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program, path, fileExt, target_operations=target_operations, progress_cb=progress_cb)

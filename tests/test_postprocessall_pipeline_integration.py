@@ -935,65 +935,35 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             passed_kwargs = post_setup_calls[0][1]
             target_ops = passed_kwargs.get("target_operations")
             self.assertEqual(target_ops, [valid_op])
+            # docSettings must never be polluted with transient confirmation flags
+            self.assertNotIn("_empty_toolpaths_confirmed", doc_settings)
 
-    def test_standalone_postprocess_setup_empty_toolpath_modal(self):
-        """Verify PostProcessSetup prompts user when called standalone without prior confirmation."""
+    def test_postprocess_setup_requires_target_operations_and_rejects_empty(self):
+        """Verify PostProcessSetup requires target_operations and fails fast without UI prompts."""
         import PostProcessAll
         from unittest.mock import MagicMock, patch
 
-        class MockCamCollection(list):
-            @property
-            def count(self):
-                return len(self)
-            def item(self, idx):
-                return self[idx]
+        mock_setup = MagicMock(name="Setup 1")
+        mock_prog = MagicMock()
+        mock_ui = MagicMock()
+        mock_app = MagicMock(userInterface=mock_ui)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            valid_op = MagicMock()
-            valid_op.name = "ValidOp"
-            valid_op.isSuppressed = False
-            valid_op.hasToolpath = True
-            valid_op.isToolpathValid = True
-
-            empty_op = MagicMock()
-            empty_op.name = "EmptyOp"
-            empty_op.isSuppressed = False
-            empty_op.hasToolpath = False
-
-            mock_setup = MagicMock()
-            mock_setup.name = "StandaloneSetup"
-            mock_setup.isSuppressed = False
-            mock_setup.allOperations = MockCamCollection([valid_op, empty_op])
-
-            mock_cam = MagicMock()
-            mock_cam.allOperations = MockCamCollection([valid_op, empty_op])
-            mock_cam.checkToolpath.side_effect = lambda op: getattr(op, "hasToolpath", True)
-
-            mock_doc = MagicMock()
-            mock_doc.products.itemByProductType.return_value = mock_cam
-            mock_doc.attributes.itemByName.return_value = None
-
-            mock_prog = MagicMock()
-            mock_prog.parameters.itemByName.side_effect = lambda k: MagicMock(value=MagicMock(value=".nc"))
-
-            # Test 1: User selects No -> returns 'Operation cancelled by user.'
-            msgbox_calls = []
-            mock_ui = MagicMock()
-            mock_ui.messageBox.side_effect = lambda prompt, title, btn_type, icon_type: (
-                msgbox_calls.append((prompt, title, btn_type, icon_type)) or PostProcessAll.adsk.core.DialogResults.DialogNo
+        with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+             tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Empty target_operations returns error string
+            res_empty = PostProcessAll.PostProcessSetup(
+                "Setup 1", mock_setup, tmp_dir, {}, mock_prog, target_operations=[]
             )
-            mock_app = MagicMock(userInterface=mock_ui, activeDocument=mock_doc)
+            self.assertEqual(res_empty, "No active operations specified to post process.")
 
-            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app):
-                doc_settings = dict(PostProcessAll.defaultSettings)
-                res = PostProcessAll.PostProcessSetup(
-                    "StandaloneSetup", mock_setup, tmp_dir, doc_settings, mock_prog,
-                    target_operations=[valid_op, empty_op]
-                )
-                self.assertEqual(res, "Operation cancelled by user.")
-                self.assertEqual(len(msgbox_calls), 1)
-                self.assertIn("StandaloneSetup", msgbox_calls[0][0])
-                self.assertIn("EmptyOp", msgbox_calls[0][0])
+            # 2. None target_operations returns error string
+            res_none = PostProcessAll.PostProcessSetup(
+                "Setup 1", mock_setup, tmp_dir, {}, mock_prog, target_operations=None
+            )
+            self.assertEqual(res_none, "No active operations specified to post process.")
+
+            # 3. PostProcessSetup never calls ui.messageBox
+            self.assertFalse(mock_ui.messageBox.called, "Worker must never display UI dialogs")
 
     def test_post_process_setup_non_destructive_writeability_check(self):
         """Verify PostProcessSetup does not destroy/truncate existing file during initial write check."""
@@ -1011,9 +981,12 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             mock_program = MagicMock()
             mock_program.parameters.itemByName.return_value = mock_param_ext
 
+            mock_op = MagicMock(name="Op1", isSuppressed=False, hasToolpath=True)
+
             mock_setup = MagicMock()
             mock_setup.name = file_name
             mock_setup.operationType = 1
+            mock_setup.allOperations = [mock_op]
 
             mock_cam = MagicMock()
             mock_cam.checkToolpath.return_value = True
@@ -1030,7 +1003,8 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
 
                 doc_settings = dict(PostProcessAll.defaultSettings)
                 res = PostProcessAll.PostProcessSetup(
-                    file_name, mock_setup, tmp_dir, doc_settings, mock_program
+                    file_name, mock_setup, tmp_dir, doc_settings, mock_program,
+                    target_operations=[mock_op]
                 )
                 self.assertIsNone(res)
 
@@ -1284,10 +1258,11 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         mock_app = MagicMock()
         mock_app.activeDocument = mock_doc
 
+        mock_op = MagicMock(name="Op1", isSuppressed=False, hasToolpath=True)
         mock_setup = MagicMock()
         mock_setup.name = "Setup 1"
         mock_setup.operationType = 0
-        mock_setup.allOperations = []
+        mock_setup.allOperations = [mock_op]
 
         with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
              patch("PostProcessAll._PostProcessUnifiedPipeline", return_value=None), \
@@ -1298,6 +1273,7 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 setupFolder=tmp_dir,
                 docSettings=dict(PostProcessAll.defaultSettings),
                 program=mock_prog,
+                target_operations=[mock_op],
             )
             self.assertIsNone(res)
             # Extension parameter value should not have been overwritten to ".cnc"
