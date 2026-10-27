@@ -447,12 +447,20 @@ def extract_workpiece_from_context(
         WorkpieceDefinition,
     )
 
+    def _dbg_ctx(msg: str) -> None:
+        try:
+            from PostProcessAll import _dbg_global
+            _dbg_global(msg)
+        except Exception:
+            pass
+
     stock_mode = str(
         context_data.get("stockMode")
         or context_data.get("globalParams", {}).get("job:stockMode")
         or context_data.get("globalParams", {}).get("stockMode")
         or ""
     ).lower()
+    _dbg_ctx(f"extract_workpiece_from_context: stock_mode='{stock_mode}', fallback={fallback_workpiece}")
     if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
         return None
     if any(k in stock_mode for k in ("solid", "body")):

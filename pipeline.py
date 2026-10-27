@@ -326,6 +326,15 @@ class PipelineOrchestrator:
             if workpiece is None:
                 workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_workpiece, is_turning=is_turning)
 
+            def _dbg_pipe(msg: str) -> None:
+                try:
+                    from PostProcessAll import _dbg_global
+                    _dbg_global(msg)
+                except Exception:
+                    pass
+
+            _dbg_pipe(f"PipelineOrchestrator.run: workpiece stock={getattr(workpiece, 'stock', None)}")
+
             if workpiece is None or getattr(workpiece, "stock", None) is None:
                 setup_label = f"'{program_name}'" if program_name else "this setup"
                 raise ValueError(
@@ -356,6 +365,10 @@ class PipelineOrchestrator:
                         verifier = MillClearanceVerifier()
 
             report = verifier.verify_toolpath(segments, tools_by_op, workpiece)
+            _dbg_pipe(
+                f"PipelineOrchestrator.run: report.volume={report.total_volume_removed_mm3:.3f} mm³, "
+                f"segments={len(segments)}, promoted_vectors={len(report.promoted_vectors)}"
+            )
 
             # -----------------------------------------------------------------
             # Step 4: Annotate Promoted Air Moves in Combined Context & JSON

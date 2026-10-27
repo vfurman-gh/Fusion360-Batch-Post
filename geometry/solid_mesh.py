@@ -31,6 +31,15 @@ from geometry.models import (
 )
 
 
+def _dbg(msg: str) -> None:
+    """Internal debug logging helper that forwards to PostProcessAll._dbg_global if available."""
+    try:
+        from PostProcessAll import _dbg_global
+        _dbg_global(msg)
+    except Exception:
+        pass
+
+
 def transform_design_points_to_setup_wcs(
     points_cm: np.ndarray,
     wcs: Any,
@@ -49,12 +58,52 @@ def transform_design_points_to_setup_wcs(
         return np.empty((0, 3), dtype=np.float32)
 
     pts = np.asarray(points_cm, dtype=np.float64)
+    if wcs is None:
+        return (pts * 10.0).astype(np.float32)
 
-    if wcs is not None and hasattr(wcs, "getAsCoordinateSystem"):
+    pts_setup_cm = None
+
+    # Strategy 1: Invert Matrix3D directly (exact Autodesk Matrix3D transformation)
+    # setup.workCoordinateSystem transforms from Setup WCS to Design space.
+    # Its inverse transforms from Design space to Setup WCS.
+    if hasattr(wcs, "copy") and hasattr(wcs, "invert"):
         try:
-            origin_pt, x_vec, y_vec, z_vec = wcs.getAsCoordinateSystem()
+            inv_m = wcs.copy()
+            if inv_m.invert():
+                if hasattr(inv_m, "getCell"):
+                    # M[r, c] is row r, column c of 4x4 matrix
+                    # x' = M00*x + M01*y + M02*z + M03, etc.
+                    M = np.array([[inv_m.getCell(r, c) for c in range(4)] for r in range(4)], dtype=np.float64)
+                    pts_setup_cm = pts @ M[:3, :3].T + M[:3, 3]
+                    _dbg(f"transform_design_points_to_setup_wcs: inverted via Matrix3D.getCell. Origin shift: {M[:3, 3]}")
+                elif hasattr(inv_m, "asArray"):
+                    arr = np.array(inv_m.asArray(), dtype=np.float64)
+                    if arr.size == 16:
+                        # Row-major matrix has bottom row [0, 0, 0, 1]
+                        if abs(arr[15] - 1.0) < 1e-4 and abs(arr[12]) < 1e-4 and abs(arr[13]) < 1e-4 and abs(arr[14]) < 1e-4:
+                            M = arr.reshape((4, 4))
+                        else:
+                            M = arr.reshape((4, 4)).T
+                        pts_setup_cm = pts @ M[:3, :3].T + M[:3, 3]
+                        _dbg("transform_design_points_to_setup_wcs: inverted via Matrix3D.asArray.")
+        except Exception as inv_err:
+            _dbg(f"transform_design_points_to_setup_wcs: Matrix3D.invert error: {inv_err}")
+
+    # Strategy 2: getAsCoordinateSystem (handles 4-tuple and 5-tuple SWIG returns)
+    if pts_setup_cm is None and hasattr(wcs, "getAsCoordinateSystem"):
+        try:
+            res = wcs.getAsCoordinateSystem()
+            if isinstance(res, (tuple, list)):
+                if len(res) == 5:
+                    _, origin_pt, x_vec, y_vec, z_vec = res
+                elif len(res) == 4:
+                    origin_pt, x_vec, y_vec, z_vec = res
+                else:
+                    raise ValueError(f"Unexpected getAsCoordinateSystem tuple length: {len(res)}")
+            else:
+                raise TypeError(f"getAsCoordinateSystem returned unexpected type: {type(res)}")
+
             origin = np.array([origin_pt.x, origin_pt.y, origin_pt.z], dtype=np.float64)
-            # R columns are the setup axes in design coordinates
             R = np.array(
                 [
                     [x_vec.x, y_vec.x, z_vec.x],
@@ -65,9 +114,12 @@ def transform_design_points_to_setup_wcs(
             )
             # P_setup_cm = (P_design_cm - origin) @ R
             pts_setup_cm = (pts - origin) @ R
-        except Exception:
-            pts_setup_cm = pts
-    else:
+            _dbg(f"transform_design_points_to_setup_wcs: transformed via getAsCoordinateSystem. Origin: {origin}")
+        except Exception as cs_err:
+            _dbg(f"transform_design_points_to_setup_wcs: getAsCoordinateSystem error: {cs_err}")
+
+    if pts_setup_cm is None:
+        _dbg("WARNING: transform_design_points_to_setup_wcs: Failed to apply WCS transform, falling back to untransformed points!")
         pts_setup_cm = pts
 
     # Convert cm to mm (Fusion internal distance unit is cm)
@@ -91,15 +143,19 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
     if setup is None:
         raise ValueError("Cannot extract stock from None setup")
 
+    setup_name = getattr(setup, "name", "unnamed")
     solids = getattr(setup, "stockSolids", None)
+    cnt = getattr(solids, "count", 0) if solids is not None else 0
+    _dbg(f"extract_mesh_from_fusion_setup: setup='{setup_name}', stockSolids count={cnt}")
+
     if solids is None:
-        raise ValueError(f"Setup '{getattr(setup, 'name', 'unnamed')}' has no stockSolids property")
+        raise ValueError(f"Setup '{setup_name}' has no stockSolids property")
 
     # Safely collect solid bodies from ObjectCollection, list, or iterable
     bodies = []
-    cnt = getattr(solids, "count", None)
-    if isinstance(cnt, int):
-        for i in range(cnt):
+    cnt_val = getattr(solids, "count", None)
+    if isinstance(cnt_val, int):
+        for i in range(cnt_val):
             b = solids.item(i)
             if b is not None:
                 bodies.append(b)
@@ -108,7 +164,7 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
 
     if not bodies:
         raise ValueError(
-            f"Setup '{getattr(setup, 'name', 'unnamed')}' uses 'From Solid' stock, "
+            f"Setup '{setup_name}' uses 'From Solid' stock, "
             "but no stock bodies are selected in the setup."
         )
 
@@ -121,7 +177,10 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
     if adsk_mod and hasattr(adsk_mod, "fusion") and hasattr(adsk_mod.fusion, "TriangleMeshQualityOptions"):
         quality_opt = getattr(adsk_mod.fusion.TriangleMeshQualityOptions, "NormalQualityTriangleMesh", None)
 
-    for body in bodies:
+    for idx_b, body in enumerate(bodies):
+        b_name = getattr(body, "name", f"Body_{idx_b}")
+        b_type = type(body).__name__
+        _dbg(f"extract_mesh_from_fusion_setup: reading body[{idx_b}] '{b_name}' ({b_type})")
         mesh = None
 
         # 1. BRepBody tessellation via meshManager
@@ -136,7 +195,8 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
                         except Exception:
                             pass
                     mesh = calc.calculate()
-            except Exception:
+            except Exception as mm_err:
+                _dbg(f"extract_mesh_from_fusion_setup: createMeshCalculator error for '{b_name}': {mm_err}")
                 mesh = None
 
             if mesh is None and hasattr(mesh_mgr, "displayMeshes"):
@@ -156,6 +216,7 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
                     break
 
         if mesh is None:
+            _dbg(f"extract_mesh_from_fusion_setup: could not obtain mesh for body '{b_name}'")
             continue
 
         try:
@@ -167,20 +228,23 @@ def extract_mesh_from_fusion_setup(setup: Any) -> Tuple[np.ndarray, np.ndarray]:
                 all_verts_cm.append(v)
                 all_indices.append(idx + vert_offset)
                 vert_offset += len(v)
-        except Exception:
-            pass
+                _dbg(f"extract_mesh_from_fusion_setup: extracted {len(v)} vertices, {len(idx)} triangles from '{b_name}'")
+        except Exception as extract_err:
+            _dbg(f"extract_mesh_from_fusion_setup: node extraction error for '{b_name}': {extract_err}")
 
     if not all_verts_cm:
         raise ValueError(
-            f"Failed to extract 3D mesh triangles from stock solids of setup '{getattr(setup, 'name', 'unnamed')}'."
+            f"Failed to extract 3D mesh triangles from stock solids of setup '{setup_name}'."
         )
 
     merged_verts_cm = np.vstack(all_verts_cm)
     merged_indices = np.vstack(all_indices)
+    _dbg(f"extract_mesh_from_fusion_setup: raw merged design coords (cm): min={merged_verts_cm.min(axis=0)}, max={merged_verts_cm.max(axis=0)}")
 
     # Transform coordinates from Fusion design space (cm) to setup WCS (mm)
     wcs = getattr(setup, "workCoordinateSystem", None)
     vertices_mm = transform_design_points_to_setup_wcs(merged_verts_cm, wcs)
+    _dbg(f"extract_mesh_from_fusion_setup: setup WCS coords (mm): min={vertices_mm.min(axis=0)}, max={vertices_mm.max(axis=0)}")
 
     return vertices_mm, merged_indices
 
@@ -450,6 +514,9 @@ def extract_solid_workpiece_from_fusion_setup(
 
         return revolve_mesh_to_lathe_stock(vertices_mm, indices, fixtures=fixtures)
     else:
-        # Milling: create SolidMeshStock3D
         stock = SolidMeshStock3D.from_mesh(vertices_mm, indices)
+        _dbg(
+            f"extract_solid_workpiece_from_fusion_setup: created SolidMeshStock3D for '{getattr(setup, 'name', 'unnamed')}' "
+            f"X=[{stock.x_min:.2f}, {stock.x_max:.2f}], Y=[{stock.y_min:.2f}, {stock.y_max:.2f}], Z=[{stock.z_min:.2f}, {stock.z_max:.2f}]"
+        )
         return WorkpieceDefinition(stock=stock)

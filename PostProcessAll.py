@@ -1347,6 +1347,7 @@ def _GetSetupStockMode(setup) -> str:
     if not setup:
         return ""
 
+    res = ""
     # 1. Primary check: setup.stockMode enum property (Autodesk Fusion typed API)
     val = getattr(setup, "stockMode", None)
     if val is not None and not hasattr(val, "_mock_return_value"):
@@ -1355,31 +1356,32 @@ def _GetSetupStockMode(setup) -> str:
             modes_enum = getattr(adsk.cam, "SetupStockModes", None)
             if modes_enum:
                 if v == getattr(modes_enum, "PreviousSetupStock", 7):
-                    return "previous-setup"
+                    res = "previous-setup"
                 elif v == getattr(modes_enum, "SolidStock", 6):
-                    return "solid"
+                    res = "solid"
                 elif v == getattr(modes_enum, "FixedBoxStock", 0):
-                    return "fixed-box"
+                    res = "fixed-box"
                 elif v == getattr(modes_enum, "RelativeBoxStock", 1):
-                    return "relative-box"
+                    res = "relative-box"
                 elif v == getattr(modes_enum, "FixedCylinderStock", 2):
-                    return "fixed-cylinder"
+                    res = "fixed-cylinder"
                 elif v == getattr(modes_enum, "RelativeCylinderStock", 3):
-                    return "relative-cylinder"
+                    res = "relative-cylinder"
                 elif v == getattr(modes_enum, "FixedTubeStock", 4):
-                    return "fixed-tube"
+                    res = "fixed-tube"
                 elif v == getattr(modes_enum, "RelativeTubeStock", 5):
-                    return "relative-tube"
+                    res = "relative-tube"
         elif isinstance(v, str):
             s = v.lower().strip()
             if "previous" in s or "preceding" in s or "rest" in s:
-                return "previous-setup"
-            if "solid" in s or "body" in s:
-                return "solid"
-            return s
+                res = "previous-setup"
+            elif "solid" in s or "body" in s:
+                res = "solid"
+            else:
+                res = s
 
     # 2. Fallback check for headless test setups or mock objects
-    if hasattr(setup, "parameters") and setup.parameters is not None:
+    if not res and hasattr(setup, "parameters") and setup.parameters is not None:
         for p_name in ("job_stockMode", "stockMode", "job_stockType", "stockType"):
             try:
                 p = setup.parameters.itemByName(p_name)
@@ -1391,14 +1393,19 @@ def _GetSetupStockMode(setup) -> str:
                             if isinstance(pv_sub, (str, int)) and not hasattr(pv_sub, "_mock_return_value"):
                                 s = str(pv_sub).lower().strip()
                                 if "previous" in s or "preceding" in s or "rest" in s:
-                                    return "previous-setup"
-                                if "solid" in s or "body" in s:
-                                    return "solid"
-                                return s
+                                    res = "previous-setup"
+                                elif "solid" in s or "body" in s:
+                                    res = "solid"
+                                else:
+                                    res = s
+                                break
+                    if res:
+                        break
             except Exception:
                 pass
 
-    return ""
+    _dbg_global(f"_GetSetupStockMode: setup='{getattr(setup, 'name', '')}' val={val} -> mode='{res}'")
+    return res
 
 
 def _ExtractWorkpieceFromSetup(setup):
@@ -2143,8 +2150,8 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     report_path = base_no_ext + "_report.md"
     plot_path = base_no_ext + ".png"
 
-    # Reject unsupported stock modes early with explicit error
     stock_mode = _GetSetupStockMode(setup)
+    _dbg(f"_PostProcessUnifiedPipeline: setup '{setup.name}' stock_mode='{stock_mode}'")
     if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
         err_msg = (
             f"Setup '{setup.name}' uses 'From Previous Setup' stock, "
@@ -2350,6 +2357,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         else:
             fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
         do_promote = bool(docSettings.get("restore_rapid", True))
+        _dbg(f"Pass 2: invoking orchestrator.run with fallback_wp={fallback_wp}")
 
         orchestrator = PipelineOrchestrator(
             dumper_cps=constDumperScript,
@@ -2369,6 +2377,10 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
             program_name=str(fname),
             fallback_workpiece=fallback_wp,
             is_turning=is_turning,
+        )
+        _dbg(
+            f"Pass 2: orchestrator.run complete. Vol={report.total_volume_removed_mm3:.3f} mm³, "
+            f"collisions={len(report.collisions)}"
         )
 
         # Universal collision check: issue warnings and record collision metrics while continuing NC generation

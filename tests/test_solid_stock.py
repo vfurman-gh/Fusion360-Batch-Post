@@ -151,10 +151,12 @@ class TestSolidMeshStock(unittest.TestCase):
 
         # 2. 90-degree Z rotation: setup X points along design Y, setup Y points along design -X
         mock_wcs_rot = MagicMock()
+        del mock_wcs_rot.copy  # Force strategy 2
         mock_x_rot = MagicMock(x=0.0, y=1.0, z=0.0)
         mock_y_rot = MagicMock(x=-1.0, y=0.0, z=0.0)
         mock_z_rot = MagicMock(x=0.0, y=0.0, z=1.0)
-        mock_wcs_rot.getAsCoordinateSystem.return_value = (mock_origin, mock_x_rot, mock_y_rot, mock_z_rot)
+        # Test 5-tuple SWIG return format (success, origin, x, y, z)
+        mock_wcs_rot.getAsCoordinateSystem.return_value = (True, mock_origin, mock_x_rot, mock_y_rot, mock_z_rot)
 
         pts_rot_mm = transform_design_points_to_setup_wcs(pts_design_cm, mock_wcs_rot)
         np.testing.assert_allclose(pts_rot_mm[0], [0.0, 0.0, 0.0], atol=1e-5)
@@ -163,6 +165,30 @@ class TestSolidMeshStock(unittest.TestCase):
         # dot with Y_rot (-1, 0, 0) = -5 cm -> -50 mm
         # dot with Z_rot (0, 0, 1) = 3 cm -> 30 mm
         np.testing.assert_allclose(pts_rot_mm[1], [20.0, -50.0, 30.0], atol=1e-5)
+
+        # 3. Strategy 1: Matrix3D copy().invert() with getCell (native Fusion 360 C++ Matrix3D)
+        class MockMatrix3D:
+            def __init__(self, m_cells):
+                self.m = np.array(m_cells, dtype=np.float64)
+            def copy(self):
+                return MockMatrix3D(self.m.copy())
+            def invert(self):
+                self.m = np.linalg.inv(self.m)
+                return True
+            def getCell(self, r, c):
+                return float(self.m[r, c])
+
+        # Matrix transforming Setup WCS -> Design Space:
+        # Rotated 90 deg around Z, translated by (10, 20, 30) cm
+        wcs_matrix = MockMatrix3D([
+            [0.0, -1.0, 0.0, 10.0],
+            [1.0,  0.0, 0.0, 20.0],
+            [0.0,  0.0, 1.0, 30.0],
+            [0.0,  0.0, 0.0,  1.0],
+        ])
+        pts_mat_mm = transform_design_points_to_setup_wcs(pts_design_cm, wcs_matrix)
+        np.testing.assert_allclose(pts_mat_mm[0], [0.0, 0.0, 0.0], atol=1e-5)
+        np.testing.assert_allclose(pts_mat_mm[1], [20.0, -50.0, 30.0], atol=1e-5)
 
     def test_solid_mesh_stock_3d_model(self):
         """Verify SolidMeshStock3D bounds and initialization."""
