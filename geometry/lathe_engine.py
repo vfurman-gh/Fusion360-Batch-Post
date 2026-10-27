@@ -173,7 +173,10 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
         if math.isnan(r_out) or r_out <= 0.0 or math.isnan(z_min) or math.isnan(z_max) or z_min >= z_max:
             raise ValueError(f"Invalid stock dimensions for IPW: z_min={z_min}, z_max={z_max}, r_out={r_out}")
 
-        self.ipw = box(z_min, r_in, z_max, r_out)
+        if hasattr(stock, "polygon") and isinstance(getattr(stock, "polygon", None), Polygon) and not stock.polygon.is_empty:
+            self.ipw = stock.polygon
+        else:
+            self.ipw = box(z_min, r_in, z_max, r_out)
 
         # Chuck keep-out geometry in R >= 0
         chuck_polys = []

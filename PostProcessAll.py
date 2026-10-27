@@ -1268,6 +1268,7 @@ def _EnsureLocalModulesLoaded(force=False):
         "geometry.tool_generator",
         "geometry.legacy_adapter",
         "geometry.lathe_engine",
+        "geometry.solid_mesh",
         "geometry.heightfield_engine",
         "geometry.mill_engine",
         "geometry.plotter",
@@ -1404,9 +1405,17 @@ def _ExtractWorkpieceFromSetup(setup):
     """Extract axisymmetric stock and chuck geometry directly from native Fusion 360 Setup."""
     try:
         stock_mode = _GetSetupStockMode(setup)
-        if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest", "solid", "body")):
+        if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
             _dbg_global(f"_ExtractWorkpieceFromSetup: setup uses unsupported stock mode '{stock_mode}'; returning None")
             return None
+
+        if any(k in stock_mode for k in ("solid", "body")):
+            try:
+                from geometry.solid_mesh import extract_solid_workpiece_from_fusion_setup
+                return extract_solid_workpiece_from_fusion_setup(setup, is_turning=True)
+            except Exception as e:
+                _dbg_global(f"_ExtractWorkpieceFromSetup: solid turning stock extraction failed: {e}")
+                return None
 
         if not hasattr(setup, "parameters"):
             return None
@@ -2157,26 +2166,50 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         )
         return err_msg
 
+    solid_wp = None
     if any(k in stock_mode for k in ("solid", "body")):
-        err_msg = (
-            f"Setup '{setup.name}' uses 'From Solid' stock, "
-            "which is currently unsupported for toolpath verification."
-        )
-        _dbg(f"_PostProcessUnifiedPipeline: {err_msg}")
-        _RecordVerifyResult(
-            setup=setup,
-            cncPath=path,
-            reportText=f"# Verification Failed\n\nError: {err_msg}",
-            reportPath=report_path,
-            pngPath=plot_path,
-            promoted=0,
-            spikes=0,
-            volume_mm3=0.0,
-            collisions=[],
-            error=err_msg,
-            warning=None,
-        )
-        return err_msg
+        try:
+            from geometry.solid_mesh import extract_solid_workpiece_from_fusion_setup
+            solid_wp = extract_solid_workpiece_from_fusion_setup(setup, is_turning=is_turning)
+        except Exception as solid_exc:
+            err_msg = (
+                f"Setup '{setup.name}' uses 'From Solid' stock, but extraction failed: {solid_exc}"
+            )
+            _dbg(f"_PostProcessUnifiedPipeline: {err_msg}")
+            _RecordVerifyResult(
+                setup=setup,
+                cncPath=path,
+                reportText=f"# Verification Failed\n\nError: {err_msg}",
+                reportPath=report_path,
+                pngPath=plot_path,
+                promoted=0,
+                spikes=0,
+                volume_mm3=0.0,
+                collisions=[],
+                error=err_msg,
+                warning=None,
+            )
+            return err_msg
+
+        if solid_wp is None:
+            err_msg = (
+                f"Setup '{setup.name}' uses 'From Solid' stock, but no valid stock bodies were found or extracted."
+            )
+            _dbg(f"_PostProcessUnifiedPipeline: {err_msg}")
+            _RecordVerifyResult(
+                setup=setup,
+                cncPath=path,
+                reportText=f"# Verification Failed\n\nError: {err_msg}",
+                reportPath=report_path,
+                pngPath=plot_path,
+                promoted=0,
+                spikes=0,
+                volume_mm3=0.0,
+                collisions=[],
+                error=err_msg,
+                warning=None,
+            )
+            return err_msg
 
     # 2. Partition setup operations into single-tool batches (mandatory for Personal Edition compatibility)
     cand_ops = target_operations if target_operations is not None else getattr(setup, "allOperations", [])
@@ -2312,7 +2345,10 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
         report_path = base_no_ext + "_report.md"
         plot_path = base_no_ext + ".png"
 
-        fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
+        if solid_wp is not None:
+            fallback_wp = solid_wp
+        else:
+            fallback_wp = _ExtractWorkpieceFromSetup(setup) if is_turning else None
         do_promote = bool(docSettings.get("restore_rapid", True))
 
         orchestrator = PipelineOrchestrator(

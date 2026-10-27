@@ -42,6 +42,7 @@ from .models import (
     MotionKind,
     MotionSegment,
     MoveEvaluation,
+    SolidMeshStock3D,
     ToolAssembly,
     Vector3D,
     WorkpieceDefinition,
@@ -112,6 +113,47 @@ class HeightfieldGrid:
 
         if col_max > col_min and row_max > row_min:
             self.H[row_min:row_max, col_min:col_max] = np.float32(self.stock_z_max)
+
+    def reset_from_mesh(
+        self,
+        vertices: np.ndarray,
+        indices: np.ndarray,
+        tol_pad_z_mm: float = 0.05,
+    ) -> None:
+        """Initialize heightfield grid by rasterizing a 3D triangular mesh in setup WCS (mm)."""
+        if vertices is None or indices is None or len(vertices) == 0 or len(indices) == 0:
+            raise ValueError("HeightfieldGrid requires valid non-empty vertices and indices")
+
+        v = np.asarray(vertices, dtype=np.float32)
+        idx = np.asarray(indices, dtype=np.int32)
+        min_pt = v.min(axis=0)
+        max_pt = v.max(axis=0)
+
+        self.stock_x_min = float(min_pt[0])
+        self.stock_x_max = float(max_pt[0])
+        self.stock_y_min = float(min_pt[1])
+        self.stock_y_max = float(max_pt[1])
+        self.stock_z_min = float(min_pt[2])
+        self.stock_z_max = float(max_pt[2]) + tol_pad_z_mm
+
+        self.grid_x_min = self.stock_x_min - self.pad_mm
+        self.grid_x_max = self.stock_x_max + self.pad_mm
+        self.grid_y_min = self.stock_y_min - self.pad_mm
+        self.grid_y_max = self.stock_y_max + self.pad_mm
+        self.z_floor = self.stock_z_min
+
+        self.nx = max(2, int(math.ceil((self.grid_x_max - self.grid_x_min) / self.cell_size_mm)) + 1)
+        self.ny = max(2, int(math.ceil((self.grid_y_max - self.grid_y_min) / self.cell_size_mm)) + 1)
+
+        # Allocate grid to floor
+        self.H = np.full((self.ny, self.nx), self.z_floor, dtype=np.float32)
+
+        from geometry.solid_mesh import rasterize_triangles_to_grid
+        rasterize_triangles_to_grid(self, v, idx, tol_pad_z_mm=tol_pad_z_mm)
+
+    def reset_from_solid(self, solid_stock: SolidMeshStock3D, tol_pad_z_mm: float = 0.05) -> None:
+        """Initialize heightfield grid from a SolidMeshStock3D."""
+        self.reset_from_mesh(solid_stock.vertices, solid_stock.indices, tol_pad_z_mm=tol_pad_z_mm)
 
     def get_subgrid_bounds(
         self,
@@ -243,6 +285,12 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
         if isinstance(stock, BoxStock3D) and stock.x_max > stock.x_min and stock.y_max > stock.y_min and stock.z_max > stock.z_min:
             self.grid.reset(stock)
             self.has_valid_stock = True
+        elif isinstance(stock, SolidMeshStock3D):
+            self.grid.reset_from_solid(stock)
+            self.has_valid_stock = True
+        elif hasattr(stock, "vertices") and hasattr(stock, "indices"):
+            self.grid.reset_from_mesh(stock.vertices, stock.indices)
+            self.has_valid_stock = True
         elif hasattr(stock, "x_min") and hasattr(stock, "z_max"):
             x_min, x_max = float(stock.x_min), float(stock.x_max)
             y_min, y_max = float(stock.y_min), float(stock.y_max)
@@ -259,7 +307,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                 self.grid.reset(box_stock)
                 self.has_valid_stock = True
         else:
-            raise ValueError(f"MillHeightfieldVerifier requires valid BoxStock3D, got {type(stock)}")
+            raise ValueError(f"MillHeightfieldVerifier requires valid BoxStock3D or SolidMeshStock3D, got {type(stock)}")
 
     def reset_workpiece(self, workpiece: WorkpieceDefinition) -> None:
         """Backwards compatibility alias for reset()."""

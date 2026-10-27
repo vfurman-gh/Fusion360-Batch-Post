@@ -82,6 +82,12 @@ class VectorKey:
         return f"{self.sec_id}:{self.start_x},{self.start_y},{self.start_z}->{self.end_x},{self.end_y},{self.end_z}"
 
 
+try:
+    import numpy as np
+except (ImportError, OSError):
+    np = None
+
+
 @dataclass(frozen=True)
 class AxisymmetricStock2D:
     """Lathe stock profile revolved symmetrically around the Z-axis (R >= 0)."""
@@ -89,6 +95,7 @@ class AxisymmetricStock2D:
     z_max: float
     outer_radius: float
     inner_radius: float = 0.0
+    polygon: Any = None  # Optional Shapely Polygon for arbitrary revolved solid profile
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,40 @@ class BoxStock3D:
 
 
 @dataclass(frozen=True)
+class SolidMeshStock3D:
+    """3D solid mesh stock representation in setup WCS coordinates (mm)."""
+    vertices: Any   # np.ndarray of shape (N, 3), float32 in mm
+    indices: Any    # np.ndarray of shape (M, 3), int32 triangle vertex indices
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    z_min: float
+    z_max: float
+
+    @classmethod
+    def from_mesh(cls, vertices: Any, indices: Any) -> "SolidMeshStock3D":
+        if np is None:
+            raise ImportError("numpy is required for SolidMeshStock3D")
+        v = np.asarray(vertices, dtype=np.float32)
+        idx = np.asarray(indices, dtype=np.int32)
+        if v.size == 0 or idx.size == 0:
+            raise ValueError("SolidMeshStock3D requires non-empty vertices and indices")
+        min_pt = v.min(axis=0)
+        max_pt = v.max(axis=0)
+        return cls(
+            vertices=v,
+            indices=idx,
+            x_min=float(min_pt[0]),
+            x_max=float(max_pt[0]),
+            y_min=float(min_pt[1]),
+            y_max=float(max_pt[1]),
+            z_min=float(min_pt[2]),
+            z_max=float(max_pt[2]),
+        )
+
+
+@dataclass(frozen=True)
 class AxisymmetricChuckObstacle:
     """Lathe chuck body and jaws modeled as an axisymmetric swept keep-out body."""
     z_min: float
@@ -111,7 +152,7 @@ class AxisymmetricChuckObstacle:
     clamping_radius: float
 
 
-WorkpieceGeometry = Union[AxisymmetricStock2D, BoxStock3D]
+WorkpieceGeometry = Union[AxisymmetricStock2D, BoxStock3D, SolidMeshStock3D]
 
 
 @dataclass

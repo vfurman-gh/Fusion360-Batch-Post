@@ -317,10 +317,11 @@ class PipelineOrchestrator:
                     "which is currently unsupported for toolpath verification."
                 )
             if any(k in stock_mode for k in ("solid", "body")):
-                raise ValueError(
-                    f"Setup {setup_label} uses 'From Solid' stock, "
-                    "which is currently unsupported for toolpath verification."
-                )
+                if workpiece is None and fallback_workpiece is None:
+                    raise ValueError(
+                        f"Setup {setup_label} uses 'From Solid' stock, "
+                        "but no solid body geometry was provided or extracted."
+                    )
 
             if workpiece is None:
                 workpiece = extract_workpiece_from_context(combined_ctx, fallback_workpiece=fallback_workpiece, is_turning=is_turning)

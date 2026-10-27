@@ -453,8 +453,10 @@ def extract_workpiece_from_context(
         or context_data.get("globalParams", {}).get("stockMode")
         or ""
     ).lower()
-    if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest", "solid", "body")):
+    if any(k in stock_mode for k in ("previous", "preceding", "prev", "rest")):
         return None
+    if any(k in stock_mode for k in ("solid", "body")):
+        return fallback_workpiece
 
     wp = context_data.get("workpiece")
     if not wp or not isinstance(wp, dict):
