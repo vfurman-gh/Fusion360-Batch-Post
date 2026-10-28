@@ -1952,45 +1952,6 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
 
         # 5. Default fallback to DocumentUnitsOutput
         self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(None, {}), doc_enum)
-
-    def test_find_nc_program_for_setup(self):
-        """Verify _FindNCProgramForSetup accurately associates setups with their dedicated NCPrograms."""
-        import PostProcessAll
-
-        setup_spinner = MagicMock()
-        setup_spinner.name = "Spinner setup"
-        setup_other = MagicMock()
-        setup_other.name = "Setup 1"
-
-        prog_spinner = MagicMock()
-        prog_spinner.name = "Spinner"
-        prog_spinner.setups = MockCamCollection([setup_spinner])
-
-        prog_other = MagicMock()
-        prog_other.name = "Setup 1"
-        prog_other.setups = MockCamCollection([setup_other])
-
-        mock_cam = MagicMock()
-        mock_cam.ncPrograms = MockCamCollection([prog_other, prog_spinner])
-
-        # 1. Searching for Spinner setup finds prog_spinner even when prog_other is passed as current
-        found = PostProcessAll._FindNCProgramForSetup(setup_spinner, cam=mock_cam, current_program=prog_other)
-        self.assertEqual(found, prog_spinner)
-
-        # 2. Searching for other setup finds prog_other
-        found_other = PostProcessAll._FindNCProgramForSetup(setup_other, cam=mock_cam, current_program=None)
-        self.assertEqual(found_other, prog_other)
-
-        # 3. Substring match fallback: setup named 'Spinner setup' matches program named 'Spinner'
-        prog_substring = MagicMock()
-        prog_substring.name = "Spinner"
-        prog_substring.setups = MockCamCollection([])
-        prog_substring.operations = MockCamCollection([])
-        cam_sub = MagicMock()
-        cam_sub.ncPrograms = MockCamCollection([prog_substring])
-        found_sub = PostProcessAll._FindNCProgramForSetup(setup_spinner, cam=cam_sub, current_program=None)
-        self.assertEqual(found_sub, prog_substring)
-
     def test_pipeline_nc_program_mm_unit_override(self):
         """Verify that NCProgram specifying mm output overrides Document units and passes MillimetersOutput to PostProcessInput."""
         import PostProcessAll

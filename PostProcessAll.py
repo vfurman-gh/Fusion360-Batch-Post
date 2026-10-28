@@ -702,100 +702,6 @@ def _safe_str(val) -> str:
     return val.strip() if isinstance(val, str) else ""
 
 
-def _ncprogram_contains_setup(program, setup, cam=None) -> bool:
-    """Return True if the given NCProgram is associated with or contains the setup."""
-    if not program or not setup:
-        return False
-    s_name = _safe_str(getattr(setup, "name", None))
-    p_name = _safe_str(getattr(program, "name", None))
-    if s_name and p_name and s_name.lower() == p_name.lower():
-        return True
-
-    # Check program.setups
-    if hasattr(program, "setups"):
-        try:
-            for s in _extract_cam_collection(program.setups):
-                cur_s_name = _safe_str(getattr(s, "name", None))
-                if s == setup or (s_name and cur_s_name and cur_s_name == s_name):
-                    return True
-                if cam is not None:
-                    resolved = _resolve_setup_for_object(s, cam)
-                    res_name = _safe_str(getattr(resolved, "name", None))
-                    if resolved == setup or (s_name and res_name and res_name == s_name):
-                        return True
-        except Exception:
-            pass
-
-    # Check program.operations
-    if hasattr(program, "operations"):
-        try:
-            for item in _extract_cam_collection(program.operations):
-                cur_item_name = _safe_str(getattr(item, "name", None))
-                if _is_setup_cam_object(item, cam):
-                    if item == setup or (s_name and cur_item_name and cur_item_name == s_name):
-                        return True
-                    if cam is not None:
-                        resolved = _resolve_setup_for_object(item, cam)
-                        res_name = _safe_str(getattr(resolved, "name", None))
-                        if resolved == setup or (s_name and res_name and res_name == s_name):
-                            return True
-                else:
-                    if cam is not None:
-                        resolved = _resolve_setup_for_object(item, cam)
-                        res_name = _safe_str(getattr(resolved, "name", None))
-                        if resolved == setup or (s_name and res_name and res_name == s_name):
-                            return True
-        except Exception:
-            pass
-
-    return False
-
-
-def _FindNCProgramForSetup(setup, docSettings=None, cam=None, current_program=None):
-    """
-    Find the most specific NCProgram for a setup.
-    If current_program matches the setup, returns current_program.
-    Otherwise searches cam.ncPrograms for a program containing or matching the setup.
-    Falls back to current_program, or GetNcProgram(cam, docSettings).
-    """
-    if cam is None:
-        try:
-            app = adsk.core.Application.get()
-            doc = getattr(app, "activeDocument", None)
-            if doc and hasattr(doc, "products"):
-                cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
-        except Exception:
-            cam = None
-
-    if current_program is not None and _ncprogram_contains_setup(current_program, setup, cam=cam):
-        return current_program
-
-    if cam is not None and hasattr(cam, "ncPrograms"):
-        try:
-            prog_list = _extract_cam_collection(cam.ncPrograms)
-            if len(prog_list) == 1 and current_program is None:
-                return prog_list[0]
-
-            # First pass: exact setup match in program.setups or program.operations or exact name
-            for prog in prog_list:
-                if _ncprogram_contains_setup(prog, setup, cam=cam):
-                    return prog
-
-            # Second pass: substring match in program name (e.g., 'Spinner' in 'Spinner NC' or vice versa)
-            s_name = _safe_str(getattr(setup, "name", None)).lower()
-            if s_name:
-                for prog in prog_list:
-                    p_name = _safe_str(getattr(prog, "name", None)).lower()
-                    if p_name and (s_name in p_name or p_name in s_name):
-                        return prog
-        except Exception:
-            pass
-
-    if current_program is not None:
-        return current_program
-    return GetNcProgram(cam, docSettings)
-
-
 def _GetNCProgramOutputUnits(program, docSettings=None):
     """
     Resolve the CAM PostOutputUnitOptions enum value from the NCProgram or its parameters.
@@ -1124,17 +1030,7 @@ def PerformPostProcess(docSettings, setups=None):
                     continue
 
                 sFolder, sFname = _ResolveSetupFolderAndFilename(outputFolder, setup.name)
-                setup_prog = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
-                setup_ext = fileExt
-                if setup_prog is not None and hasattr(setup_prog, "parameters"):
-                    try:
-                        params_obj = setup_prog.parameters
-                        ext_param = params_obj.itemByName("nc_program_nc_extension") if hasattr(params_obj, "itemByName") else params_obj.get("nc_program_nc_extension")
-                        if ext_param is not None:
-                            setup_ext = _NormalizeFileExtension(_extract_choice_value(ext_param))
-                    except Exception:
-                        pass
-                target_path = os.path.join(sFolder, sFname + setup_ext)
+                target_path = os.path.join(sFolder, sFname + fileExt)
                 if os.path.isfile(target_path):
                     existing_files.append(target_path)
 
@@ -1219,10 +1115,9 @@ def PerformPostProcess(docSettings, setups=None):
                     setup_cb = make_setup_progress_cb(cntSetups, setup.name)
                     setup_cb("Starting setup...", 0.0)
 
-                    setup_prog = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
                     # post the file with only the operations selected in the NCProgram
                     status = PostProcessSetup(
-                        fname, setup, setupFolder, docSettings, setup_prog,
+                        fname, setup, setupFolder, docSettings, program,
                         target_operations=target_ops, progress_cb=setup_cb
                     )
                     if status == None:
@@ -2420,7 +2315,14 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     # 0. Ensure Add-In modules are on sys.path and reloaded in Fusion's persistent interpreter
     _EnsureLocalModulesLoaded()
 
-    program = _FindNCProgramForSetup(setup, docSettings=docSettings, current_program=program)
+    if program is None:
+        try:
+            app = adsk.core.Application.get()
+            doc = getattr(app, "activeDocument", None)
+            cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId)) if (doc and hasattr(doc, "products")) else None
+            program = GetNcProgram(cam, docSettings)
+        except Exception:
+            pass
     base_post_path = _ResolveBasePostPath(program, is_turning=is_turning)
     if not base_post_path or not os.path.isfile(base_post_path):
         prog_name = getattr(program, "name", "None")
@@ -2789,7 +2691,8 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
         ui  = app.userInterface
         doc = getattr(app, "activeDocument", None)
         cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId)) if (doc and hasattr(doc, "products")) else None
-        program = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
+        if program is None and cam is not None:
+            program = GetNcProgram(cam, docSettings)
         parameters = getattr(program, "parameters", None)
 
         if not target_operations:
