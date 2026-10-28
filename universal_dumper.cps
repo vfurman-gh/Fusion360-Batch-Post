@@ -191,6 +191,10 @@ onOpen = function() {
     if (cfg && cfg.stockMode) {
       dumpData.stockMode = cfg.stockMode;
     }
+    if (cfg && typeof cfg.unit !== "undefined" && cfg.unit !== null) {
+      unit = cfg.unit;
+      dumpData.unit = unit;
+    }
   } catch (e) {}
   try {
     var sMode = (dumpData.stockMode || "").toLowerCase();

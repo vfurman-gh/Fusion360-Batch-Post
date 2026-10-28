@@ -9,12 +9,22 @@ Validates:
 4. Populates verifyResults with structured metrics (material removed, G0 restored, zero collisions).
 """
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch, MagicMock
+
+class MockCamCollection(list):
+    @property
+    def count(self):
+        return len(self)
+
+    def item(self, idx):
+        return self[idx]
 
 # Mock adsk namespace if running outside Fusion
 if "adsk" not in sys.modules:
@@ -1892,6 +1902,447 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 s = MagicMock()
                 s.stockMode = enum_val
                 self.assertEqual(PostProcessAll._GetSetupStockMode(s), expected_str)
+
+    def test_nc_program_unit_resolution(self):
+        """Verify _GetNCProgramOutputUnits resolves PostOutputUnitOptions for all supported input types."""
+        import PostProcessAll
+        mm_enum = adsk.cam.PostOutputUnitOptions.MillimetersOutput
+        in_enum = adsk.cam.PostOutputUnitOptions.InchesOutput
+        doc_enum = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
+
+        # 1. Native ChoiceParameterValue on parameters.itemByName('nc_program_unit')
+        for mm_str in ("Millimeters", "millimeters", "mm", "MM"):
+            mock_prog = MagicMock()
+            mock_param = MagicMock()
+            mock_param.value.value = mm_str
+            mock_prog.parameters.itemByName.side_effect = lambda k: mock_param if k == "nc_program_unit" else None
+            self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog), mm_enum)
+
+        for in_str in ("Inches", "inches", "in", "IN"):
+            mock_prog = MagicMock()
+            mock_param = MagicMock()
+            mock_param.value.value = in_str
+            mock_prog.parameters.itemByName.side_effect = lambda k: mock_param if k == "nc_program_unit" else None
+            self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog), in_enum)
+
+        for doc_str in ("Document units", "document units", "doc"):
+            mock_prog = MagicMock()
+            mock_param = MagicMock()
+            mock_param.value.value = doc_str
+            mock_prog.parameters.itemByName.side_effect = lambda k: mock_param if k == "nc_program_unit" else None
+            self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog), doc_enum)
+
+        # 2. outputUnits property directly on program
+        mock_prog_prop = MagicMock(spec=["outputUnits"])
+        mock_prog_prop.outputUnits = mm_enum
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog_prop), mm_enum)
+        mock_prog_prop.outputUnits = "Millimeters"
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog_prop), mm_enum)
+
+        # 3. postParameters fallback
+        mock_prog_post = MagicMock(spec=["postParameters"])
+        mock_post_param = MagicMock()
+        mock_post_param.value.value = "Millimeters"
+        mock_prog_post.postParameters.itemByName.side_effect = lambda k: mock_post_param if k == "nc_program_unit" else None
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(mock_prog_post), mm_enum)
+
+        # 4. docSettings fallback
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(None, {"outputUnits": "Millimeters"}), mm_enum)
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(None, {"nc_program_unit": "Inches"}), in_enum)
+
+        # 5. Default fallback to DocumentUnitsOutput
+        self.assertEqual(PostProcessAll._GetNCProgramOutputUnits(None, {}), doc_enum)
+
+    def test_find_nc_program_for_setup(self):
+        """Verify _FindNCProgramForSetup accurately associates setups with their dedicated NCPrograms."""
+        import PostProcessAll
+
+        setup_spinner = MagicMock()
+        setup_spinner.name = "Spinner setup"
+        setup_other = MagicMock()
+        setup_other.name = "Setup 1"
+
+        prog_spinner = MagicMock()
+        prog_spinner.name = "Spinner"
+        prog_spinner.setups = MockCamCollection([setup_spinner])
+
+        prog_other = MagicMock()
+        prog_other.name = "Setup 1"
+        prog_other.setups = MockCamCollection([setup_other])
+
+        mock_cam = MagicMock()
+        mock_cam.ncPrograms = MockCamCollection([prog_other, prog_spinner])
+
+        # 1. Searching for Spinner setup finds prog_spinner even when prog_other is passed as current
+        found = PostProcessAll._FindNCProgramForSetup(setup_spinner, cam=mock_cam, current_program=prog_other)
+        self.assertEqual(found, prog_spinner)
+
+        # 2. Searching for other setup finds prog_other
+        found_other = PostProcessAll._FindNCProgramForSetup(setup_other, cam=mock_cam, current_program=None)
+        self.assertEqual(found_other, prog_other)
+
+        # 3. Substring match fallback: setup named 'Spinner setup' matches program named 'Spinner'
+        prog_substring = MagicMock()
+        prog_substring.name = "Spinner"
+        prog_substring.setups = MockCamCollection([])
+        prog_substring.operations = MockCamCollection([])
+        cam_sub = MagicMock()
+        cam_sub.ncPrograms = MockCamCollection([prog_substring])
+        found_sub = PostProcessAll._FindNCProgramForSetup(setup_spinner, cam=cam_sub, current_program=None)
+        self.assertEqual(found_sub, prog_substring)
+
+    def test_pipeline_nc_program_mm_unit_override(self):
+        """Verify that NCProgram specifying mm output overrides Document units and passes MillimetersOutput to PostProcessInput."""
+        import PostProcessAll
+        from unittest.mock import patch, MagicMock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = os.path.join(tmp_dir, "Spinner setup.nc")
+
+            mock_tool = MagicMock()
+            mock_tool.parameters.itemByName.return_value = MagicMock(value=MagicMock(value=1))
+
+            mock_op = MagicMock()
+            mock_op.tool = mock_tool
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+            mock_op.name = "Face Operation"
+
+            mock_setup = MagicMock()
+            mock_setup.name = "Spinner setup"
+            mock_setup.operationType = 1  # Turning
+            mock_setup.allOperations = MockCamCollection([mock_op])
+            mock_setup.parameters = MagicMock()
+
+            # Mock NCProgram specifying 'Millimeters' output unit
+            mock_param_unit = MagicMock()
+            mock_param_unit.value.value = "Millimeters"
+            params_dict = {
+                "nc_program_unit": mock_param_unit,
+                "nc_program_nc_extension": MagicMock(value=MagicMock(value=".nc")),
+                "nc_program_name": MagicMock(value=MagicMock(value="Spinner")),
+                "nc_program_output_folder": MagicMock(value=MagicMock(value=tmp_dir)),
+            }
+            mock_prog = MagicMock()
+            mock_prog.name = "Spinner"
+            mock_prog.parameters.itemByName.side_effect = lambda k: params_dict.get(k)
+            mock_prog.postConfiguration = MagicMock()
+            mock_prog.postConfiguration.name = "centroid_turning"
+
+            post_calls = []
+            def fake_post_process(ops, post_input):
+                post_calls.append((ops, post_input))
+                b_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
+                ctx_payload = {
+                    "unit": 1,  # MM
+                    "highFeedrate": 0,
+                    "programName": "Spinner",
+                    "comments": [],
+                    "sections": [
+                        {
+                            "id": 0,
+                            "type": 1,
+                            "tool": {"number": 1, "diameter": 25.0, "_isTurningTool": True},
+                            "params": {"operation-comment": "Face Operation"},
+                            "events": [
+                                {"type": "onRapid", "x": 50.0, "y": 0.0, "z": 2.0},
+                                {"type": "onLinear", "x": 0.0, "y": 0.0, "z": 2.0, "f": 100.0},
+                            ],
+                        }
+                    ],
+                }
+                with open(b_json, "w", encoding="utf-8") as f:
+                    json.dump(ctx_payload, f)
+                bootstrap_cnc = os.path.join(post_input.outputFolder, "bootstrap.intermediate.cnc")
+                shutil.copyfile(self.fixture_cnc, bootstrap_cnc)
+                return True
+
+            mock_cam = MagicMock()
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+            mock_cam.postProcess.side_effect = fake_post_process
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+
+            written_configs = []
+            orig_write_cfg = PostProcessAll._WriteDumperConfig
+            def intercepted_write_dumper_config(*args, **kwargs):
+                written_configs.append(dict(kwargs))
+                return orig_write_cfg(*args, **kwargs)
+
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                final_cnc = cmd[-1]
+                with open(final_cnc, "w", encoding="utf-8") as f:
+                    f.write("G21\nG0 X50.0 Z2.0\nM30\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=os.path.abspath("centroid_turning.cps")), \
+                 patch("PostProcessAll._WriteDumperConfig", side_effect=intercepted_write_dumper_config), \
+                 patch("pipeline.subprocess.run", side_effect=fake_subprocess_run):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="Spinner setup",
+                    setup=mock_setup,
+                    setupFolder=tmp_dir,
+                    docSettings=doc_settings,
+                    program=mock_prog,
+                    path=out_file,
+                    fileExt=".nc",
+                    target_operations=[mock_op],
+                )
+                self.assertIsNone(res)
+
+            # 1. Verify Pass 1 PostProcessInput outputUnits was set to MillimetersOutput (2)
+            self.assertEqual(len(post_calls), 1)
+            _, post_in = post_calls[0]
+            self.assertEqual(
+                post_in.outputUnits,
+                adsk.cam.PostOutputUnitOptions.MillimetersOutput,
+                "Pass 1 PostProcessInput must use MillimetersOutput when NCProgram specifies mm"
+            )
+
+            # 2. Verify _WriteDumperConfig received unit=1 (MM)
+            self.assertTrue(len(written_configs) >= 1)
+            self.assertEqual(written_configs[0].get("unit"), 1, "Dumper config must record unit=1 for MM")
+
+            # 3. Verify final CNC file was generated
+            self.assertTrue(os.path.isfile(out_file))
+            with open(out_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                self.assertIn("G21", content, "Replayer output must emit metric code G21")
+
+    def test_pipeline_nc_program_inches_unit_override(self):
+        """Verify that NCProgram specifying Inches output overrides Document units and passes InchesOutput (1) to PostProcessInput."""
+        import PostProcessAll
+        from unittest.mock import patch, MagicMock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = os.path.join(tmp_dir, "InchSetup.nc")
+
+            mock_tool = MagicMock()
+            mock_tool.parameters.itemByName.return_value = MagicMock(value=MagicMock(value=1))
+
+            mock_op = MagicMock()
+            mock_op.tool = mock_tool
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+            mock_op.name = "Turning Operation"
+
+            mock_setup = MagicMock()
+            mock_setup.name = "InchSetup"
+            mock_setup.operationType = 1  # Turning
+            mock_setup.allOperations = MockCamCollection([mock_op])
+            mock_setup.parameters = MagicMock()
+
+            mock_param_unit = MagicMock()
+            mock_param_unit.value.value = "Inches"
+            params_dict = {
+                "nc_program_unit": mock_param_unit,
+                "nc_program_nc_extension": MagicMock(value=MagicMock(value=".nc")),
+                "nc_program_name": MagicMock(value=MagicMock(value="InchProg")),
+                "nc_program_output_folder": MagicMock(value=MagicMock(value=tmp_dir)),
+            }
+            mock_prog = MagicMock()
+            mock_prog.name = "InchProg"
+            mock_prog.parameters.itemByName.side_effect = lambda k: params_dict.get(k)
+            mock_prog.postConfiguration = MagicMock()
+            mock_prog.postConfiguration.name = "centroid_turning"
+
+            post_calls = []
+            def fake_post_process(ops, post_input):
+                post_calls.append((ops, post_input))
+                b_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
+                ctx_payload = {
+                    "unit": 0,  # IN
+                    "highFeedrate": 0,
+                    "programName": "InchProg",
+                    "comments": [],
+                    "sections": [
+                        {
+                            "id": 0,
+                            "type": 1,
+                            "tool": {"number": 1, "diameter": 1.0, "_isTurningTool": True},
+                            "params": {"operation-comment": "Turning Operation"},
+                            "events": [
+                                {"type": "onRapid", "x": 2.0, "y": 0.0, "z": 0.1},
+                                {"type": "onLinear", "x": 0.0, "y": 0.0, "z": 0.1, "f": 10.0},
+                            ],
+                        }
+                    ],
+                }
+                with open(b_json, "w", encoding="utf-8") as f:
+                    json.dump(ctx_payload, f)
+                bootstrap_cnc = os.path.join(post_input.outputFolder, "bootstrap.intermediate.cnc")
+                shutil.copyfile(self.fixture_cnc, bootstrap_cnc)
+                return True
+
+            mock_cam = MagicMock()
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+            mock_cam.postProcess.side_effect = fake_post_process
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+
+            written_configs = []
+            orig_write_cfg = PostProcessAll._WriteDumperConfig
+            def intercepted_write_dumper_config(*args, **kwargs):
+                written_configs.append(dict(kwargs))
+                return orig_write_cfg(*args, **kwargs)
+
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                final_cnc = cmd[-1]
+                with open(final_cnc, "w", encoding="utf-8") as f:
+                    f.write("G20\nG0 X2.0 Z0.1\nM30\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=os.path.abspath("centroid_turning.cps")), \
+                 patch("PostProcessAll._WriteDumperConfig", side_effect=intercepted_write_dumper_config), \
+                 patch("pipeline.subprocess.run", side_effect=fake_subprocess_run):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="InchSetup",
+                    setup=mock_setup,
+                    setupFolder=tmp_dir,
+                    docSettings=doc_settings,
+                    program=mock_prog,
+                    path=out_file,
+                    fileExt=".nc",
+                    target_operations=[mock_op],
+                )
+                self.assertIsNone(res)
+
+            # 1. Verify Pass 1 PostProcessInput outputUnits was set to InchesOutput (1)
+            self.assertEqual(len(post_calls), 1)
+            _, post_in = post_calls[0]
+            self.assertEqual(
+                post_in.outputUnits,
+                adsk.cam.PostOutputUnitOptions.InchesOutput,
+                "Pass 1 PostProcessInput must use InchesOutput when NCProgram specifies inches"
+            )
+
+            # 2. Verify _WriteDumperConfig received unit=0 (IN)
+            self.assertTrue(len(written_configs) >= 1)
+            self.assertEqual(written_configs[0].get("unit"), 0, "Dumper config must record unit=0 for IN")
+
+            # 3. Verify final CNC file was generated
+            self.assertTrue(os.path.isfile(out_file))
+            with open(out_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                self.assertIn("G20", content, "Replayer output must emit imperial code G20")
+
+    def test_pipeline_nc_program_document_units_fallback(self):
+        """Verify that NCProgram with Document units leaves units as DocumentUnitsOutput (0)."""
+        import PostProcessAll
+        from unittest.mock import patch, MagicMock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_file = os.path.join(tmp_dir, "DocSetup.nc")
+
+            mock_tool = MagicMock()
+            mock_tool.parameters.itemByName.return_value = MagicMock(value=MagicMock(value=1))
+
+            mock_op = MagicMock()
+            mock_op.tool = mock_tool
+            mock_op.isSuppressed = False
+            mock_op.hasToolpath = True
+            mock_op.name = "Milling Operation"
+
+            mock_setup = MagicMock()
+            mock_setup.name = "DocSetup"
+            mock_setup.operationType = 0  # Milling
+            mock_setup.allOperations = [mock_op]
+
+            mock_param_unit = MagicMock()
+            mock_param_unit.value.value = "Document units"
+            params_dict = {
+                "nc_program_unit": mock_param_unit,
+                "nc_program_nc_extension": MagicMock(value=MagicMock(value=".nc")),
+                "nc_program_name": MagicMock(value=MagicMock(value="DocProg")),
+                "nc_program_output_folder": MagicMock(value=MagicMock(value=tmp_dir)),
+            }
+            mock_prog = MagicMock()
+            mock_prog.name = "DocProg"
+            mock_prog.parameters.itemByName.side_effect = lambda k: params_dict.get(k)
+            mock_prog.postConfiguration = MagicMock()
+            mock_prog.postConfiguration.name = "haas"
+
+            post_calls = []
+            def fake_post_process(ops, post_input):
+                post_calls.append((ops, post_input))
+                b_json = os.path.join(post_input.outputFolder, f"{post_input.programName}.json")
+                ctx_payload = {
+                    "unit": 0,
+                    "highFeedrate": 0,
+                    "programName": "DocProg",
+                    "workpiece": {"lower": {"x": -50, "y": -50, "z": -20}, "upper": {"x": 50, "y": 50, "z": 0}},
+                    "comments": [],
+                    "sections": [],
+                }
+                with open(b_json, "w", encoding="utf-8") as f:
+                    json.dump(ctx_payload, f)
+                bootstrap_cnc = os.path.join(post_input.outputFolder, "bootstrap.intermediate.cnc")
+                shutil.copyfile(self.fixture_cnc, bootstrap_cnc)
+                return True
+
+            mock_cam = MagicMock()
+            mock_cam.ncPrograms = MockCamCollection([mock_prog])
+            mock_cam.postProcess.side_effect = fake_post_process
+
+            mock_doc = MagicMock()
+            mock_doc.products.itemByProductType.return_value = mock_cam
+            mock_app = MagicMock()
+            mock_app.activeDocument = mock_doc
+
+            written_configs = []
+            orig_write_cfg = PostProcessAll._WriteDumperConfig
+            def intercepted_write_dumper_config(*args, **kwargs):
+                written_configs.append(dict(kwargs))
+                return orig_write_cfg(*args, **kwargs)
+
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                final_cnc = cmd[-1]
+                with open(final_cnc, "w", encoding="utf-8") as f:
+                    f.write("G0 X0\nM30\n")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+                 patch("PostProcessAll._ResolveBasePostPath", return_value=os.path.abspath("centroid_turning.cps")), \
+                 patch("PostProcessAll._WriteDumperConfig", side_effect=intercepted_write_dumper_config), \
+                 patch("pipeline.subprocess.run", side_effect=fake_subprocess_run):
+
+                doc_settings = dict(PostProcessAll.defaultSettings)
+                res = PostProcessAll._PostProcessUnifiedPipeline(
+                    fname="DocSetup",
+                    setup=mock_setup,
+                    setupFolder=tmp_dir,
+                    docSettings=doc_settings,
+                    program=mock_prog,
+                    path=out_file,
+                    fileExt=".nc",
+                    target_operations=[mock_op],
+                )
+                self.assertIsNone(res)
+
+            # 1. Verify Pass 1 PostProcessInput outputUnits was set to DocumentUnitsOutput (0)
+            self.assertEqual(len(post_calls), 1)
+            _, post_in = post_calls[0]
+            self.assertEqual(
+                post_in.outputUnits,
+                adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput,
+                "Pass 1 PostProcessInput must use DocumentUnitsOutput when NCProgram specifies Document units"
+            )
+
+            # 2. Verify _WriteDumperConfig received unit=None (not overriding)
+            self.assertTrue(len(written_configs) >= 1)
+            self.assertIsNone(written_configs[0].get("unit"), "Dumper config unit must be None for Document units")
 
 
 if __name__ == "__main__":

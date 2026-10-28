@@ -38,6 +38,13 @@ if not hasattr(adsk.cam, "SetupStockModes"):
         PreviousSetupStock = 7
     adsk.cam.SetupStockModes = SetupStockModes
 
+if not hasattr(adsk.cam, "PostOutputUnitOptions"):
+    class PostOutputUnitOptions:
+        DocumentUnitsOutput = 0
+        InchesOutput = 1
+        MillimetersOutput = 2
+    adsk.cam.PostOutputUnitOptions = PostOutputUnitOptions
+
 
 # Version number of settings as saved in documents and settings file
 # update this whenever settings content changes
@@ -636,6 +643,218 @@ def GetNcProgram(cam, settings):
     return target
 
 
+def _extract_choice_value(param) -> str:
+    """Extract string value from a CAM ParameterValue, ChoiceParameterValue, or mock."""
+    if param is None:
+        return ""
+    val = getattr(param, "value", param)
+    if hasattr(val, "value"):
+        val = getattr(val, "value", val)
+    if isinstance(val, str):
+        return val.strip()
+    expr = getattr(param, "expression", None)
+    if isinstance(expr, str) and expr.strip():
+        return expr.strip()
+    return str(val).strip() if val is not None else ""
+
+
+def _ResolveCamOutputUnit(val):
+    """
+    Map string, int, or enum to adsk.cam.PostOutputUnitOptions enum value:
+      MillimetersOutput = 2
+      InchesOutput = 1
+      DocumentUnitsOutput = 0
+    """
+    cam_mod = sys.modules.get("adsk.cam")
+    enum_cls = getattr(cam_mod, "PostOutputUnitOptions", None)
+    mm_opt = getattr(enum_cls, "MillimetersOutput", 2) if enum_cls else 2
+    in_opt = getattr(enum_cls, "InchesOutput", 1) if enum_cls else 1
+    doc_opt = getattr(enum_cls, "DocumentUnitsOutput", 0) if enum_cls else 0
+
+    if val is None:
+        return doc_opt
+
+    if isinstance(val, (int, float)):
+        int_val = int(val)
+        if int_val == mm_opt:
+            return mm_opt
+        elif int_val == in_opt:
+            return in_opt
+        elif int_val == doc_opt:
+            return doc_opt
+
+    s = str(val).strip().lower()
+    if s in ("millimeters", "millimeter", "mm", "millimetersoutput", "metric"):
+        return mm_opt
+    elif s in ("inches", "inch", "in", "inchesoutput", "imperial"):
+        return in_opt
+    elif s in ("document units", "documentunits", "documentunitsoutput", "document", "doc"):
+        return doc_opt
+
+    if enum_cls is not None and isinstance(val, enum_cls):
+        return val
+
+    return doc_opt
+
+
+def _safe_str(val) -> str:
+    """Safely return stripped string or empty string if not a string."""
+    return val.strip() if isinstance(val, str) else ""
+
+
+def _ncprogram_contains_setup(program, setup, cam=None) -> bool:
+    """Return True if the given NCProgram is associated with or contains the setup."""
+    if not program or not setup:
+        return False
+    s_name = _safe_str(getattr(setup, "name", None))
+    p_name = _safe_str(getattr(program, "name", None))
+    if s_name and p_name and s_name.lower() == p_name.lower():
+        return True
+
+    # Check program.setups
+    if hasattr(program, "setups"):
+        try:
+            for s in _extract_cam_collection(program.setups):
+                cur_s_name = _safe_str(getattr(s, "name", None))
+                if s == setup or (s_name and cur_s_name and cur_s_name == s_name):
+                    return True
+                if cam is not None:
+                    resolved = _resolve_setup_for_object(s, cam)
+                    res_name = _safe_str(getattr(resolved, "name", None))
+                    if resolved == setup or (s_name and res_name and res_name == s_name):
+                        return True
+        except Exception:
+            pass
+
+    # Check program.operations
+    if hasattr(program, "operations"):
+        try:
+            for item in _extract_cam_collection(program.operations):
+                cur_item_name = _safe_str(getattr(item, "name", None))
+                if _is_setup_cam_object(item, cam):
+                    if item == setup or (s_name and cur_item_name and cur_item_name == s_name):
+                        return True
+                    if cam is not None:
+                        resolved = _resolve_setup_for_object(item, cam)
+                        res_name = _safe_str(getattr(resolved, "name", None))
+                        if resolved == setup or (s_name and res_name and res_name == s_name):
+                            return True
+                else:
+                    if cam is not None:
+                        resolved = _resolve_setup_for_object(item, cam)
+                        res_name = _safe_str(getattr(resolved, "name", None))
+                        if resolved == setup or (s_name and res_name and res_name == s_name):
+                            return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _FindNCProgramForSetup(setup, docSettings=None, cam=None, current_program=None):
+    """
+    Find the most specific NCProgram for a setup.
+    If current_program matches the setup, returns current_program.
+    Otherwise searches cam.ncPrograms for a program containing or matching the setup.
+    Falls back to current_program, or GetNcProgram(cam, docSettings).
+    """
+    if cam is None:
+        try:
+            app = adsk.core.Application.get()
+            doc = getattr(app, "activeDocument", None)
+            if doc and hasattr(doc, "products"):
+                cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
+        except Exception:
+            cam = None
+
+    if current_program is not None and _ncprogram_contains_setup(current_program, setup, cam=cam):
+        return current_program
+
+    if cam is not None and hasattr(cam, "ncPrograms"):
+        try:
+            prog_list = _extract_cam_collection(cam.ncPrograms)
+            if len(prog_list) == 1 and current_program is None:
+                return prog_list[0]
+
+            # First pass: exact setup match in program.setups or program.operations or exact name
+            for prog in prog_list:
+                if _ncprogram_contains_setup(prog, setup, cam=cam):
+                    return prog
+
+            # Second pass: substring match in program name (e.g., 'Spinner' in 'Spinner NC' or vice versa)
+            s_name = _safe_str(getattr(setup, "name", None)).lower()
+            if s_name:
+                for prog in prog_list:
+                    p_name = _safe_str(getattr(prog, "name", None)).lower()
+                    if p_name and (s_name in p_name or p_name in s_name):
+                        return prog
+        except Exception:
+            pass
+
+    if current_program is not None:
+        return current_program
+    return GetNcProgram(cam, docSettings)
+
+
+def _GetNCProgramOutputUnits(program, docSettings=None):
+    """
+    Resolve the CAM PostOutputUnitOptions enum value from the NCProgram or its parameters.
+    Checks:
+      1. program.parameters.itemByName("nc_program_unit") (standard Fusion CAM choice parameter: "Millimeters", "Inches", "Document units")
+      2. program.outputUnits property (if present)
+      3. program.postParameters ("nc_program_unit" or "unit")
+      4. docSettings fallback ("nc_program_unit" or "outputUnits" or "unit")
+    Returns:
+      adsk.cam.PostOutputUnitOptions enum value (MillimetersOutput=2, InchesOutput=1, or DocumentUnitsOutput=0)
+    """
+    cam_mod = sys.modules.get("adsk.cam")
+    enum_cls = getattr(cam_mod, "PostOutputUnitOptions", None)
+    doc_opt = getattr(enum_cls, "DocumentUnitsOutput", 0) if enum_cls else 0
+
+    if program is not None:
+        # 1. Native NCProgram parameter: nc_program_unit
+        if hasattr(program, "parameters"):
+            try:
+                params = program.parameters
+                p = params.itemByName("nc_program_unit") if hasattr(params, "itemByName") else params.get("nc_program_unit")
+                if p is not None:
+                    raw_val = _extract_choice_value(p)
+                    if raw_val:
+                        return _ResolveCamOutputUnit(raw_val)
+            except Exception:
+                pass
+
+        # 2. program.outputUnits property
+        if hasattr(program, "outputUnits"):
+            try:
+                raw_val = getattr(program, "outputUnits")
+                if raw_val is not None:
+                    return _ResolveCamOutputUnit(raw_val)
+            except Exception:
+                pass
+
+        # 3. program.postParameters
+        if hasattr(program, "postParameters"):
+            try:
+                post_params = program.postParameters
+                for k in ("nc_program_unit", "unit", "outputUnits"):
+                    p = post_params.itemByName(k) if hasattr(post_params, "itemByName") else post_params.get(k)
+                    if p is not None:
+                        raw_val = _extract_choice_value(p)
+                        if raw_val:
+                            return _ResolveCamOutputUnit(raw_val)
+            except Exception:
+                pass
+
+    # 4. docSettings fallback
+    if docSettings and isinstance(docSettings, dict):
+        for k in ("nc_program_unit", "outputUnits", "unit"):
+            if k in docSettings and docSettings[k] is not None:
+                return _ResolveCamOutputUnit(docSettings[k])
+
+    return doc_opt
+
+
 # Event handler for the commandCreated event.
 class CommandEventHandler(adsk.core.CommandCreatedEventHandler):
     def __init__(self):
@@ -905,7 +1124,17 @@ def PerformPostProcess(docSettings, setups=None):
                     continue
 
                 sFolder, sFname = _ResolveSetupFolderAndFilename(outputFolder, setup.name)
-                target_path = os.path.join(sFolder, sFname + fileExt)
+                setup_prog = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
+                setup_ext = fileExt
+                if setup_prog is not None and hasattr(setup_prog, "parameters"):
+                    try:
+                        params_obj = setup_prog.parameters
+                        ext_param = params_obj.itemByName("nc_program_nc_extension") if hasattr(params_obj, "itemByName") else params_obj.get("nc_program_nc_extension")
+                        if ext_param is not None:
+                            setup_ext = _NormalizeFileExtension(_extract_choice_value(ext_param))
+                    except Exception:
+                        pass
+                target_path = os.path.join(sFolder, sFname + setup_ext)
                 if os.path.isfile(target_path):
                     existing_files.append(target_path)
 
@@ -990,9 +1219,10 @@ def PerformPostProcess(docSettings, setups=None):
                     setup_cb = make_setup_progress_cb(cntSetups, setup.name)
                     setup_cb("Starting setup...", 0.0)
 
+                    setup_prog = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
                     # post the file with only the operations selected in the NCProgram
                     status = PostProcessSetup(
-                        fname, setup, setupFolder, docSettings, program,
+                        fname, setup, setupFolder, docSettings, setup_prog,
                         target_operations=target_ops, progress_cb=setup_cb
                     )
                     if status == None:
@@ -1361,7 +1591,7 @@ def _EnsureLocalModulesLoaded(force=False):
                 _dbg_global(f"Reload of {mod_name} failed: {exc}")
 
 
-def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None, stock_mode=None):
+def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None, stock_mode=None, unit=None):
     """Write sidecar config for universal_dumper.cps when spawned by Fusion 360's C++ host process."""
     cfg = {}
     if base_post_path and os.path.isfile(base_post_path):
@@ -1372,6 +1602,8 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
         cfg["postProperties"] = post_properties
     if stock_mode:
         cfg["stockMode"] = str(stock_mode)
+    if unit is not None:
+        cfg["unit"] = int(unit)
 
     cfg_dirs = []
     if target_dir and os.path.isdir(target_dir):
@@ -2188,6 +2420,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
     # 0. Ensure Add-In modules are on sys.path and reloaded in Fusion's persistent interpreter
     _EnsureLocalModulesLoaded()
 
+    program = _FindNCProgramForSetup(setup, docSettings=docSettings, current_program=program)
     base_post_path = _ResolveBasePostPath(program, is_turning=is_turning)
     if not base_post_path or not os.path.isfile(base_post_path):
         prog_name = getattr(program, "name", "None")
@@ -2337,7 +2570,16 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
 
         batch_json_files = []
         bootstrap_cnc = os.path.join(tmp_dir, "bootstrap.intermediate.cnc")
-        units = adsk.cam.PostOutputUnitOptions.DocumentUnitsOutput
+        units = _GetNCProgramOutputUnits(program, docSettings=docSettings)
+        cam_mod = sys.modules.get("adsk.cam")
+        enum_cls = getattr(cam_mod, "PostOutputUnitOptions", None)
+        mm_opt = getattr(enum_cls, "MillimetersOutput", 2) if enum_cls else 2
+        in_opt = getattr(enum_cls, "InchesOutput", 1) if enum_cls else 1
+        dumper_unit = None
+        if units == mm_opt:
+            dumper_unit = 1  # MM in CPS post engine
+        elif units == in_opt:
+            dumper_unit = 0  # IN in CPS post engine
 
         n_batches = max(1, len(batches))
         for b_idx, (t_num, op_list) in enumerate(batches):
@@ -2356,6 +2598,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     post_properties=post_props,
                     target_dir=tmp_dir,
                     stock_mode=stock_mode,
+                    unit=dumper_unit,
                 )
             else:
                 os.environ.pop("TARGET_INTERMEDIATE_CNC", None)
@@ -2365,6 +2608,7 @@ def _PostProcessUnifiedPipeline(fname, setup, setupFolder, docSettings, program,
                     post_properties=post_props,
                     target_dir=tmp_dir,
                     stock_mode=stock_mode,
+                    unit=dumper_unit,
                 )
 
             _dbg(f"Pass 1: Posting batch {b_idx} (Tool {t_num}, {len(op_list)} ops) with universal_dumper.cps via direct PostProcessInput...")
@@ -2543,15 +2787,24 @@ def PostProcessSetup(fname, setup, setupFolder, docSettings, program, target_ope
     try:
         app = adsk.core.Application.get()
         ui  = app.userInterface
-        doc = app.activeDocument
-        cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId))
-        parameters = program.parameters
+        doc = getattr(app, "activeDocument", None)
+        cam = adsk.cam.CAM.cast(doc.products.itemByProductType(constCAMProductId)) if (doc and hasattr(doc, "products")) else None
+        program = _FindNCProgramForSetup(setup, docSettings=docSettings, cam=cam, current_program=program)
+        parameters = getattr(program, "parameters", None)
 
         if not target_operations:
             return "No active operations specified to post process."
 
         # Verify file name is valid by creating it now
-        fileExt = _NormalizeFileExtension(parameters.itemByName("nc_program_nc_extension").value.value)
+        raw_ext = ""
+        if parameters is not None:
+            try:
+                ext_param = parameters.itemByName("nc_program_nc_extension") if hasattr(parameters, "itemByName") else parameters.get("nc_program_nc_extension")
+                if ext_param is not None:
+                    raw_ext = _extract_choice_value(ext_param)
+            except Exception:
+                pass
+        fileExt = _NormalizeFileExtension(raw_ext)
         path = os.path.join(setupFolder, fname + fileExt)
         try:
             pathlib.Path(setupFolder).mkdir(parents=True, exist_ok=True)
