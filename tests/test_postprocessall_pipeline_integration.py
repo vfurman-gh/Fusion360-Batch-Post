@@ -997,6 +997,66 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
             # docSettings must never be polluted with transient confirmation flags
             self.assertNotIn("_empty_toolpaths_confirmed", doc_settings)
 
+    def test_perform_post_process_multiple_setups_returns_error(self):
+        """Verify PerformPostProcess aborts with an error when multiple setups are detected."""
+        import PostProcessAll
+        from unittest.mock import MagicMock, patch
+
+        mock_op1 = MagicMock()
+        mock_op1.isSuppressed = False
+        mock_op1.hasToolpath = True
+        mock_setup1 = MagicMock()
+        mock_setup1.name = "Setup 1"
+        mock_setup1.isSuppressed = False
+        mock_setup1.allOperations = MockCamCollection([mock_op1])
+
+        mock_op2 = MagicMock()
+        mock_op2.isSuppressed = False
+        mock_op2.hasToolpath = True
+        mock_setup2 = MagicMock()
+        mock_setup2.name = "Setup 2"
+        mock_setup2.isSuppressed = False
+        mock_setup2.allOperations = MockCamCollection([mock_op2])
+
+        mock_prog = MagicMock()
+        mock_prog.name = "MultiSetupProgram"
+        mock_prog.parameters.itemByName.return_value = MagicMock(value=MagicMock(value="test"))
+        mock_prog.attributes.itemByName.return_value = MagicMock(value="")
+
+        mock_cam = MagicMock()
+        mock_cam.ncPrograms = MockCamCollection([mock_prog])
+        mock_cam.setups = MockCamCollection([mock_setup1, mock_setup2])
+
+        mock_doc = MagicMock()
+        mock_doc.products.itemByProductType.return_value = mock_cam
+        mock_doc.attributes.itemByName.return_value = None
+
+        msgbox_calls = []
+        mock_ui = MagicMock()
+        mock_ui.messageBox.side_effect = lambda prompt, title, btn_type, icon_type: msgbox_calls.append((prompt, title, btn_type, icon_type))
+
+        mock_app = MagicMock()
+        mock_app.userInterface = mock_ui
+        mock_app.activeDocument = mock_doc
+
+        post_setup_calls = []
+        with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \
+             patch("PostProcessAll.GetNcProgram", return_value=mock_prog), \
+             patch("PostProcessAll.GetNcProgramSetupsAndOperations", return_value=([mock_setup1, mock_setup2], {mock_setup1: [mock_op1], mock_setup2: [mock_op2]})), \
+             patch("PostProcessAll.PostProcessSetup", side_effect=lambda *args, **kwargs: post_setup_calls.append(args)):
+
+            doc_settings = dict(PostProcessAll.defaultSettings)
+            res = PostProcessAll.PerformPostProcess(doc_settings, setups=[mock_setup1, mock_setup2])
+
+        self.assertIsNotNone(res, "PerformPostProcess must return an error string when multiple setups are detected")
+        self.assertIn("Multiple setups detected", res)
+        self.assertIn("MultiSetupProgram", res)
+        self.assertIn("Setup 1", res)
+        self.assertIn("Setup 2", res)
+        self.assertEqual(len(msgbox_calls), 1, "Must prompt user with modal critical error dialog")
+        self.assertIn("Multiple setups detected", msgbox_calls[0][0])
+        self.assertEqual(len(post_setup_calls), 0, "Must never proceed to PostProcessSetup when multiple setups are detected")
+
     def test_postprocess_setup_requires_target_operations_and_rejects_empty(self):
         """Verify PostProcessSetup requires target_operations and fails fast without UI prompts."""
         import PostProcessAll

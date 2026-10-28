@@ -963,6 +963,21 @@ def PerformPostProcess(docSettings, setups=None):
         parameters = program.parameters
         setups, setup_operations_map = GetNcProgramSetupsAndOperations(cam, docSettings, setups, program)
 
+        # Abort with error if multiple setups are detected
+        if len(setups) > 1:
+            prog_name = getattr(program, "name", "NC Program")
+            setup_names = ", ".join(f"'{getattr(s, 'name', 'Setup')}'" for s in setups)
+            err = f"Multiple setups detected in NC Program '{prog_name}' ({setup_names}). Processing multiple setups in a single NC Program is not supported."
+            _dbg_global(f"PerformPostProcess: {err}")
+            if ui:
+                ui.messageBox(
+                    err,
+                    constCmdName,
+                    adsk.core.MessageBoxButtonTypes.OKButtonType,
+                    adsk.core.MessageBoxIconTypes.CriticalIconType,
+                )
+            return err
+
         # normalize output folder for this user
         # "\" is converted to "/"
         outputFolder = parameters.itemByName("nc_program_output_folder").value.value.replace("\\", "/")
