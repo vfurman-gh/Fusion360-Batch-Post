@@ -247,6 +247,8 @@ class MRRSample:
     volume_removed_mm3: float
     mrr_rate_mm3_per_min: float
     depth_of_cut_mm: float
+    op_id: str = ""
+
 
 
 @dataclass

@@ -254,16 +254,6 @@ def generate_verification_plot(
             seen_labels.add("G1/G2/G3 Cutting Move")
             ax_geo.plot([z1, z2], [r1, r2], color="#1f77b4", linewidth=0.6, alpha=0.6, label=lbl)
 
-    # Plot sample tools if present
-    for tool_name, tool in list(tools_by_op.items())[:2]:
-        if hasattr(tool.geometry, "cutter_polygon") and tool.geometry.cutter_polygon:
-            c_poly = to_plot(tool.geometry.cutter_polygon)
-            h_poly = to_plot(tool.geometry.holder_polygon)
-            sample_pt = (segments[0].start.z * scale, segments[0].start.x * scale) if segments else (0, 0)
-            draw_poly(ax_geo, translate(h_poly, sample_pt[0], sample_pt[1]), facecolor="#7f7f7f", edgecolor="black", alpha=0.5, label=f"Holder ({tool_name})")
-            draw_poly(ax_geo, translate(c_poly, sample_pt[0], sample_pt[1]), facecolor="#f1c232", edgecolor="black", alpha=0.9, label=f"Insert ({tool_name})")
-            break
-
     seg_map = {s.segment_id: s for s in segments}
 
     # Flag MRR spikes and Collisions
@@ -499,8 +489,7 @@ def generate_mill_verification_plot(
         )
 
     # 6. Flagged Prominent MRR Spikes (Anchored to True Heightfield Surface with Explicit zorder)
-    sorted_spikes = sorted(report.mrr_spikes, key=lambda sp: sp.mrr_rate_mm3_per_min, reverse=True)[:15]
-    for sp in sorted_spikes:
+    for sp in report.mrr_spikes:
         seg = seg_map.get(sp.segment_id)
         if seg:
             lbl = "Flagged MRR Spike" if "Flagged MRR Spike" not in seen_labels else None

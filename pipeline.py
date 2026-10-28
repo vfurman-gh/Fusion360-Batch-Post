@@ -500,6 +500,7 @@ class PipelineOrchestrator:
             f"- **Total Machining Time**: {report.total_machining_time_sec:.2f} s ({report.total_machining_time_sec/60:.2f} min)",
             f"- **Total Material Removed**: {report.total_volume_removed_mm3:.2f} mm³",
             f"- **Collisions Detected**: {collision_count}",
+            f"- **Flagged MRR Spikes**: {len(report.mrr_spikes)}",
             f"- **Authorized Air Moves**: {promoted_count}",
             f"- **G0 Moves Restored in G-code**: {wrapper_restored_count}",
             "",
@@ -564,6 +565,38 @@ class PipelineOrchestrator:
                         f"at contact `({c.contact_point.x:.2f}, {c.contact_point.y:.2f}, {c.contact_point.z:.2f})`"
                     )
                 lines.append("")
+
+        lines.append("")
+        lines.append("## Material Removal Rate (MRR) Spikes")
+        if not report.mrr_spikes:
+            lines.append("✅ **Zero MRR spikes detected.** All cutting passes remained within normal statistical limits.")
+        else:
+            lines.append(
+                f"⚠️ **{len(report.mrr_spikes)} MRR spike(s) flagged (top 3 per operation shown).**"
+            )
+            lines.append("")
+            lines.append("| Operation | Move | Start Time | MRR Rate (mm³/min) | Volume Removed (mm³) | Depth of Cut (mm) |")
+            lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+
+            spikes_by_op: Dict[str, List[MRRSample]] = {}
+            for sp in report.mrr_spikes:
+                op_name = sp.op_id if sp.op_id else "General"
+                spikes_by_op.setdefault(op_name, []).append(sp)
+
+            for op in all_ops:
+                op_spikes = spikes_by_op.get(op, [])
+                for sp in op_spikes:
+                    lines.append(
+                        f"| {op} | Move {sp.segment_id} | {sp.timestamp_sec:.2f} s | "
+                        f"{sp.mrr_rate_mm3_per_min:.2f} | {sp.volume_removed_mm3:.2f} | {sp.depth_of_cut_mm:.2f} |"
+                    )
+            for op, op_spikes in spikes_by_op.items():
+                if op not in all_ops:
+                    for sp in op_spikes:
+                        lines.append(
+                            f"| {op} | Move {sp.segment_id} | {sp.timestamp_sec:.2f} s | "
+                            f"{sp.mrr_rate_mm3_per_min:.2f} | {sp.volume_removed_mm3:.2f} | {sp.depth_of_cut_mm:.2f} |"
+                        )
 
         return "\n".join(lines)
 

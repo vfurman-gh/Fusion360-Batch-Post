@@ -278,6 +278,60 @@ class TestLatheEngineCollisions(unittest.TestCase):
         self.assertEqual(len(eval_res.collisions), 1, "Expected chuck collision")
         self.assertEqual(eval_res.collisions[0].kind, CollisionKind.FIXTURE_COLLISION)
 
+    def test_lathe_verification_plot_omits_tool_artists(self):
+        """Verify that generate_verification_plot does not render tool holder or insert polygons."""
+        import tempfile
+        import os
+        from geometry.plotter import generate_verification_plot
+
+        holder_poly = Polygon([(2, 1), (2, 4), (10, 4), (10, 1)])
+        tool = ToolAssembly(
+            tool_id=1,
+            name="Roughing Tool",
+            geometry=LatheToolGeometry(
+                insert_shape="W",
+                nose_radius=0.8,
+                hand="R",
+                quadrant=ToolCompensationQuadrant.P3,
+                cutter_polygon=self.cutter_poly,
+                holder_polygon=holder_poly,
+            ),
+        )
+
+        verifier = Lathe2DIPWVerifier()
+        verifier.reset(self.workpiece)
+        verifier.load_tool(tool)
+
+        cut_move = MotionSegment(
+            segment_id=1,
+            op_id="Roughing",
+            sec_id=0,
+            motion=MotionKind.LINEAR,
+            start=Vector3D(15.0, 0.0, 0.0),
+            end=Vector3D(15.0, 0.0, -15.0),
+            feedrate_mmpm=200.0,
+            spindle_rpm=1000.0,
+            duration_sec=3.0,
+            vector_key=VectorKey.from_floats(0, Vector3D(15.0, 0.0, 0.0), Vector3D(15.0, 0.0, -15.0)),
+        )
+        verifier.step(cut_move)
+        report = verifier.generate_report()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_png = os.path.join(tmp_dir, "lathe_test.png")
+            generate_verification_plot(
+                workpiece=self.workpiece,
+                final_ipw=verifier.ipw,
+                chuck_obstacle=verifier.chuck_obstacle,
+                segments=[cut_move],
+                report=report,
+                tools_by_op={"Roughing": tool},
+                out_png_path=out_png,
+                unit_is_inch=False,
+            )
+            self.assertTrue(os.path.isfile(out_png))
+            self.assertGreater(os.path.getsize(out_png), 5000)
+
 
 if __name__ == "__main__":
     unittest.main()

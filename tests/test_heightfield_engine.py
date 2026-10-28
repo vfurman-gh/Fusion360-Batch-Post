@@ -496,6 +496,67 @@ class TestMillHeightfieldVerifier(unittest.TestCase):
         self.assertLess(res.instantaneous_mrr, 60.0)
         self.assertEqual(len(res.collisions), 0)
 
+    def test_mrr_spikes_capped_at_top_3_per_operation(self):
+        """Verify that BaseVerificationEngine.generate_report selects top 3 MRR spikes per operation."""
+        engine = MillHeightfieldVerifier()
+        engine.reset(self.workpiece)
+
+        # Baseline cutting samples with MRR = 50 mm3/min (50 samples)
+        for i in range(50):
+            engine.current_time_sec = float(i)
+            engine.record_mrr_sample(
+                segment_id=i,
+                duration_sec=1.0,
+                volume_removed_mm3=50.0 / 60.0,
+                op_id="Baseline",
+            )
+
+        # Op1: 5 spikes with rates 500, 600, 700, 800, 900 mm3/min (mean ~ 100, threshold ~ 250)
+        for idx, rate in enumerate([500.0, 900.0, 600.0, 800.0, 700.0]):
+            engine.current_time_sec = 20.0 + float(idx * 2)
+            engine.record_mrr_sample(
+                segment_id=100 + idx,
+                duration_sec=1.0,
+                volume_removed_mm3=rate / 60.0,
+                op_id="Op1",
+            )
+
+        # Op2: 4 spikes with rates 400, 1000, 450, 950 mm3/min
+        for idx, rate in enumerate([400.0, 1000.0, 450.0, 950.0]):
+            engine.current_time_sec = 40.0 + float(idx * 2)
+            engine.record_mrr_sample(
+                segment_id=200 + idx,
+                duration_sec=1.0,
+                volume_removed_mm3=rate / 60.0,
+                op_id="Op2",
+            )
+
+        report = engine.generate_report()
+
+        # Exactly 3 spikes from Op1 and 3 spikes from Op2 = 6 spikes total
+        op1_spikes = [s for s in report.mrr_spikes if s.op_id == "Op1"]
+        op2_spikes = [s for s in report.mrr_spikes if s.op_id == "Op2"]
+
+        self.assertEqual(len(op1_spikes), 3)
+        self.assertEqual(len(op2_spikes), 3)
+        self.assertEqual(len(report.mrr_spikes), 6)
+
+        # For Op1, top 3 rates are 900, 800, 700
+        op1_rates = sorted([s.mrr_rate_mm3_per_min for s in op1_spikes], reverse=True)
+        self.assertAlmostEqual(op1_rates[0], 900.0, places=1)
+        self.assertAlmostEqual(op1_rates[1], 800.0, places=1)
+        self.assertAlmostEqual(op1_rates[2], 700.0, places=1)
+
+        # For Op2, top 3 rates are 1000, 950, 450
+        op2_rates = sorted([s.mrr_rate_mm3_per_min for s in op2_spikes], reverse=True)
+        self.assertAlmostEqual(op2_rates[0], 1000.0, places=1)
+        self.assertAlmostEqual(op2_rates[1], 950.0, places=1)
+        self.assertAlmostEqual(op2_rates[2], 450.0, places=1)
+
+        # Verify chronological ordering across report.mrr_spikes
+        timestamps = [s.timestamp_sec for s in report.mrr_spikes]
+        self.assertEqual(timestamps, sorted(timestamps))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -406,6 +406,7 @@ class Lathe2DIPWVerifier(BaseVerificationEngine):
             duration_sec=move.duration_sec,
             volume_removed_mm3=vol_3d_mm3,
             depth_of_cut_mm=math.sqrt(area_2d),
+            op_id=move.op_id,
         )
 
         return MoveEvaluation(

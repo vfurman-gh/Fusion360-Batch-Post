@@ -319,6 +319,55 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
         self.assertIn("#### ⚠️ Operation: 2D Contour1 (1 collision)", md)
         self.assertIn("Move 150", md)
 
+    def test_format_summary_report_includes_top_3_mrr_spikes(self):
+        """Verify _format_summary_report includes MRR spikes section with top 3 spikes per operation."""
+        from pipeline import PipelineOrchestrator
+        from geometry.models import MRRSample, VerificationReport
+
+        orchestrator = PipelineOrchestrator(
+            dumper_cps=os.path.join(self.repo_root, "universal_dumper.cps"),
+            replayer_cps=os.path.join(self.repo_root, "universal_replayer.cps"),
+        )
+
+        # 1. Zero spikes report
+        zero_report = VerificationReport(
+            total_machining_time_sec=60.0,
+            total_volume_removed_mm3=5000.0,
+            collisions=[],
+            promoted_vectors={},
+            mrr_timeline=[],
+            mrr_spikes=[],
+            operation_names=["Roughing"],
+        )
+        zero_md = orchestrator._format_summary_report(zero_report, "", "post.cps")
+        self.assertIn("## Material Removal Rate (MRR) Spikes", zero_md)
+        self.assertIn("✅ **Zero MRR spikes detected.**", zero_md)
+
+        # 2. Report with top-3 spikes from multiple operations
+        s1 = MRRSample(10.0, 1.0, 101, 1, 15.0, 900.0, 2.5, op_id="Roughing")
+        s2 = MRRSample(12.0, 1.0, 102, 1, 12.0, 720.0, 2.0, op_id="Roughing")
+        s3 = MRRSample(14.0, 1.0, 103, 1, 10.0, 600.0, 1.8, op_id="Roughing")
+        s4 = MRRSample(30.0, 0.5, 201, 2, 8.0, 960.0, 1.5, op_id="Finishing")
+
+        spike_report = VerificationReport(
+            total_machining_time_sec=60.0,
+            total_volume_removed_mm3=5000.0,
+            collisions=[],
+            promoted_vectors={},
+            mrr_timeline=[],
+            mrr_spikes=[s1, s2, s3, s4],
+            operation_names=["Roughing", "Finishing"],
+        )
+        md = orchestrator._format_summary_report(spike_report, "", "post.cps")
+
+        self.assertIn("## Material Removal Rate (MRR) Spikes", md)
+        self.assertIn("⚠️ **4 MRR spike(s) flagged (top 3 per operation shown).**", md)
+        self.assertIn("| Operation | Move | Start Time | MRR Rate (mm³/min) | Volume Removed (mm³) | Depth of Cut (mm) |", md)
+        self.assertIn("| Roughing | Move 101 | 10.00 s | 900.00 | 15.00 | 2.50 |", md)
+        self.assertIn("| Roughing | Move 102 | 12.00 s | 720.00 | 12.00 | 2.00 |", md)
+        self.assertIn("| Roughing | Move 103 | 14.00 s | 600.00 | 10.00 | 1.80 |", md)
+        self.assertIn("| Finishing | Move 201 | 30.00 s | 960.00 | 8.00 | 1.50 |", md)
+
     def test_non_modal_notifications_success_warning_and_failure(self):
         """Verify _NotifyPostProcessResult provides non-modal statusMessage & HTML toast without modal dialogs."""
         from PostProcessAll import _NotifyPostProcessResult, constNotificationPaletteId

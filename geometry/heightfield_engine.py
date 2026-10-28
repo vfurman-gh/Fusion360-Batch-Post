@@ -587,6 +587,7 @@ class MillHeightfieldVerifier(BaseVerificationEngine):
                 duration_sec=move.duration_sec,
                 volume_removed_mm3=vol_removed,
                 depth_of_cut_mm=doc_mm,
+                op_id=move.op_id,
             )
             mrr_rate = sample.mrr_rate_mm3_per_min
 

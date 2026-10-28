@@ -133,6 +133,7 @@ class BaseVerificationEngine(IVerificationEngine):
         duration_sec: float,
         volume_removed_mm3: float,
         depth_of_cut_mm: float = 0.0,
+        op_id: str = "",
     ) -> MRRSample:
         """Record volumetric removal rate sample in timeline."""
         dur = max(1e-4, float(duration_sec))
@@ -148,6 +149,7 @@ class BaseVerificationEngine(IVerificationEngine):
             volume_removed_mm3=volume_removed_mm3,
             mrr_rate_mm3_per_min=mrr_rate,
             depth_of_cut_mm=depth_of_cut_mm,
+            op_id=op_id,
         )
         self.mrr_timeline.append(sample)
         self.total_volume_removed_mm3 += volume_removed_mm3
@@ -157,6 +159,7 @@ class BaseVerificationEngine(IVerificationEngine):
         """
         Compile VerificationReport with strictly validated monotonic promotion rules,
         collating collisions, total volume removed, and statistical MRR spikes.
+        Top 3 spikes per operation are selected and sorted chronologically.
         """
         final_promoted: Dict[str, PromotedVectorRule] = {}
         for vkey, total_occ in self.vector_occurrences.items():
@@ -171,7 +174,21 @@ class BaseVerificationEngine(IVerificationEngine):
         if non_zero_mrrs:
             mean_mrr = sum(non_zero_mrrs) / len(non_zero_mrrs)
             threshold = mean_mrr * 2.5
-            spikes = [s for s in self.mrr_timeline if s.mrr_rate_mm3_per_min > threshold]
+            candidate_spikes = [s for s in self.mrr_timeline if s.mrr_rate_mm3_per_min > threshold]
+
+            # Select top 3 spikes per operation (sorted descending by MRR rate)
+            spikes_by_op: Dict[str, List[MRRSample]] = {}
+            for s in candidate_spikes:
+                op_key = s.op_id if s.op_id else "General"
+                spikes_by_op.setdefault(op_key, []).append(s)
+
+            top_spikes: List[MRRSample] = []
+            for op_key, op_spikes in spikes_by_op.items():
+                sorted_op = sorted(op_spikes, key=lambda s: s.mrr_rate_mm3_per_min, reverse=True)[:3]
+                top_spikes.extend(sorted_op)
+
+            # Sort selected spikes chronologically for timeline display
+            spikes = sorted(top_spikes, key=lambda s: (s.timestamp_sec, s.segment_id))
 
         return VerificationReport(
             total_machining_time_sec=self.total_machining_time_sec,
