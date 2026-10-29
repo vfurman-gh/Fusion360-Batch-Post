@@ -21,6 +21,7 @@ Orchestrates the G-code-dialect-independent flow:
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,11 +43,152 @@ from context_parser import (
 )
 
 
+def find_fusion_root_from_path(p: Optional[str]) -> Optional[str]:
+    """Extract Fusion webdeploy root or .app directory from a path."""
+    if not p:
+        return None
+    norm = os.path.normpath(os.path.abspath(p))
+    match = re.search(r"([A-Za-z0-9_:\-\\/\s]+[\\/]webdeploy[\\/]production[\\/][^\\/]+)", norm, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    match_app = re.search(r"([A-Za-z0-9_:\-\\/\s]+[\\/]Autodesk Fusion(?: 360)?\.app)", norm, re.IGNORECASE)
+    if match_app:
+        return match_app.group(1)
+    return None
+
+
+def is_unactivated_update(root: Optional[str]) -> bool:
+    """
+    Check if a webdeploy directory is an unactivated background update staged by the streamer.
+    Unactivated binaries can hang or fail due to uninitialized licensing, locks, or gatekeeper quarantine.
+    """
+    if not root or not os.path.isdir(root):
+        return False
+    # Streamer writes streamingsession.json while staging an update before Fusion is restarted
+    if os.path.isfile(os.path.join(root, "streamingsession.json")):
+        return True
+    return False
+
+
+def get_post_binary_from_root(root: Optional[str]) -> Optional[str]:
+    """Locate CAM post processor binary inside a specific Fusion root directory."""
+    if not root:
+        return None
+    candidates = [
+        os.path.join(root, "Autodesk Fusion.app", "Contents", "Libraries", "Applications", "CAM360", "post"),
+        os.path.join(root, "Contents", "Libraries", "Applications", "CAM360", "post"),
+        os.path.join(root, "Libraries", "Applications", "CAM360", "post"),
+        os.path.join(root, "Applications", "CAM360", "post.exe"),
+        os.path.join(root, "post.exe"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def get_system_posts_dir_from_root(root: Optional[str]) -> Optional[str]:
+    """Locate system Posts directory inside a specific Fusion root directory."""
+    if not root:
+        return None
+    candidates = [
+        os.path.join(root, "Autodesk Fusion.app", "Contents", "Libraries", "Applications", "CAM360", "Data", "Posts"),
+        os.path.join(root, "Contents", "Libraries", "Applications", "CAM360", "Data", "Posts"),
+        os.path.join(root, "Libraries", "Applications", "CAM360", "Data", "Posts"),
+        os.path.join(root, "Applications", "CAM360", "Data", "Posts"),
+        os.path.join(root, "Data", "Posts"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def find_autodesk_fusion_invoking_root() -> Optional[str]:
+    """
+    Determine the Fusion installation that invoked the script (or is currently running).
+    Do NOT blindly select the newest folder by mtime, as a background update script
+    may have written an unactivated newer build.
+    """
+    # 0. Explicit environment override
+    env_root = os.environ.get("AUTODESK_FUSION_ROOT")
+    if env_root and (os.path.isdir(env_root) or os.path.isfile(env_root)):
+        return env_root
+
+    # 1. Inspect loaded adsk modules (when running inside Fusion 360)
+    for mod_name in ("adsk", "adsk.core", "adsk.cam", "adsk.fusion"):
+        mod = sys.modules.get(mod_name)
+        if mod:
+            f = getattr(mod, "__file__", None)
+            if f:
+                root = find_fusion_root_from_path(f)
+                if root and os.path.isdir(root):
+                    return root
+            p = getattr(mod, "__path__", None)
+            if p:
+                for entry in p:
+                    root = find_fusion_root_from_path(entry)
+                    if root and os.path.isdir(root):
+                        return root
+
+    # 2. Inspect sys.executable
+    root = find_fusion_root_from_path(sys.executable)
+    if root and os.path.isdir(root):
+        return root
+
+    # 3. Inspect sys.prefix and sys.base_prefix
+    for pfx in (sys.prefix, getattr(sys, "base_prefix", None)):
+        if pfx:
+            root = find_fusion_root_from_path(pfx)
+            if root and os.path.isdir(root):
+                return root
+
+    # 4. Inspect sys.path
+    for entry in sys.path:
+        root = find_fusion_root_from_path(entry)
+        if root and os.path.isdir(root):
+            return root
+
+    # 5. Inspect currently running Fusion processes on the host system
+    if sys.platform == "darwin" and "LOCALAPPDATA" not in os.environ:
+        try:
+            with subprocess.Popen(["ps", "-ax", "-o", "command"], stdout=subprocess.PIPE, text=True) as proc:
+                out, _ = proc.communicate(timeout=5)
+                for line in out.splitlines():
+                    if "webdeploy/production/" in line and ("Autodesk Fusion" in line or "QtWebEngineProcess" in line):
+                        root = find_fusion_root_from_path(line)
+                        if root and os.path.isdir(root):
+                            return root
+        except Exception:
+            pass
+    elif sys.platform == "win32":
+        try:
+            with subprocess.Popen(["wmic", "process", "where", "name='Fusion360.exe'", "get", "ExecutablePath"], stdout=subprocess.PIPE, text=True) as proc:
+                out, _ = proc.communicate(timeout=5)
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line:
+                        root = find_fusion_root_from_path(line)
+                        if root and os.path.isdir(root):
+                            return root
+        except Exception:
+            pass
+
+    return None
+
+
 def find_autodesk_post_binary() -> Optional[str]:
     """Locate the standalone Autodesk CAM post processor binary (macOS post or Windows post.exe)."""
     env_post = os.environ.get("AUTODESK_POST_BINARY")
     if env_post and os.path.isfile(env_post):
         return env_post
+
+    # 1. Prefer the specific Fusion installation that invoked the script or is currently running
+    invoking_root = find_autodesk_fusion_invoking_root()
+    if invoking_root:
+        post_bin = get_post_binary_from_root(invoking_root)
+        if post_bin and os.path.isfile(post_bin):
+            return post_bin
 
     candidates = []
     patterns = [
@@ -74,8 +216,14 @@ def find_autodesk_post_binary() -> Optional[str]:
     if not candidates:
         return None
 
-    # Sort descending by modification time to pick the newest active webdeploy installation
-    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    def _candidate_sort_key(p: str):
+        root = find_fusion_root_from_path(p)
+        unactivated = 1 if is_unactivated_update(root) else 0
+        mtime = os.path.getmtime(p) if os.path.exists(p) else 0.0
+        # Activated builds (unactivated=0) take precedence over unactivated builds (1), then sorted newest by mtime
+        return (unactivated, -mtime)
+
+    candidates.sort(key=_candidate_sort_key)
     return candidates[0]
 
 
@@ -84,6 +232,13 @@ def find_autodesk_system_posts_dir() -> Optional[str]:
     env_dir = os.environ.get("AUTODESK_SYSTEM_POSTS_DIR")
     if env_dir and os.path.isdir(env_dir):
         return env_dir
+
+    # 1. Prefer the specific Fusion installation that invoked the script or is currently running
+    invoking_root = find_autodesk_fusion_invoking_root()
+    if invoking_root:
+        posts_dir = get_system_posts_dir_from_root(invoking_root)
+        if posts_dir and os.path.isdir(posts_dir):
+            return posts_dir
 
     candidates = []
     patterns = [
@@ -119,7 +274,13 @@ def find_autodesk_system_posts_dir() -> Optional[str]:
     if not candidates:
         return None
 
-    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    def _posts_dir_sort_key(p: str):
+        root = find_fusion_root_from_path(p)
+        unactivated = 1 if is_unactivated_update(root) else 0
+        mtime = os.path.getmtime(p) if os.path.exists(p) else 0.0
+        return (unactivated, -mtime)
+
+    candidates.sort(key=_posts_dir_sort_key)
     return candidates[0]
 
 
@@ -143,6 +304,7 @@ class PipelineOrchestrator:
         post_bin: Optional[str] = None,
         dumper_cps: Optional[str] = None,
         replayer_cps: Optional[str] = None,
+        timeout: float = 120.0,
         *args,
         **kwargs,
     ):
@@ -150,6 +312,7 @@ class PipelineOrchestrator:
         if not self.post_bin or not os.path.isfile(self.post_bin):
             raise FileNotFoundError(f"Autodesk post executable not found: {self.post_bin}")
         self.post_bin_path = self.post_bin
+        self.timeout = float(timeout)
 
         repo_root = os.path.dirname(os.path.abspath(__file__))
         self.dumper_cps = dumper_cps or os.path.join(repo_root, "universal_dumper.cps")
@@ -170,7 +333,12 @@ class PipelineOrchestrator:
         env = os.environ.copy()
         env["BASE_POST"] = os.path.abspath(base_post_path)
         cmd = [self.post_bin, "--quiet", self.dumper_cps, intermediate_cnc_path, output_json_path]
-        res = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        try:
+            res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=self.timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Context dump extraction timed out after {self.timeout}s (Autodesk post binary at '{self.post_bin}' may be unactivated or hanging): {exc}"
+            ) from exc
         if res.returncode != 0:
             err_detail = f"exit code {res.returncode}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
             raise RuntimeError(f"Context dump extraction failed: {err_detail}")
@@ -215,7 +383,12 @@ class PipelineOrchestrator:
                 env["PROMOTED_MOVES_JSON"] = os.path.abspath(promoted_json_path)
 
             cmd = [self.post_bin, "--quiet", self.replayer_cps, bootstrap_cnc_path, final_cnc_path]
-            res = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            try:
+                res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=self.timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"Universal post replayer execution timed out after {self.timeout}s (Autodesk post binary at '{self.post_bin}' may be unactivated or hanging): {exc}"
+                ) from exc
             if res.returncode != 0:
                 err_detail = f"exit code {res.returncode}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
                 raise RuntimeError(f"Universal post replayer execution failed: {err_detail}")

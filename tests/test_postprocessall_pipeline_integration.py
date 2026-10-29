@@ -1427,6 +1427,146 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 found = find_autodesk_post_binary()
                 self.assertEqual(found, post_v2)
 
+    def test_w1b_invoking_fusion_takes_precedence_over_newer_mtime(self):
+        """Verify find_autodesk_post_binary selects invoking Fusion build even if an unactivated update is newer."""
+        import types
+        from pipeline import (
+            find_autodesk_fusion_invoking_root,
+            find_autodesk_post_binary,
+            find_autodesk_system_posts_dir,
+        )
+        from unittest.mock import patch
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            older_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_older_invoking")
+            newer_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_newer_update")
+
+            older_cam = os.path.join(older_root, "Autodesk Fusion.app", "Contents", "Libraries", "Applications", "CAM360")
+            newer_cam = os.path.join(newer_root, "Autodesk Fusion.app", "Contents", "Libraries", "Applications", "CAM360")
+            older_posts = os.path.join(older_cam, "Data", "Posts")
+            newer_posts = os.path.join(newer_cam, "Data", "Posts")
+
+            os.makedirs(older_posts, exist_ok=True)
+            os.makedirs(newer_posts, exist_ok=True)
+
+            older_post_bin = os.path.join(older_cam, "post")
+            newer_post_bin = os.path.join(newer_cam, "post")
+
+            with open(older_post_bin, "w") as f:
+                f.write("older")
+            with open(newer_post_bin, "w") as f:
+                f.write("newer")
+
+            now = time.time()
+            # newer_root has much newer modification times (e.g. background update)
+            os.utime(older_post_bin, (now - 500, now - 500))
+            os.utime(newer_post_bin, (now + 500, now + 500))
+
+            # Case A: sys.modules["adsk"] points into the older installation
+            fake_adsk = types.ModuleType("adsk")
+            fake_adsk.__file__ = os.path.join(older_root, "Autodesk Fusion.app", "Contents", "Libraries", "Applications", "adsk", "__init__.py")
+
+            with patch.dict(sys.modules, {"adsk": fake_adsk}):
+                # Invoking root should identify older_root
+                resolved_root = find_autodesk_fusion_invoking_root()
+                self.assertEqual(os.path.abspath(resolved_root), os.path.abspath(older_root))
+
+                # Post binary must be older_post_bin, NOT newer_post_bin
+                resolved_bin = find_autodesk_post_binary()
+                self.assertEqual(os.path.abspath(resolved_bin), os.path.abspath(older_post_bin))
+
+                # System posts dir must be older_posts, NOT newer_posts
+                resolved_posts = find_autodesk_system_posts_dir()
+                self.assertEqual(os.path.abspath(resolved_posts), os.path.abspath(older_posts))
+
+            # Case B: AUTODESK_FUSION_ROOT explicitly points to older_root
+            with patch.dict(os.environ, {"AUTODESK_FUSION_ROOT": older_root}):
+                resolved_bin = find_autodesk_post_binary()
+                self.assertEqual(os.path.abspath(resolved_bin), os.path.abspath(older_post_bin))
+
+    def test_w1c_unactivated_update_with_newer_mtime_is_deprioritized_when_fusion_not_running(self):
+        """Verify unactivated background updates (with streamingsession.json) are not picked over activated builds."""
+        from pipeline import (
+            find_autodesk_post_binary,
+            find_autodesk_system_posts_dir,
+            is_unactivated_update,
+        )
+        from unittest.mock import patch
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            older_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_older_activated")
+            newer_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_newer_unactivated")
+
+            older_cam = os.path.join(older_root, "Applications", "CAM360")
+            newer_cam = os.path.join(newer_root, "Applications", "CAM360")
+            older_posts = os.path.join(older_cam, "Data", "Posts")
+            newer_posts = os.path.join(newer_cam, "Data", "Posts")
+
+            os.makedirs(older_posts, exist_ok=True)
+            os.makedirs(newer_posts, exist_ok=True)
+
+            older_post_bin = os.path.join(older_cam, "post.exe")
+            newer_post_bin = os.path.join(newer_cam, "post.exe")
+
+            with open(older_post_bin, "w") as f:
+                f.write("older_activated")
+            with open(newer_post_bin, "w") as f:
+                f.write("newer_unactivated")
+
+            # Staged background update has streamingsession.json
+            with open(os.path.join(newer_root, "streamingsession.json"), "w") as f:
+                f.write('{"process-name": "Update"}')
+
+            self.assertFalse(is_unactivated_update(older_root))
+            self.assertTrue(is_unactivated_update(newer_root))
+
+            now = time.time()
+            # newer_post_bin has newer mtime, simulating freshly downloaded background update
+            os.utime(older_post_bin, (now - 300, now - 300))
+            os.utime(newer_post_bin, (now, now))
+
+            # When Fusion is NOT running, candidate sorting must prioritize older activated build
+            with patch.dict(os.environ, {"LOCALAPPDATA": tmp_dir}):
+                found_bin = find_autodesk_post_binary()
+                self.assertEqual(os.path.abspath(found_bin), os.path.abspath(older_post_bin))
+
+                found_posts = find_autodesk_system_posts_dir()
+                self.assertEqual(os.path.abspath(found_posts), os.path.abspath(older_posts))
+
+    def test_w1d_pipeline_orchestrator_hang_timeout_protection(self):
+        """Verify PipelineOrchestrator enforces subprocess timeouts to prevent hanging on unactivated binaries."""
+        import subprocess
+        from pipeline import PipelineOrchestrator
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_post = os.path.join(tmp_dir, "post")
+            fake_dumper = os.path.join(tmp_dir, "universal_dumper.cps")
+            fake_replayer = os.path.join(tmp_dir, "universal_replayer.cps")
+            for p in (fake_post, fake_dumper, fake_replayer):
+                with open(p, "w") as f:
+                    f.write("test")
+
+            orchestrator = PipelineOrchestrator(
+                post_bin=fake_post,
+                dumper_cps=fake_dumper,
+                replayer_cps=fake_replayer,
+                timeout=5.0,
+            )
+
+            with patch("pipeline.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=[fake_post], timeout=5.0)):
+                with self.assertRaises(RuntimeError) as ctx_dump:
+                    orchestrator.dump_intermediate_to_json("dummy.cnc", "dummy.cps", "dummy.json")
+                self.assertIn("timed out after 5.0s", str(ctx_dump.exception))
+                self.assertIn("hanging", str(ctx_dump.exception))
+
+                with self.assertRaises(RuntimeError) as ctx_rep:
+                    orchestrator.replay_combined_context({}, "dummy.cnc", "dummy.cps", "dummy_out.nc")
+                self.assertIn("timed out after 5.0s", str(ctx_rep.exception))
+                self.assertIn("hanging", str(ctx_rep.exception))
+
     def test_w2_temporary_directory_logging_and_sidecar(self):
         """Verify debug logging and sidecar configs use platform tempfile dir and tolerate missing /tmp."""
         import json
@@ -2094,9 +2234,10 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 return orig_write_cfg(*args, **kwargs)
 
             def fake_subprocess_run(cmd, *args, **kwargs):
-                final_cnc = cmd[-1]
-                with open(final_cnc, "w", encoding="utf-8") as f:
-                    f.write("G21\nG0 X50.0 Z2.0\nM30\n")
+                if len(cmd) >= 3 and not str(cmd[0]).endswith("ps"):
+                    final_cnc = cmd[-1]
+                    with open(final_cnc, "w", encoding="utf-8") as f:
+                        f.write("G21\nG0 X50.0 Z2.0\nM30\n")
                 return MagicMock(returncode=0, stdout="", stderr="")
 
             with patch("PostProcessAll.adsk.core.Application.get", return_value=mock_app), \

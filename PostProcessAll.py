@@ -1516,6 +1516,20 @@ def _EnsureLocalModulesLoaded(force=False):
             except Exception as exc:
                 _dbg_global(f"Reload of {mod_name} failed: {exc}")
 
+    try:
+        from pipeline import find_autodesk_fusion_invoking_root, find_autodesk_post_binary, find_autodesk_system_posts_dir
+        root = find_autodesk_fusion_invoking_root()
+        if root and "AUTODESK_FUSION_ROOT" not in os.environ:
+            os.environ["AUTODESK_FUSION_ROOT"] = root
+        post_b = find_autodesk_post_binary()
+        if post_b and "AUTODESK_POST_BINARY" not in os.environ:
+            os.environ["AUTODESK_POST_BINARY"] = post_b
+        sys_p = find_autodesk_system_posts_dir()
+        if sys_p and "AUTODESK_SYSTEM_POSTS_DIR" not in os.environ:
+            os.environ["AUTODESK_SYSTEM_POSTS_DIR"] = sys_p
+    except Exception as exc:
+        _dbg_global(f"_EnsureLocalModulesLoaded invoking root discovery failed: {exc}")
+
 
 def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_properties=None, target_dir=None, stock_mode=None, unit=None):
     """Write sidecar config for universal_dumper.cps when spawned by Fusion 360's C++ host process."""
