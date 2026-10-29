@@ -297,6 +297,11 @@ class PipelineOrchestrator:
                 combined_ctx["programName"] = str(program_name)
             if post_properties:
                 combined_ctx["postProperties"] = post_properties
+                if "maximumSpindleSpeed" in post_properties:
+                    try:
+                        combined_ctx["maximumSpindleSpeed"] = float(post_properties["maximumSpindleSpeed"])
+                    except (TypeError, ValueError):
+                        pass
 
             if is_turning is None:
                 is_turning = any(

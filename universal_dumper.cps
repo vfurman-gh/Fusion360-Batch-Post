@@ -186,6 +186,26 @@ onOpen = function() {
   dumpData.programName = programName;
   dumpData.programComment = programComment;
   dumpData.stockMode = "";
+  dumpData.maximumSpindleSpeed = 0;
+  try {
+    if (typeof getProperty === "function") {
+      var pMax = getProperty("maximumSpindleSpeed");
+      if (typeof pMax === "number" && pMax > 0) {
+        dumpData.maximumSpindleSpeed = pMax;
+      }
+    }
+  } catch (e) {}
+  if (!dumpData.maximumSpindleSpeed && typeof properties === "object" && properties && properties.maximumSpindleSpeed) {
+    try {
+      var pVal = (typeof properties.maximumSpindleSpeed === "object") ? properties.maximumSpindleSpeed.value : properties.maximumSpindleSpeed;
+      if (typeof pVal === "number" && pVal > 0) {
+        dumpData.maximumSpindleSpeed = pVal;
+      }
+    } catch (e) {}
+  }
+  if (!dumpData.maximumSpindleSpeed && _cfgProps && typeof _cfgProps.maximumSpindleSpeed === "number" && _cfgProps.maximumSpindleSpeed > 0) {
+    dumpData.maximumSpindleSpeed = _cfgProps.maximumSpindleSpeed;
+  }
   try {
     var cfg = _getDumperConfig();
     if (cfg && cfg.stockMode) {
@@ -194,6 +214,9 @@ onOpen = function() {
     if (cfg && typeof cfg.unit !== "undefined" && cfg.unit !== null) {
       unit = cfg.unit;
       dumpData.unit = unit;
+    }
+    if (cfg && typeof cfg.maximumSpindleSpeed === "number" && cfg.maximumSpindleSpeed > 0) {
+      dumpData.maximumSpindleSpeed = cfg.maximumSpindleSpeed;
     }
   } catch (e) {}
   try {
@@ -262,6 +285,28 @@ onSection = function() {
   t._compDisplacement = tool.getCompensationDisplacement ? serializeVector(tool.getCompensationDisplacement()) : {x: 0, y: 0, z: 0};
   t._toolTypeName = (typeof getToolTypeName === "function" && tool.type !== undefined) ? getToolTypeName(tool.type) : "";
 
+  var secMaxRpm = 0;
+  if (typeof tool.maximumSpindleSpeed === "number" && tool.maximumSpindleSpeed > 0) {
+    secMaxRpm = tool.maximumSpindleSpeed;
+  } else if (typeof tool.getMaximumSpindleSpeed === "function") {
+    try {
+      secMaxRpm = tool.getMaximumSpindleSpeed() || 0;
+    } catch (e) {}
+  }
+  if (!secMaxRpm && dumpData.maximumSpindleSpeed) {
+    secMaxRpm = dumpData.maximumSpindleSpeed;
+  }
+  var secSurfSpeed = 0;
+  if (typeof tool.surfaceSpeed === "number" && tool.surfaceSpeed > 0) {
+    secSurfSpeed = tool.surfaceSpeed;
+  } else if (typeof tool.getSurfaceSpeed === "function") {
+    try {
+      secSurfSpeed = tool.getSurfaceSpeed() || 0;
+    } catch (e) {}
+  }
+  t.maximumSpindleSpeed = secMaxRpm;
+  t.surfaceSpeed = secSurfSpeed;
+
   var zRange = currentSection.getGlobalZRange ? currentSection.getGlobalZRange() : null;
   var isMulti = currentSection.isMultiAxis ? currentSection.isMultiAxis() : false;
 
@@ -277,6 +322,8 @@ onSection = function() {
     workPlane: serializeMatrix(currentSection.workPlane),
     spindle: currentSection.spindle,
     feedMode: currentSection.feedMode,
+    maximumSpindleSpeed: secMaxRpm,
+    surfaceSpeed: secSurfSpeed,
     toolOrientation: currentSection.toolOrientation || 0,
     partCatcher: currentSection.partCatcher,
     tailstock: currentSection.tailstock,

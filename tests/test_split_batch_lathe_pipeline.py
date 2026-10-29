@@ -151,6 +151,111 @@ class TestSplitBatchLathePipeline(unittest.TestCase):
             self.assertIn("T0202", gcode)
             self.assertLess(gcode.find("T0606"), gcode.find("T0202"))
 
+    def test_04_dynamic_css_feed_and_rpm_scaling_and_constant_mrr(self):
+        """Verify dynamic CSS calculates varying RPM/feedrate per radius and maintains constant MRR."""
+        context = {
+            "unit": 1,  # Metric (mm)
+            "highFeedrate": 0,
+            "maximumSpindleSpeed": 2000.0,
+            "sections": [
+                {
+                    "id": 0,
+                    "type": 1,  # TYPE_TURNING
+                    "feedMode": 1,  # FEED_PER_REVOLUTION
+                    "strategy": "turningProfileRoughing",
+                    "params": {
+                        "operation-comment": "Roughing CSS",
+                        "operation:tool_useConstantSurfaceSpeed": 1,
+                        "operation:tool_surfaceSpeed": 76000.0,  # 76 m/min = 76000 mm/min
+                        "operation:tool_maximumSpindleSpeed": 2000.0,
+                        "operation:tool_feedCuttingRel": 0.127,  # mm/rev
+                    },
+                    "tool": {
+                        "number": 1,
+                        "_isTurningTool": True,
+                        "_spindleMode": 1,  # SPINDLE_CONSTANT_SURFACE_SPEED
+                        "surfaceSpeed": 76000.0,
+                        "maximumSpindleSpeed": 2000.0,
+                    },
+                    "events": [
+                        # Pass 1: R=14.0 mm (unclamped: N = 76000 / (2*pi*14) ≈ 863.99 RPM)
+                        {"type": "onLinear", "sx": 14.0, "sy": 0.0, "sz": 0.0, "x": 14.0, "y": 0.0, "z": -20.0, "feed": 0.127},
+                        # Pass 2: R=7.0 mm (unclamped: N = 76000 / (2*pi*7) ≈ 1727.97 RPM)
+                        {"type": "onLinear", "sx": 7.0, "sy": 0.0, "sz": 0.0, "x": 7.0, "y": 0.0, "z": -20.0, "feed": 0.127},
+                        # Pass 3: R=2.0 mm (clamped: ideal N ≈ 6047.88 RPM -> clamped to 2000.0 RPM)
+                        {"type": "onLinear", "sx": 2.0, "sy": 0.0, "sz": 0.0, "x": 2.0, "y": 0.0, "z": -20.0, "feed": 0.127},
+                    ],
+                }
+            ],
+        }
+
+        segments = parse_context_dump(context)
+        self.assertEqual(len(segments), 3)
+
+        # Pass 1: R = 14 mm
+        self.assertAlmostEqual(segments[0].spindle_rpm, 76000.0 / (2 * 3.1415926535 * 14.0), delta=1.0)
+        self.assertAlmostEqual(segments[0].feedrate_mmpm, 0.127 * segments[0].spindle_rpm, delta=0.5)
+
+        # Pass 2: R = 7 mm
+        self.assertAlmostEqual(segments[1].spindle_rpm, 76000.0 / (2 * 3.1415926535 * 7.0), delta=1.0)
+        self.assertAlmostEqual(segments[1].feedrate_mmpm, 0.127 * segments[1].spindle_rpm, delta=0.5)
+        self.assertGreater(segments[1].spindle_rpm, segments[0].spindle_rpm)
+        self.assertGreater(segments[1].feedrate_mmpm, segments[0].feedrate_mmpm)
+
+        # Pass 3: R = 2 mm (clamped to 2000 RPM)
+        self.assertEqual(segments[2].spindle_rpm, 2000.0)
+        self.assertAlmostEqual(segments[2].feedrate_mmpm, 0.127 * 2000.0, delta=0.5)
+
+    def test_05_max_rpm_propagation_hierarchy(self):
+        """Verify max spindle RPM resolves from NCProgram postProperties, root context, or tool/op params."""
+        # 1. Resolved from NCProgram postProperties
+        ctx_nc = {
+            "unit": 1,
+            "postProperties": {"maximumSpindleSpeed": 1850.0},
+            "sections": [
+                {
+                    "id": 0, "type": 1, "feedMode": 1,
+                    "params": {"operation:tool_surfaceSpeed": 76000.0},
+                    "tool": {"_isTurningTool": True, "_spindleMode": 1},
+                    "events": [{"type": "onLinear", "sx": 1.0, "sy": 0.0, "sz": 0.0, "x": 1.0, "y": 0.0, "z": -10.0, "feed": 0.1}],
+                }
+            ],
+        }
+        segs_nc = parse_context_dump(ctx_nc)
+        self.assertEqual(segs_nc[0].spindle_rpm, 1850.0)
+
+        # 2. Resolved from root maximumSpindleSpeed
+        ctx_root = {
+            "unit": 1,
+            "maximumSpindleSpeed": 2250.0,
+            "sections": [
+                {
+                    "id": 0, "type": 1, "feedMode": 1,
+                    "params": {"operation:tool_surfaceSpeed": 76000.0},
+                    "tool": {"_isTurningTool": True, "_spindleMode": 1},
+                    "events": [{"type": "onLinear", "sx": 1.0, "sy": 0.0, "sz": 0.0, "x": 1.0, "y": 0.0, "z": -10.0, "feed": 0.1}],
+                }
+            ],
+        }
+        segs_root = parse_context_dump(ctx_root)
+        self.assertEqual(segs_root[0].spindle_rpm, 2250.0)
+
+        # 3. Operation-specific parameter overrides global post property
+        ctx_op_override = {
+            "unit": 1,
+            "maximumSpindleSpeed": 3000.0,
+            "sections": [
+                {
+                    "id": 0, "type": 1, "feedMode": 1,
+                    "params": {"operation:tool_surfaceSpeed": 76000.0, "operation:tool_maximumSpindleSpeed": 1500.0},
+                    "tool": {"_isTurningTool": True, "_spindleMode": 1},
+                    "events": [{"type": "onLinear", "sx": 1.0, "sy": 0.0, "sz": 0.0, "x": 1.0, "y": 0.0, "z": -10.0, "feed": 0.1}],
+                }
+            ],
+        }
+        segs_op = parse_context_dump(ctx_op_override)
+        self.assertEqual(segs_op[0].spindle_rpm, 1500.0)
+
 
 if __name__ == "__main__":
     unittest.main()

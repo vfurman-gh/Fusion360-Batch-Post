@@ -49,6 +49,12 @@ def merge_context_dumps(sources: Sequence[Union[str, Dict[str, Any]]]) -> Dict[s
     merged = copy.deepcopy(dumps[0])
     merged["sections"] = []
 
+    if not merged.get("maximumSpindleSpeed"):
+        for d in dumps:
+            if d.get("maximumSpindleSpeed"):
+                merged["maximumSpindleSpeed"] = d["maximumSpindleSpeed"]
+                break
+
     global_sec_id = 0
     for batch_idx, d in enumerate(dumps):
         for k, v in d.get("globalParams", {}).items():
@@ -96,6 +102,42 @@ def parse_context_dump(
         sec_type = sec.get("type", 0)  # 0 = TYPE_MILLING, 1 = TYPE_TURNING
         feed_mode = sec.get("feedMode", 0)
 
+        is_turning = (sec_type == 1) or bool(tool_info.get("_isTurningTool", False))
+        is_css = is_turning and (
+            tool_info.get("_spindleMode") == 1
+            or tool_info.get("spindleMode") == 1
+            or bool(params.get("operation:tool_useConstantSurfaceSpeed"))
+            or sec.get("spindleMode") == 1
+        )
+        raw_surface_speed = (
+            params.get("operation:tool_surfaceSpeed")
+            or tool_info.get("surfaceSpeed")
+            or tool_info.get("_surfaceSpeed")
+            or sec.get("surfaceSpeed")
+            or 0.0
+        )
+        surface_speed_mmpm = float(raw_surface_speed) * scale
+
+        # Resolve maximum spindle speed
+        sec_max_rpm = None
+        for cand in (
+            params.get("operation:tool_maximumSpindleSpeed"),
+            tool_info.get("maximumSpindleSpeed"),
+            tool_info.get("_maximumSpindleSpeed"),
+            sec.get("maximumSpindleSpeed"),
+            data.get("maximumSpindleSpeed"),
+            data.get("postProperties", {}).get("maximumSpindleSpeed") if isinstance(data.get("postProperties"), dict) else None,
+        ):
+            if cand is not None:
+                try:
+                    v = float(cand)
+                    if v > 0:
+                        sec_max_rpm = v
+                        break
+                except (TypeError, ValueError):
+                    pass
+        max_spindle_rpm = sec_max_rpm if sec_max_rpm is not None else 5000.0
+
         z_clearance_mm = None
         for k in ("operation:zClearance", "operation:clearanceHeight_value"):
             if k in params and params[k] is not None:
@@ -113,6 +155,38 @@ def parse_context_dump(
                     break
                 except (TypeError, ValueError):
                     pass
+
+        def _calc_move_feed_and_rpm(
+            raw_feed: float,
+            s_pos: Vector3D,
+            e_pos: Vector3D,
+            ev_rpm: Optional[float] = None,
+        ) -> Tuple[float, float]:
+            feed_mm = float(raw_feed) * scale
+            if is_css and surface_speed_mmpm > 0:
+                r_eff = 0.5 * (abs(s_pos.x) + abs(e_pos.x))
+                if r_eff > 1e-4:
+                    calc_rpm = surface_speed_mmpm / (2.0 * math.pi * r_eff)
+                    active_rpm = min(max_spindle_rpm, calc_rpm)
+                else:
+                    active_rpm = max_spindle_rpm
+            else:
+                active_rpm = float(ev_rpm or spindle_rpm) if ev_rpm is not None else spindle_rpm
+                if active_rpm <= 0:
+                    active_rpm = 1000.0
+
+            is_feed_per_rev = (
+                feed_mode in (1, 3)
+                or bool(params.get("operation:tool_useFeedPerRevolution"))
+                or (sec_type == 1 and feed_mode != 0 and float(raw_feed) < 2.0)
+            )
+
+            if is_feed_per_rev:
+                feed_mmpm = feed_mm * active_rpm
+            else:
+                feed_mmpm = feed_mm
+
+            return feed_mmpm, active_rpm
 
         def _to_mmpm(raw_feed: float, rpm: float, fm: int) -> float:
             feed_mm = float(raw_feed) * scale
@@ -190,8 +264,8 @@ def parse_context_dump(
                 dist = math.hypot(end_pos.x - start_pos.x, end_pos.y - start_pos.y, end_pos.z - start_pos.z)
                 if dist < 1e-9:
                     continue
-                rpm = float(ev.get("rpm", spindle_rpm) or spindle_rpm)
-                feed_mmpm = _to_mmpm(float(ev.get("feed", 0.0)), rpm, feed_mode)
+                raw_ev_rpm = float(ev.get("rpm", 0.0)) if ev.get("rpm") else None
+                feed_mmpm, rpm = _calc_move_feed_and_rpm(float(ev.get("feed", 0.0)), start_pos, end_pos, raw_ev_rpm)
                 duration = (dist / max(1.0, feed_mmpm)) * 60.0 if feed_mmpm > 0 else 0.0
                 segment_id += 1
                 segments.append(
@@ -239,8 +313,8 @@ def parse_context_dump(
                     float(ev.get("cy", 0.0)) * scale,
                     float(ev.get("cz", 0.0)) * scale,
                 )
-                rpm = float(ev.get("rpm", spindle_rpm) or spindle_rpm)
-                feed_mmpm = _to_mmpm(float(ev.get("feed", 0.0)), rpm, feed_mode)
+                raw_ev_rpm = float(ev.get("rpm", 0.0)) if ev.get("rpm") else None
+                feed_mmpm, rpm = _calc_move_feed_and_rpm(float(ev.get("feed", 0.0)), start_pos, end_pos, raw_ev_rpm)
                 radius_mm = float(ev.get("radius", 0.0)) * scale
                 sweep_rad = abs(float(ev.get("sweep", 0.0)))
                 chord = math.hypot(end_pos.x - start_pos.x, end_pos.y - start_pos.y, end_pos.z - start_pos.z)
@@ -293,9 +367,13 @@ def parse_context_dump(
                         float(sub_mv.get("y", 0.0)) * scale,
                         float(sub_mv.get("z", 0.0)) * scale,
                     )
-                    rpm = float(sub_mv.get("rpm", spindle_rpm) or spindle_rpm)
                     is_rap = (sub_t == "onRapid")
-                    f_mmpm = default_rapid_feed_mmpm if is_rap else _to_mmpm(float(sub_mv.get("feed", 0.0)), rpm, feed_mode)
+                    if is_rap:
+                        f_mmpm = default_rapid_feed_mmpm
+                        rpm = float(sub_mv.get("rpm", spindle_rpm) or spindle_rpm)
+                    else:
+                        raw_ev_rpm = float(sub_mv.get("rpm", 0.0)) if sub_mv.get("rpm") else None
+                        f_mmpm, rpm = _calc_move_feed_and_rpm(float(sub_mv.get("feed", 0.0)), s_pos, e_pos, raw_ev_rpm)
                     dist = math.hypot(e_pos.x - s_pos.x, e_pos.y - s_pos.y, e_pos.z - s_pos.z)
                     duration = (dist / max(1.0, f_mmpm)) * 60.0 if f_mmpm > 0 else 0.0
                     segment_id += 1

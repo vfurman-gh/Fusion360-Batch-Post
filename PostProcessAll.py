@@ -1442,6 +1442,22 @@ def _ExtractPostProperties(program=None) -> dict:
                     props[p_name] = val
             except Exception:
                 pass
+
+        # Check standard NCProgram parameters if maximumSpindleSpeed was not in postParameters
+        if "maximumSpindleSpeed" not in props:
+            prog_params = getattr(program, "parameters", None)
+            if prog_params:
+                for candidate_name in ("maximumSpindleSpeed", "maxSpindleSpeed", "nc_program_maximum_spindle_speed"):
+                    try:
+                        p_obj = prog_params.itemByName(candidate_name)
+                        if p_obj:
+                            val_obj = getattr(p_obj, "value", None)
+                            val = getattr(val_obj, "value", None) if val_obj is not None else getattr(p_obj, "value", None)
+                            if isinstance(val, (int, float)) and val > 0:
+                                props["maximumSpindleSpeed"] = val
+                                break
+                    except Exception:
+                        pass
     except Exception as exc:
         _dbg_global(f"_ExtractPostProperties warning: {exc}")
     return props
@@ -1510,6 +1526,11 @@ def _WriteDumperConfig(base_post_path=None, target_cnc_path=None, post_propertie
         cfg["targetIntermediateCnc"] = os.path.abspath(target_cnc_path)
     if post_properties and isinstance(post_properties, dict):
         cfg["postProperties"] = post_properties
+        if "maximumSpindleSpeed" in post_properties:
+            try:
+                cfg["maximumSpindleSpeed"] = float(post_properties["maximumSpindleSpeed"])
+            except (TypeError, ValueError):
+                pass
     if stock_mode:
         cfg["stockMode"] = str(stock_mode)
     if unit is not None:
