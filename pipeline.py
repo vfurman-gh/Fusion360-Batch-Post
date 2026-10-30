@@ -57,19 +57,6 @@ def find_fusion_root_from_path(p: Optional[str]) -> Optional[str]:
     return None
 
 
-def is_unactivated_update(root: Optional[str]) -> bool:
-    """
-    Check if a webdeploy directory is an unactivated background update staged by the streamer.
-    Unactivated binaries can hang or fail due to uninitialized licensing, locks, or gatekeeper quarantine.
-    """
-    if not root or not os.path.isdir(root):
-        return False
-    # Streamer writes streamingsession.json while staging an update before Fusion is restarted
-    if os.path.isfile(os.path.join(root, "streamingsession.json")):
-        return True
-    return False
-
-
 def get_post_binary_from_root(root: Optional[str]) -> Optional[str]:
     """Locate CAM post processor binary inside a specific Fusion root directory."""
     if not root:
@@ -216,14 +203,8 @@ def find_autodesk_post_binary() -> Optional[str]:
     if not candidates:
         return None
 
-    def _candidate_sort_key(p: str):
-        root = find_fusion_root_from_path(p)
-        unactivated = 1 if is_unactivated_update(root) else 0
-        mtime = os.path.getmtime(p) if os.path.exists(p) else 0.0
-        # Activated builds (unactivated=0) take precedence over unactivated builds (1), then sorted newest by mtime
-        return (unactivated, -mtime)
-
-    candidates.sort(key=_candidate_sort_key)
+    # Fallback: sort descending by modification time if no invoking installation was detected
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates[0]
 
 
@@ -274,13 +255,7 @@ def find_autodesk_system_posts_dir() -> Optional[str]:
     if not candidates:
         return None
 
-    def _posts_dir_sort_key(p: str):
-        root = find_fusion_root_from_path(p)
-        unactivated = 1 if is_unactivated_update(root) else 0
-        mtime = os.path.getmtime(p) if os.path.exists(p) else 0.0
-        return (unactivated, -mtime)
-
-    candidates.sort(key=_posts_dir_sort_key)
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates[0]
 
 

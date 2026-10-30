@@ -1485,56 +1485,6 @@ class TestPostProcessAllPipelineIntegration(unittest.TestCase):
                 resolved_bin = find_autodesk_post_binary()
                 self.assertEqual(os.path.abspath(resolved_bin), os.path.abspath(older_post_bin))
 
-    def test_w1c_unactivated_update_with_newer_mtime_is_deprioritized_when_fusion_not_running(self):
-        """Verify unactivated background updates (with streamingsession.json) are not picked over activated builds."""
-        from pipeline import (
-            find_autodesk_post_binary,
-            find_autodesk_system_posts_dir,
-            is_unactivated_update,
-        )
-        from unittest.mock import patch
-        import time
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            older_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_older_activated")
-            newer_root = os.path.join(tmp_dir, "Autodesk", "webdeploy", "production", "hash_newer_unactivated")
-
-            older_cam = os.path.join(older_root, "Applications", "CAM360")
-            newer_cam = os.path.join(newer_root, "Applications", "CAM360")
-            older_posts = os.path.join(older_cam, "Data", "Posts")
-            newer_posts = os.path.join(newer_cam, "Data", "Posts")
-
-            os.makedirs(older_posts, exist_ok=True)
-            os.makedirs(newer_posts, exist_ok=True)
-
-            older_post_bin = os.path.join(older_cam, "post.exe")
-            newer_post_bin = os.path.join(newer_cam, "post.exe")
-
-            with open(older_post_bin, "w") as f:
-                f.write("older_activated")
-            with open(newer_post_bin, "w") as f:
-                f.write("newer_unactivated")
-
-            # Staged background update has streamingsession.json
-            with open(os.path.join(newer_root, "streamingsession.json"), "w") as f:
-                f.write('{"process-name": "Update"}')
-
-            self.assertFalse(is_unactivated_update(older_root))
-            self.assertTrue(is_unactivated_update(newer_root))
-
-            now = time.time()
-            # newer_post_bin has newer mtime, simulating freshly downloaded background update
-            os.utime(older_post_bin, (now - 300, now - 300))
-            os.utime(newer_post_bin, (now, now))
-
-            # When Fusion is NOT running, candidate sorting must prioritize older activated build
-            with patch.dict(os.environ, {"LOCALAPPDATA": tmp_dir}):
-                found_bin = find_autodesk_post_binary()
-                self.assertEqual(os.path.abspath(found_bin), os.path.abspath(older_post_bin))
-
-                found_posts = find_autodesk_system_posts_dir()
-                self.assertEqual(os.path.abspath(found_posts), os.path.abspath(older_posts))
-
     def test_w1d_pipeline_orchestrator_hang_timeout_protection(self):
         """Verify PipelineOrchestrator enforces subprocess timeouts to prevent hanging on unactivated binaries."""
         import subprocess
